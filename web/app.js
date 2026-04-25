@@ -8,11 +8,13 @@ let currentOutputs = [];
 let pendingUploadFile = null;
 let taskHistory = [];
 let taskHistoryIndex = -1;
+let taskDrafts = new Map();
 let interactiveHistory = [];
 let interactiveHistoryIndex = -1;
 let interactiveMode = false;
 let interactiveReady = false;
 let sseReader = null;
+let sseStreamID = 0;
 let agentsPollTimer = null;
 let authExpiryTimer = null;
 let allAgents = [];
@@ -22,6 +24,12 @@ let killConfirmTimer = null;
 let armedKillAgentID = null;
 let hasHydratedOutputs = false;
 let followOutput = true;
+let pendingPathCompletion = null;
+let queuedCompletionPath = '';
+let pathCompletionTimer = null;
+let pathBrowseStates = new Map();
+let deferredPathCompletionOutputs = new Map();
+let deferredPathBrowseOutputs = new Map();
 
 const MAX_LOGIN_BODY_BYTES = 4096;
 const MAX_UPLOAD_BYTES = 36 * 1024;
@@ -30,6 +38,10 @@ const MAX_REMOTE_PATH = 4096;
 const POLL_INTERVAL_MS = 5000;
 const KILL_CONFIRM_WINDOW_MS = 10000;
 const OUTPUT_FOLLOW_THRESHOLD_PX = 40;
+const PATH_COMPLETION_DEBOUNCE_MS = 150;
+const PATH_BROWSE_RENEW_MS = 60 * 1000;
+const PATH_BROWSE_FAST_WINDOW_MS = 2 * 60 * 1000;
+const PENDING_TASK_ID = '__pending__';
 
 const TASK_TYPES = {
   shell: {
@@ -43,7 +55,7 @@ const TASK_TYPES = {
   download: {
     buttonLabel: 'Queue Download',
     help: 'Request a remote file path and receive the result as a browser download.',
-    note: 'Download paths are validated for control characters before the request is queued.',
+    note: 'Path suggestions are prepared automatically for online sessions.',
     placeholder: 'Enter a remote file path',
     requiresPayload: true,
     inputMode: 'text',
@@ -166,6 +178,7 @@ function beginSession(nextToken) {
 function setLoggedOutState(message) {
   stopAgentPolling();
   clearSessionExpiry();
+  resetAllPathBrowserStates(true);
   stopSSEStream();
   exitInteractiveMode(false);
 
@@ -178,6 +191,7 @@ function setLoggedOutState(message) {
   pendingUploadFile = null;
   taskHistory = [];
   taskHistoryIndex = -1;
+  taskDrafts = new Map();
   interactiveHistory = [];
   interactiveHistoryIndex = -1;
   selectedTaskType = 'shell';
@@ -185,6 +199,13 @@ function setLoggedOutState(message) {
   setTaskStatus('', '');
   hasHydratedOutputs = false;
   followOutput = true;
+  pendingPathCompletion = null;
+  queuedCompletionPath = '';
+  pathBrowseStates = new Map();
+  deferredPathCompletionOutputs = new Map();
+  deferredPathBrowseOutputs = new Map();
+  clearPathCompletionTimer();
+  hidePathSuggestions();
 
   $('main-view').hidden = true;
   $('login-view').hidden = false;
@@ -385,12 +406,13 @@ function updateTaskContextStatus() {
 
 function setQueueBusy(isBusy, message) {
   taskRequestInFlight = isBusy;
+  const downloadWaiting = selectedTaskType === 'download' && !activePathBrowseReady();
 
   taskTypeButtons.forEach(button => {
     button.disabled = isBusy || interactiveMode;
   });
 
-  $('send-btn').disabled = isBusy;
+  $('send-btn').disabled = isBusy || downloadWaiting;
   $('upload-btn').disabled = isBusy || interactiveMode || !activeAgentID;
   $('upload-confirm-btn').disabled = isBusy;
   $('upload-cancel-btn').disabled = isBusy;
@@ -401,7 +423,7 @@ function setQueueBusy(isBusy, message) {
   } else if (!$('upload-row').hidden) {
     $('upload-path').disabled = isBusy;
   } else {
-    $('task-input').disabled = isBusy || !TASK_TYPES[selectedTaskType].requiresPayload;
+    $('task-input').disabled = isBusy || !TASK_TYPES[selectedTaskType].requiresPayload || downloadWaiting;
   }
 
   if (isBusy) setTaskStatus(message || 'Submitting task...', 'status-busy');
@@ -434,6 +456,7 @@ async function loadAgents() {
 
     updateAgentStats(allAgents);
     updateRefreshMeta(allAgents.length);
+    warmOnlinePathBrowsers(allAgents);
     syncActiveAgent();
     renderAgentList();
   } catch (_) {
@@ -499,11 +522,15 @@ function syncActiveAgent() {
   }
 
   activeAgent = match;
+  ensurePathBrowserForAgent(activeAgent);
   updateSessionHeader();
 }
 
 function clearActiveSession() {
+  saveActiveTaskDraft();
   exitInteractiveMode(false);
+  resetActivePathCompletion();
+  stopSSEStream();
   activeAgentID = null;
   activeAgent = null;
   currentOutputs = [];
@@ -676,7 +703,9 @@ function formatRelativeAge(ageMs) {
 }
 
 function selectAgent(agent) {
+  saveActiveTaskDraft();
   exitInteractiveMode(false);
+  resetActivePathCompletion();
   activeAgentID = agent.id;
   activeAgent = agent;
   seenTaskIDs = new Set();
@@ -686,12 +715,16 @@ function selectAgent(agent) {
   followOutput = true;
   $('output').textContent = '';
   hideUploadPrompt();
+  stopSSEStream();
   renderAgentList();
   updateSessionHeader();
   updateTaskContextStatus();
   updateOutputControls();
   updateOutputEmptyState();
+  startSSEStream(agent.id, false);
+  ensurePathBrowserForAgent(agent);
   loadOutputs();
+  restoreActiveTaskDraft();
   focusPrimaryInput(false);
 }
 
@@ -781,6 +814,16 @@ function handleTaskOutput(output, historical) {
     return;
   }
 
+  if (output.type === 'pathbrowse') {
+    handlePathBrowseOutput(output);
+    return;
+  }
+
+  if (output.type === 'complete') {
+    handlePathCompletionOutput(output);
+    return;
+  }
+
   if (output.error) {
     appendOutput('[err ' + short + ' ' + ts + '] ' + output.error);
     return;
@@ -812,16 +855,26 @@ taskTypeButtons.forEach(button => {
 
 function setTaskType(type) {
   if (!TASK_TYPES[type]) return;
+  saveActiveTaskDraft();
   selectedTaskType = type;
+  pendingPathCompletion = null;
+  queuedCompletionPath = '';
+  clearPathCompletionTimer();
+  hidePathSuggestions();
   taskHistoryIndex = -1;
   if (type !== 'kill') clearKillConfirmation();
   clearTaskInputError();
   applyTaskTypeUI();
+  restoreActiveTaskDraft();
+  if (type === 'download') schedulePathCompletion();
   focusPrimaryInput(true);
 }
 
 function applyTaskTypeUI() {
   const config = TASK_TYPES[selectedTaskType];
+  const downloadSelected = selectedTaskType === 'download';
+  const downloadWaiting = downloadSelected && !activePathBrowseReady();
+  const agentOnline = activeAgent && getAgentState(activeAgent) === 'online';
 
   taskTypeButtons.forEach(button => {
     const active = button.dataset.taskType === selectedTaskType;
@@ -832,6 +885,7 @@ function applyTaskTypeUI() {
 
   if (interactiveMode) {
     $('task-type-list').hidden = true;
+    hidePathSuggestions();
     return;
   }
 
@@ -839,10 +893,14 @@ function applyTaskTypeUI() {
   $('task-help').classList.remove('error-copy');
   $('composer-note').classList.remove('error-note');
   $('task-help').textContent = config.help;
-  $('composer-note').textContent = config.note;
+  $('composer-note').textContent = downloadSelected
+    ? pathBrowserComposerNote(agentOnline)
+    : config.note;
   $('task-input').classList.remove('input-error');
-  $('task-input').disabled = taskRequestInFlight || !config.requiresPayload;
-  $('task-input').placeholder = config.placeholder;
+  $('task-input').disabled = taskRequestInFlight || !config.requiresPayload || downloadWaiting;
+  $('task-input').placeholder = downloadSelected
+    ? pathBrowserPlaceholder(agentOnline)
+    : config.placeholder;
   $('task-input').inputMode = config.inputMode;
   $('task-input').maxLength = selectedTaskType === 'download'
     ? MAX_REMOTE_PATH
@@ -853,7 +911,7 @@ function applyTaskTypeUI() {
     ? 'Confirm Kill'
     : config.buttonLabel;
   $('send-btn').hidden = false;
-  $('send-btn').disabled = taskRequestInFlight;
+  $('send-btn').disabled = taskRequestInFlight || downloadWaiting;
   $('send-btn').classList.toggle('warn-button', selectedTaskType === 'interactive');
   $('send-btn').classList.toggle('danger-button', selectedTaskType === 'kill');
   $('upload-btn').hidden = false;
@@ -864,6 +922,8 @@ function applyTaskTypeUI() {
   if (!config.requiresPayload) {
     $('task-input').value = '';
   }
+  if (selectedTaskType !== 'download') hidePathSuggestions();
+  if (downloadSelected && agentOnline) ensurePathBrowserForAgent(activeAgent);
 
   updateTaskContextStatus();
 }
@@ -881,7 +941,58 @@ function clearTaskInputError() {
   if (!interactiveMode) $('task-help').textContent = TASK_TYPES[selectedTaskType].help;
 }
 
-$('task-input').addEventListener('input', clearTaskInputError);
+function taskDraftKey(agentID, taskType) {
+  return agentID + ':' + taskType;
+}
+
+function saveActiveTaskDraft() {
+  if (!activeAgentID || interactiveMode || !$('upload-row').hidden) return;
+  const config = TASK_TYPES[selectedTaskType];
+  if (!config || !config.requiresPayload) return;
+
+  const key = taskDraftKey(activeAgentID, selectedTaskType);
+  const value = $('task-input').value;
+  if (value) taskDrafts.set(key, value);
+  else taskDrafts.delete(key);
+}
+
+function restoreActiveTaskDraft() {
+  if (!activeAgentID || interactiveMode || !$('upload-row').hidden) return;
+  const config = TASK_TYPES[selectedTaskType];
+  if (!config || !config.requiresPayload) return;
+
+  const key = taskDraftKey(activeAgentID, selectedTaskType);
+  $('task-input').value = taskDrafts.get(key) || '';
+  clearTaskInputError();
+  if (selectedTaskType === 'download') schedulePathCompletion();
+}
+
+function clearActiveTaskDraft(taskType) {
+  if (!activeAgentID) return;
+  taskDrafts.delete(taskDraftKey(activeAgentID, taskType));
+}
+
+function pathBrowserComposerNote(agentOnline) {
+  if (!agentOnline) return 'Path browser starts automatically once the selected session is online.';
+  if (!activePathBrowseReady()) return 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
+  return TASK_TYPES.download.note;
+}
+
+function pathBrowserPlaceholder(agentOnline) {
+  if (!agentOnline) return 'Waiting for online session...';
+  if (!activePathBrowseReady()) return 'Preparing remote path browser...';
+  return TASK_TYPES.download.placeholder;
+}
+
+$('task-input').addEventListener('input', () => {
+  clearTaskInputError();
+  saveActiveTaskDraft();
+  if (selectedTaskType === 'download' && !interactiveMode) {
+    schedulePathCompletion();
+  } else {
+    hidePathSuggestions();
+  }
+});
 $('upload-path').addEventListener('input', () => $('upload-path').classList.remove('input-error'));
 
 $('send-btn').addEventListener('click', sendTask);
@@ -905,6 +1016,398 @@ $('task-input').addEventListener('keydown', e => {
     else navigateTaskHistory(1);
   }
 });
+
+function schedulePathCompletion() {
+  clearPathCompletionTimer();
+
+  const path = $('task-input').value.trim();
+  if (!activePathBrowseReady() || !path || !activeAgentID || taskRequestInFlight || selectedTaskType !== 'download' || hasInvalidPathChars(path)) {
+    hidePathSuggestions();
+    return;
+  }
+
+  queuedCompletionPath = path;
+  pathCompletionTimer = window.setTimeout(() => {
+    pathCompletionTimer = null;
+    requestPathCompletion(path);
+  }, PATH_COMPLETION_DEBOUNCE_MS);
+}
+
+function clearPathCompletionTimer() {
+  if (pathCompletionTimer === null) return;
+  window.clearTimeout(pathCompletionTimer);
+  pathCompletionTimer = null;
+}
+
+function warmOnlinePathBrowsers(agents) {
+  const liveIDs = new Set();
+
+  for (const agent of agents) {
+    if (!agent || !agent.id) continue;
+    liveIDs.add(agent.id);
+
+    if (getAgentState(agent) === 'online') {
+      ensurePathBrowserForAgent(agent);
+    } else {
+      markPathBrowserOffline(agent.id);
+    }
+  }
+
+  for (const agentID of Array.from(pathBrowseStates.keys())) {
+    if (!liveIDs.has(agentID)) resetPathBrowserState(agentID, false);
+  }
+}
+
+function getPathBrowseState(agentID, create) {
+  if (!agentID) return null;
+  let state = pathBrowseStates.get(agentID);
+  if (!state && create) {
+    state = {
+      ready: false,
+      readyAt: 0,
+      startTaskID: '',
+      renewTimer: null,
+    };
+    pathBrowseStates.set(agentID, state);
+  }
+  return state || null;
+}
+
+function activePathBrowseReady() {
+  if (!activeAgentID || !activeAgent || getAgentState(activeAgent) !== 'online') return false;
+  const state = getPathBrowseState(activeAgentID, false);
+  return pathBrowseStateReady(state);
+}
+
+function pathBrowseStateReady(state) {
+  return Boolean(state && state.ready && Date.now() - state.readyAt < PATH_BROWSE_FAST_WINDOW_MS);
+}
+
+function ensurePathBrowserForAgent(agent) {
+  if (!token || !agent || !agent.id || interactiveMode) return;
+  if (getAgentState(agent) !== 'online') {
+    markPathBrowserOffline(agent.id);
+    return;
+  }
+
+  const state = getPathBrowseState(agent.id, true);
+  if (pathBrowseStateReady(state) || state.startTaskID) return;
+  state.ready = false;
+
+  queuePathBrowseStart(agent.id, false);
+}
+
+async function queuePathBrowseStart(agentID, isRenewal) {
+  const state = getPathBrowseState(agentID, true);
+  if (!token || !agentID || state.startTaskID) return;
+
+  const agent = allAgents.find(item => item.id === agentID) || (agentID === activeAgentID ? activeAgent : null);
+  if (!agent || getAgentState(agent) !== 'online') {
+    markPathBrowserOffline(agentID);
+    return;
+  }
+
+  if (!isRenewal) state.ready = false;
+  state.startTaskID = PENDING_TASK_ID;
+  applyPathBrowserUI(agentID);
+
+  try {
+    const data = await submitTask(agentID, { type: 'pathbrowse', payload: 'start' });
+    if (!data) {
+      state.ready = false;
+      state.startTaskID = '';
+      applyPathBrowserUI(agentID);
+      return;
+    }
+
+    state.startTaskID = data.task_id;
+    if (isRenewal) {
+      state.ready = true;
+      state.readyAt = Date.now();
+      state.startTaskID = '';
+      schedulePathBrowseRenewal(agentID);
+      applyPathBrowserUI(agentID);
+      return;
+    }
+
+    const deferred = deferredPathBrowseOutputs.get(data.task_id);
+    if (deferred) {
+      deferredPathBrowseOutputs.delete(data.task_id);
+      handlePathBrowseOutput(deferred);
+    }
+  } catch (err) {
+    state.ready = false;
+    state.startTaskID = '';
+    if (agentID === activeAgentID) {
+      renderPathSuggestions('', [], 'Path browser failed to start: ' + err.message);
+    }
+    applyPathBrowserUI(agentID);
+  }
+}
+
+function handlePathBrowseOutput(output) {
+  const state = getPathBrowseState(activeAgentID, false);
+  if (!state || !state.startTaskID) return;
+
+  if (state.startTaskID === PENDING_TASK_ID) {
+    deferredPathBrowseOutputs.set(output.task_id, output);
+    return;
+  }
+  if (output.task_id !== state.startTaskID) return;
+
+  state.startTaskID = '';
+
+  if (output.error) {
+    state.ready = false;
+    renderPathSuggestions('', [], output.error);
+    applyPathBrowserUI(activeAgentID);
+    return;
+  }
+
+  state.ready = Boolean(output.output && output.output.includes('ready'));
+  if (state.ready) {
+    const outputTime = output.timestamp ? new Date(output.timestamp).getTime() : NaN;
+    state.readyAt = Number.isFinite(outputTime) ? outputTime : Date.now();
+    if (!pathBrowseStateReady(state)) {
+      state.ready = false;
+      queuePathBrowseStart(activeAgentID, false);
+      applyPathBrowserUI(activeAgentID);
+      return;
+    }
+    schedulePathBrowseRenewal(activeAgentID);
+    if (selectedTaskType === 'download' && $('task-input').value.trim()) schedulePathCompletion();
+  }
+  applyPathBrowserUI(activeAgentID);
+}
+
+function schedulePathBrowseRenewal(agentID) {
+  const state = getPathBrowseState(agentID, false);
+  if (!state) return;
+  clearPathBrowseRenewal(agentID);
+  state.renewTimer = window.setTimeout(() => {
+    state.renewTimer = null;
+    const agent = allAgents.find(item => item.id === agentID);
+    if (state.ready && agent && getAgentState(agent) === 'online') {
+      queuePathBrowseStart(agentID, true);
+    }
+  }, PATH_BROWSE_RENEW_MS);
+}
+
+function clearPathBrowseRenewal(agentID) {
+  const state = getPathBrowseState(agentID, false);
+  if (!state || state.renewTimer === null) return;
+  window.clearTimeout(state.renewTimer);
+  state.renewTimer = null;
+}
+
+function markPathBrowserOffline(agentID) {
+  const state = getPathBrowseState(agentID, false);
+  if (!state) return;
+  clearPathBrowseRenewal(agentID);
+  state.ready = false;
+  state.readyAt = 0;
+  state.startTaskID = '';
+  if (agentID === activeAgentID) applyPathBrowserUI(agentID);
+}
+
+function resetPathBrowserState(agentID, sendStop) {
+  const state = getPathBrowseState(agentID, false);
+  if (state) clearPathBrowseRenewal(agentID);
+  pathBrowseStates.delete(agentID);
+
+  if (sendStop && agentID && token) {
+    apiFetch('/api/agents/' + agentID + '/task', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'pathbrowse', payload: 'stop' }),
+    }).catch(() => {});
+  }
+}
+
+function resetAllPathBrowserStates(sendStop) {
+  for (const agentID of Array.from(pathBrowseStates.keys())) {
+    resetPathBrowserState(agentID, sendStop);
+  }
+}
+
+function resetActivePathCompletion() {
+  pendingPathCompletion = null;
+  queuedCompletionPath = '';
+  deferredPathCompletionOutputs = new Map();
+  clearPathCompletionTimer();
+  hidePathSuggestions();
+}
+
+function applyPathBrowserUI(agentID) {
+  if (agentID === activeAgentID && selectedTaskType === 'download' && !interactiveMode) applyTaskTypeUI();
+}
+
+async function requestPathCompletion(path) {
+  if (!activePathBrowseReady() || !activeAgentID || taskRequestInFlight || selectedTaskType !== 'download') return;
+  if (!path || hasInvalidPathChars(path)) return;
+
+  if (pendingPathCompletion) {
+    queuedCompletionPath = path;
+    return;
+  }
+
+  const targetAgentID = activeAgentID;
+  pendingPathCompletion = {
+    agentID: targetAgentID,
+    taskID: PENDING_TASK_ID,
+    input: path,
+  };
+  showPathSuggestionsLoading(path);
+
+  try {
+    const data = await submitTask(targetAgentID, { type: 'complete', payload: path });
+    if (!data) {
+      pendingPathCompletion = null;
+      hidePathSuggestions();
+      return;
+    }
+    if (!pendingPathCompletion || targetAgentID !== activeAgentID) return;
+    pendingPathCompletion.taskID = data.task_id;
+    const deferred = deferredPathCompletionOutputs.get(data.task_id);
+    if (deferred) {
+      deferredPathCompletionOutputs.delete(data.task_id);
+      handlePathCompletionOutput(deferred);
+    }
+  } catch (err) {
+    pendingPathCompletion = null;
+    renderPathSuggestions(path, [], 'Path completion failed: ' + err.message);
+  }
+}
+
+function handlePathCompletionOutput(output) {
+  if (!pendingPathCompletion) return;
+  if (pendingPathCompletion.taskID === PENDING_TASK_ID) {
+    deferredPathCompletionOutputs.set(output.task_id, output);
+    return;
+  }
+  if (output.task_id !== pendingPathCompletion.taskID) return;
+
+  const pending = pendingPathCompletion;
+  pendingPathCompletion = null;
+
+  if (pending.agentID !== activeAgentID) return;
+
+  const currentPath = $('task-input').value.trim();
+  const nextPath = queuedCompletionPath;
+  queuedCompletionPath = '';
+
+  if (nextPath && nextPath !== pending.input && nextPath === currentPath) {
+    requestPathCompletion(nextPath);
+  }
+
+  if (currentPath !== pending.input) return;
+
+  if (output.error) {
+    renderPathSuggestions(pending.input, [], output.error);
+    return;
+  }
+
+  let result;
+  try {
+    result = JSON.parse(output.output || '{}');
+  } catch (_) {
+    renderPathSuggestions(pending.input, [], 'Path completion returned an invalid response.');
+    return;
+  }
+
+  const items = Array.isArray(result.items) ? result.items : [];
+  renderPathSuggestions(pending.input, items, '');
+}
+
+function showPathSuggestionsLoading(path) {
+  const panel = $('path-suggestions');
+  panel.textContent = '';
+  panel.hidden = false;
+
+  const note = document.createElement('div');
+  note.className = 'path-suggestion-note';
+  note.textContent = 'Searching ' + path + '...';
+  panel.appendChild(note);
+}
+
+function renderPathSuggestions(input, items, message) {
+  const panel = $('path-suggestions');
+  panel.textContent = '';
+  panel.hidden = false;
+
+  const header = document.createElement('div');
+  header.className = 'path-suggestion-header';
+  header.textContent = message || ('Suggestions for ' + input);
+  panel.appendChild(header);
+
+  const parentPath = parentDirectoryPath(input);
+  if (parentPath) {
+    const parentButton = document.createElement('button');
+    parentButton.type = 'button';
+    parentButton.className = 'path-suggestion-item path-suggestion-parent';
+    parentButton.textContent = '...  ' + parentPath;
+    parentButton.title = 'Go up to ' + parentPath;
+    parentButton.addEventListener('click', () => {
+      $('task-input').value = parentPath;
+      clearTaskInputError();
+      saveActiveTaskDraft();
+      focusPrimaryInput(false, true);
+      requestPathCompletion(parentPath);
+    });
+    panel.appendChild(parentButton);
+  }
+
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'path-suggestion-note';
+    empty.textContent = message ? '' : 'No matching remote paths.';
+    if (empty.textContent) panel.appendChild(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'path-suggestion-item';
+    button.textContent = item;
+    button.title = 'Use ' + item;
+    button.addEventListener('click', () => {
+      $('task-input').value = item;
+      clearTaskInputError();
+      saveActiveTaskDraft();
+      focusPrimaryInput(false, true);
+      if (isDirectorySuggestion(item)) {
+        requestPathCompletion(item);
+      } else {
+        hidePathSuggestions();
+      }
+    });
+    panel.appendChild(button);
+  }
+}
+
+function isDirectorySuggestion(path) {
+  return path.endsWith('/') || path.endsWith('\\');
+}
+
+function parentDirectoryPath(path) {
+  if (!isDirectorySuggestion(path)) return '';
+  const separator = path.endsWith('\\') ? '\\' : '/';
+  const trimmed = path.slice(0, -1);
+  if (!trimmed) return '';
+
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (idx < 0) return '';
+  if (idx === 0 && separator === '/') return '/';
+
+  return trimmed.slice(0, idx + 1);
+}
+
+function hidePathSuggestions() {
+  const panel = $('path-suggestions');
+  if (!panel) return;
+  panel.hidden = true;
+  panel.textContent = '';
+}
 
 document.addEventListener('keydown', e => {
   if (e.defaultPrevented) return;
@@ -950,6 +1453,7 @@ function navigateTaskHistory(direction) {
       taskHistoryIndex = -1;
       $('task-input').value = '';
       clearTaskInputError();
+      saveActiveTaskDraft();
       return;
     }
   }
@@ -957,6 +1461,7 @@ function navigateTaskHistory(direction) {
   const entry = taskHistory[taskHistoryIndex];
   setTaskType(entry.type);
   $('task-input').value = entry.payload;
+  saveActiveTaskDraft();
 }
 
 function navigateInteractiveHistory(direction) {
@@ -1011,6 +1516,7 @@ async function sendTask() {
   }
 
   clearKillConfirmation();
+  hidePathSuggestions();
 
   const targetAgentID = activeAgentID;
   const restoreFocus = shouldPersistCommandFocus() && TASK_TYPES[selectedTaskType].requiresPayload;
@@ -1021,6 +1527,7 @@ async function sendTask() {
     if (!data) return;
     recordTaskHistory(task.type, task.payload);
     $('task-input').value = '';
+    clearActiveTaskDraft(task.type);
     clearTaskInputError();
     appendOutput('[>] ' + task.type + formatTaskPayloadEcho(task) + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
   } catch (err) {
@@ -1180,7 +1687,7 @@ function enterInteractiveMode(agentID) {
   $('output').appendChild(banner);
   scrollOutputToBottom();
   updateTaskContextStatus();
-  startSSEStream(agentID);
+  startSSEStream(agentID, true);
 }
 
 function enableInteractiveInput() {
@@ -1195,7 +1702,6 @@ function exitInteractiveMode(sendStop) {
 
   interactiveMode = false;
   interactiveReady = false;
-  stopSSEStream();
   $('output').classList.remove('interactive-active');
   $('task-input').value = '';
   $('task-input').disabled = false;
@@ -1221,16 +1727,19 @@ function exitInteractiveMode(sendStop) {
   updateTaskContextStatus();
 }
 
-async function startSSEStream(agentID) {
+async function startSSEStream(agentID, reportErrors) {
   stopSSEStream();
+  const streamID = ++sseStreamID;
 
   try {
     const resp = await apiFetch('/api/agents/' + agentID + '/terminal/stream', {
       headers: { Accept: 'text/event-stream' },
     });
+    if (streamID !== sseStreamID || agentID !== activeAgentID) return;
+
     if (!resp.ok || !resp.body) {
       const message = await readResponseMessage(resp, 'interactive stream unavailable');
-      appendOutput('[!] ' + message, '', agentID);
+      if (reportErrors) appendOutput('[!] ' + message, '', agentID);
       return;
     }
 
@@ -1242,6 +1751,7 @@ async function startSSEStream(agentID) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (streamID !== sseStreamID || agentID !== activeAgentID) break;
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -1251,18 +1761,23 @@ async function startSSEStream(agentID) {
         if (!line.startsWith('data: ')) continue;
 
         try {
-          handleTaskOutput(JSON.parse(line.slice(6)));
+          if (streamID === sseStreamID && agentID === activeAgentID) {
+            handleTaskOutput(JSON.parse(line.slice(6)));
+          }
         } catch (_) {
           // Ignore malformed SSE fragments and keep the stream alive.
         }
       }
     }
   } catch (err) {
-    if (interactiveMode) appendOutput('[!] stream disconnected: ' + err.message, '', agentID);
+    if (reportErrors && interactiveMode) appendOutput('[!] stream disconnected: ' + err.message, '', agentID);
+  } finally {
+    if (streamID === sseStreamID) sseReader = null;
   }
 }
 
 function stopSSEStream() {
+  sseStreamID++;
   if (!sseReader) return;
   sseReader.cancel().catch(() => {});
   sseReader = null;

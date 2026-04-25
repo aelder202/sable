@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"strings"
@@ -27,12 +28,15 @@ import (
 	"github.com/aelder202/sable/internal/nonce"
 	"github.com/aelder202/sable/internal/session"
 	webui "github.com/aelder202/sable/web"
+	mdns "github.com/miekg/dns"
 )
 
 func main() {
 	cliMode := flag.Bool("cli", false, "start interactive operator CLI instead of server")
 	apiURL := flag.String("api", "https://127.0.0.1:8443", "operator API URL (for --cli mode)")
 	passwordFile := flag.String("password-file", "", "read operator password from file")
+	dnsDomain := flag.String("dns-domain", defaultDNSDomain(), "enable DNS fallback listener for this authoritative domain")
+	debugAddr := flag.String("debug-addr", "", "optional loopback debug/pprof address, for example 127.0.0.1:6060")
 	flag.Parse()
 
 	password, err := loadOperatorPassword(*passwordFile)
@@ -63,23 +67,26 @@ func main() {
 	store := session.NewStore()
 	nc := nonce.NewCache(5 * time.Minute)
 
-	tlsCfg := listener.NewTLSConfig(cert)
+	agentTLSCfg := listener.NewTLSConfig(cert)
+	apiTLSCfg := listener.NewTLSConfig(cert)
 
 	// Agent-facing HTTPS listener on :443
 	beaconMux := http.NewServeMux()
 	beaconMux.Handle("/cdn/static/update", listener.NewHTTPSHandler(store, nc))
 	agentSrv := &http.Server{
-		Addr:         ":443",
-		Handler:      beaconMux,
-		TLSConfig:    tlsCfg,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:              ":443",
+		Handler:           beaconMux,
+		TLSConfig:         agentTLSCfg,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 
 	// Operator-facing API on 127.0.0.1:8443 over TLS (loopback-only).
 	// Binding to loopback prevents off-host exposure; TLS protects the JWT and
 	// operator password even on the local machine's network interfaces.
-	apiLn, err := tls.Listen("tcp", "127.0.0.1:8443", tlsCfg)
+	apiLn, err := tls.Listen("tcp", "127.0.0.1:8443", apiTLSCfg)
 	if err != nil {
 		log.Fatalf("operator API listen failed: %v", err)
 	}
@@ -92,13 +99,27 @@ func main() {
 	fullMux.Handle("/api/", api.NewRouter(store, apiCfg))
 	fullMux.Handle("/", serveWebUI())
 	apiSrv := &http.Server{
-		Handler:      api.WithSecurityHeaders(fullMux),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Handler:           api.WithSecurityHeaders(fullMux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 
 	go func() { log.Fatal(apiSrv.Serve(apiLn)) }()
-	log.Printf("[*] Operator API on https://127.0.0.1:8443 | Agent listener on :443")
+	startDebugServer(*debugAddr)
+
+	if domain := normalizeDNSDomain(*dnsDomain); domain != "" {
+		dnsSrv := &mdns.Server{
+			Addr:    ":53",
+			Net:     "udp",
+			Handler: listener.NewDNSHandler(store, nc, domain),
+		}
+		go func() { log.Fatal(dnsSrv.ListenAndServe()) }()
+		log.Printf("[*] Agent DNS listener on :53 for %s", domain)
+	}
+
+	log.Printf("[*] Operator API on https://127.0.0.1:8443 | Agent HTTPS listener on :443")
 	log.Fatal(agentSrv.ListenAndServeTLS("", ""))
 }
 
@@ -164,6 +185,48 @@ func loadOperatorPassword(passwordFile string) (string, error) {
 	}
 
 	return "", errors.New("supply the operator password via SABLE_OPERATOR_PASSWORD, --password-file, or stdin")
+}
+
+func defaultDNSDomain() string {
+	if domain := strings.TrimSpace(os.Getenv("SABLE_DNS_DOMAIN")); domain != "" {
+		return domain
+	}
+	return strings.TrimSpace(os.Getenv("DNS_DOMAIN"))
+}
+
+func normalizeDNSDomain(domain string) string {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimSuffix(domain, ".")
+	if domain == "" {
+		return ""
+	}
+	return domain + "."
+}
+
+func startDebugServer(addr string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Fatalf("invalid debug address %q: %v", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		log.Fatalf("debug address must be loopback-only, got %q", host)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	go func() {
+		log.Printf("[*] Debug endpoint on http://%s/debug/pprof/ (loopback only)", addr)
+		log.Fatal(http.ListenAndServe(addr, mux))
+	}()
 }
 
 func normalizePasswordInput(data []byte) string {

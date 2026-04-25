@@ -28,6 +28,18 @@ func validateTaskRequest(taskType, payload string) error {
 		if hasDisallowedPathChars(payload) {
 			return errors.New("download path contains invalid characters")
 		}
+	case "complete":
+		if strings.TrimSpace(payload) == "" {
+			return errors.New("completion path required")
+		}
+		if hasDisallowedPathChars(payload) {
+			return errors.New("completion path contains invalid characters")
+		}
+	case "pathbrowse":
+		value := strings.TrimSpace(payload)
+		if value != "start" && value != "stop" {
+			return errors.New("pathbrowse payload must be start or stop")
+		}
 	case "upload":
 		if err := validateUploadPayload(payload); err != nil {
 			return err
@@ -57,7 +69,7 @@ func validateTaskRequest(taskType, payload string) error {
 
 func normalizeTaskPayload(taskType, payload string) string {
 	switch taskType {
-	case "sleep", "interactive":
+	case "sleep", "interactive", "complete", "pathbrowse":
 		return strings.TrimSpace(payload)
 	case "kill":
 		return ""

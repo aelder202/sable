@@ -80,7 +80,7 @@ endif
 ## Register the current agent or create/register a new one with NEW=1.
 ## Usage: make register PASSWORD=yourpassword [NEW=1] [LABEL=<label>]
 register:
-	go run ./tools/register $(if $(NEW),--new) $(if $(LABEL),--label "$(LABEL)") --server-url "$(SERVER_URL)" --cert-fp "$(CERT_FP_HEX)" --sleep-seconds "$(SLEEP_SECONDS)" --dns-domain "$(DNS_DOMAIN)" --output-dir "agents" "$(AGENT_ID)" "$(AGENT_SECRET_HEX)" "$(PASSWORD)"
+	@go run ./tools/register $(if $(NEW),--new) $(if $(LABEL),--label "$(LABEL)") --server-url "$(SERVER_URL)" --cert-fp "$(CERT_FP_HEX)" --sleep-seconds "$(SLEEP_SECONDS)" --dns-domain "$(DNS_DOMAIN)" --output-dir "agents" "$(AGENT_ID)" "$(AGENT_SECRET_HEX)" "$(PASSWORD)"
 
 register-tool$(EXE): tools/register/main.go tools/register/main_test.go go.mod go.sum
 	go build -o register-tool$(EXE) ./tools/register

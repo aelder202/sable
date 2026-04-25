@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aelder202/sable/internal/protocol"
 )
@@ -27,6 +31,7 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 		sendBeaconHTTPSFn = origHTTPSFn
 		sendBeaconDNSFn = origDNSFn
 		atomic.StoreInt32(&interactiveMode, 0)
+		atomic.StoreInt64(&pathBrowseFastUntil, 0)
 	}()
 	atomic.StoreInt32(&interactiveMode, 1)
 
@@ -73,6 +78,96 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 
 	if callCount != 3 {
 		t.Fatalf("expected 3 beacon attempts, got %d", callCount)
+	}
+}
+
+func TestCompleteTaskExtendsPathBrowseFastBeacon(t *testing.T) {
+	atomic.StoreInt32(&interactiveMode, 0)
+	atomic.StoreInt64(&pathBrowseFastUntil, 0)
+	t.Cleanup(func() {
+		atomic.StoreInt32(&interactiveMode, 0)
+		atomic.StoreInt64(&pathBrowseFastUntil, 0)
+	})
+
+	if fastBeaconActive() {
+		t.Fatal("expected fast beacon to be inactive before completion")
+	}
+
+	result := executeTask(&protocol.Task{ID: "task-complete", Type: "complete", Payload: t.TempDir()})
+	if result.Error != "" {
+		t.Fatalf("complete task failed: %s", result.Error)
+	}
+
+	if !fastBeaconActive() {
+		t.Fatal("expected completion task to enable temporary fast beaconing")
+	}
+}
+
+func TestPathBrowseStartStopControlsFastBeacon(t *testing.T) {
+	atomic.StoreInt32(&interactiveMode, 0)
+	atomic.StoreInt64(&pathBrowseFastUntil, 0)
+	t.Cleanup(func() {
+		atomic.StoreInt32(&interactiveMode, 0)
+		atomic.StoreInt64(&pathBrowseFastUntil, 0)
+	})
+
+	start := executeTask(&protocol.Task{ID: "task-pathbrowse-start", Type: "pathbrowse", Payload: "start"})
+	if start.Error != "" || start.Output != "path browser ready" {
+		t.Fatalf("unexpected start result: %#v", start)
+	}
+	if !fastBeaconActive() {
+		t.Fatal("expected pathbrowse start to enable fast beaconing")
+	}
+
+	stop := executeTask(&protocol.Task{ID: "task-pathbrowse-stop", Type: "pathbrowse", Payload: "stop"})
+	if stop.Error != "" || stop.Output != "path browser stopped" {
+		t.Fatalf("unexpected stop result: %#v", stop)
+	}
+	if fastBeaconActive() {
+		t.Fatal("expected pathbrowse stop to disable fast beaconing")
+	}
+}
+
+func TestSuspendPathBrowseOnFailureDoesNotStopInteractiveFastBeacon(t *testing.T) {
+	atomic.StoreInt32(&interactiveMode, 0)
+	atomic.StoreInt64(&pathBrowseFastUntil, time.Now().Add(time.Minute).UnixNano())
+	t.Cleanup(func() {
+		atomic.StoreInt32(&interactiveMode, 0)
+		atomic.StoreInt64(&pathBrowseFastUntil, 0)
+	})
+
+	suspendPathBrowseOnFailure()
+	if fastBeaconActive() {
+		t.Fatal("expected path browse fast mode to stop after transport failure")
+	}
+
+	atomic.StoreInt32(&interactiveMode, 1)
+	atomic.StoreInt64(&pathBrowseFastUntil, time.Now().Add(time.Minute).UnixNano())
+	suspendPathBrowseOnFailure()
+	if !fastBeaconActive() {
+		t.Fatal("expected interactive fast mode to remain active after transport failure")
+	}
+}
+
+func TestLogBeaconFailureThrottlesRepeatedFailures(t *testing.T) {
+	var buf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(origOutput) })
+
+	var lastLog time.Time
+	err := errors.New("dial timeout")
+	logBeaconFailure("beacon failed", err, 1, &lastLog)
+	logBeaconFailure("beacon failed", err, 2, &lastLog)
+
+	if got := strings.Count(buf.String(), "beacon failed"); got != 1 {
+		t.Fatalf("expected one immediate failure log, got %d logs:\n%s", got, buf.String())
+	}
+
+	lastLog = time.Now().Add(-failureLogInterval)
+	logBeaconFailure("beacon failed", err, 3, &lastLog)
+	if !strings.Contains(buf.String(), "still failing after 3 attempts") {
+		t.Fatalf("expected throttled summary log, got:\n%s", buf.String())
 	}
 }
 

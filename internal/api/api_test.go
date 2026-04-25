@@ -238,6 +238,40 @@ func TestQueueTaskNormalizesInteractivePayload(t *testing.T) {
 	}
 }
 
+func TestQueueTaskAllowsPathCompletion(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]string{"type": "complete", "payload": " /home/sa "})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for completion task, got %d", w.Code)
+	}
+	task := store.DequeueTask("agent-1")
+	if task == nil || task.Type != "complete" || task.Payload != "/home/sa" {
+		t.Fatalf("expected normalized completion task, got %#v", task)
+	}
+}
+
+func TestQueueTaskAllowsPathBrowseControl(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]string{"type": "pathbrowse", "payload": " start "})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for pathbrowse task, got %d", w.Code)
+	}
+	task := store.DequeueTask("agent-1")
+	if task == nil || task.Type != "pathbrowse" || task.Payload != "start" {
+		t.Fatalf("expected normalized pathbrowse task, got %#v", task)
+	}
+}
+
 func TestQueueTaskNormalizesSleepPayload(t *testing.T) {
 	router, store := setupAPI(t)
 	token := loginAndGetToken(t, router)

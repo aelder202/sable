@@ -20,14 +20,26 @@ const beaconPath = "/cdn/static/update"
 // InsecureSkipVerify is intentional — manual fingerprint verification replaces CA chain validation.
 func newPinnedClient(expectedFP []byte) *http.Client {
 	transport := &http.Transport{
+		DisableKeepAlives:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := tls.Dial(network, addr, &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec — replaced by manual fingerprint check below
-			})
+			dialer := &tls.Dialer{
+				NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+				Config: &tls.Config{
+					InsecureSkipVerify: true, //nolint:gosec — replaced by manual fingerprint check below
+				},
+			}
+			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			certs := conn.ConnectionState().PeerCertificates
+			tlsConn, ok := conn.(*tls.Conn)
+			if !ok {
+				conn.Close()
+				return nil, errors.New("TLS dial did not return a TLS connection")
+			}
+			certs := tlsConn.ConnectionState().PeerCertificates
 			if len(certs) == 0 {
 				conn.Close()
 				return nil, errors.New("no TLS certificates presented by server")

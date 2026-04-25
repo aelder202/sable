@@ -774,6 +774,49 @@ input.input-error {
   flex: 1;
 }
 
+.path-suggestions {
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(111, 143, 176, 0.28);
+  background: rgba(7, 14, 22, 0.98);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+  padding: 8px;
+}
+
+.path-suggestion-header,
+.path-suggestion-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding: 6px 8px;
+}
+
+.path-suggestion-item {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.path-suggestion-item:hover,
+.path-suggestion-item:focus-visible {
+  transform: none;
+  border-color: rgba(71, 209, 194, 0.34);
+  background: rgba(71, 209, 194, 0.12);
+}
+
+.path-suggestion-parent {
+  color: var(--muted);
+}
+
 #upload-btn {
   background: rgba(25, 66, 92, 0.82);
   border-color: rgba(81, 167, 255, 0.22);

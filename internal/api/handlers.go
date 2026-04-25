@@ -165,6 +165,7 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 		allowed := map[string]bool{
 			"shell": true, "upload": true, "download": true,
 			"sleep": true, "kill": true, "interactive": true,
+			"complete": true, "pathbrowse": true,
 		}
 		if !allowed[req.Type] {
 			http.Error(w, "invalid task type", http.StatusBadRequest)

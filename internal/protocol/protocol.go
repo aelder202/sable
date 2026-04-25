@@ -29,7 +29,7 @@ type TaskResult struct {
 // Task is sent from server → agent in the beacon response.
 type Task struct {
 	ID      string `json:"id"`
-	Type    string `json:"type"` // shell | upload | download | sleep | kill | noop
+	Type    string `json:"type"` // shell | upload | download | complete | pathbrowse | sleep | kill | noop
 	Payload string `json:"payload"`
 }
 

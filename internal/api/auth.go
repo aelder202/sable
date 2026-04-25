@@ -38,7 +38,9 @@ type operatorClaims struct {
 // HashPassword hashes a password with Argon2id using secure random salt.
 func HashPassword(password string) *PasswordHash {
 	salt := make([]byte, saltLen)
-	rand.Read(salt) //nolint:errcheck
+	if _, err := rand.Read(salt); err != nil {
+		panic("argon2 salt generation failed: " + err.Error())
+	}
 	hash := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	return &PasswordHash{Hash: hash, Salt: salt}
 }

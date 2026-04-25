@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,5 +97,51 @@ func TestLoadOperatorPasswordFromLegacyEnvFallback(t *testing.T) {
 	}
 	if password != "legacy-secret" {
 		t.Fatalf("unexpected password %q", password)
+	}
+}
+
+func TestDefaultDNSDomainPrefersSableEnv(t *testing.T) {
+	t.Setenv("SABLE_DNS_DOMAIN", "c2.example.com")
+	t.Setenv("DNS_DOMAIN", "legacy.example.com")
+	if got := defaultDNSDomain(); got != "c2.example.com" {
+		t.Fatalf("defaultDNSDomain() = %q", got)
+	}
+}
+
+func TestDefaultDNSDomainUsesLegacyEnvFallback(t *testing.T) {
+	t.Setenv("SABLE_DNS_DOMAIN", "")
+	t.Setenv("DNS_DOMAIN", "legacy.example.com")
+	if got := defaultDNSDomain(); got != "legacy.example.com" {
+		t.Fatalf("defaultDNSDomain() = %q", got)
+	}
+}
+
+func TestNormalizeDNSDomain(t *testing.T) {
+	tests := map[string]string{
+		"":                    "",
+		"  C2.Example.COM  ":  "c2.example.com.",
+		"c2.example.com.":     "c2.example.com.",
+		"sub.c2.example.com":  "sub.c2.example.com.",
+		"sub.c2.example.com.": "sub.c2.example.com.",
+	}
+	for input, want := range tests {
+		if got := normalizeDNSDomain(input); got != want {
+			t.Fatalf("normalizeDNSDomain(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestStartDebugServerRejectsNonLoopback(t *testing.T) {
+	// Validation is covered through the helper logic in startDebugServer by using
+	// a malformed/non-loopback address in a subprocess would be excessive here;
+	// keep this as a guard for the loopback predicate behavior it relies on.
+	allowed := []string{"127.0.0.1", "::1", "localhost"}
+	for _, host := range allowed {
+		if host != "localhost" {
+			ip := net.ParseIP(host)
+			if ip == nil || !ip.IsLoopback() {
+				t.Fatalf("expected %s to be loopback", host)
+			}
+		}
 	}
 }

@@ -11,7 +11,8 @@ import (
 
 // terminalStreamHandler streams task outputs as Server-Sent Events for a given agent.
 // The client connects once and receives a push notification for each new output
-// without polling, giving near-real-time response in interactive mode.
+// without polling, giving near-real-time response in interactive and path
+// suggestion flows.
 func terminalStreamHandler(store *session.Store, agentID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
