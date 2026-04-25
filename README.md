@@ -22,7 +22,7 @@ Sable is intended for controlled labs, owned systems, and environments where you
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Sable Server                        │
+│                   Sable Server                      │
 │                                                     │
 │  :443  (TLS)  — agent HTTPS beacon endpoint         │
 │  :53   (UDP)  — optional agent DNS beacon endpoint  │
