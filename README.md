@@ -1,14 +1,14 @@
 <h1 align="center">Sable</h1>
 
 <p align="center">
-  Open source command and control framework
+  Open source command and control tool
 </p>
 
 <p align="center">
   Go | HTTPS + DNS transports | Web UI + CLI
 </p>
 
-Sable is a C2 framework written in Go. The server takes encrypted beacons from agents over HTTPS — DNS as a fallback — and exposes a browser console and an interactive CLI for tasking.
+Sable is a C2 tool written in Go. The server takes encrypted beacons from agents over HTTPS — DNS as a fallback — and exposes a browser console and an interactive CLI for tasking.
 
 ---
 
