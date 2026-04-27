@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if cfg.AgentID == "" || cfg.SecretHex == "" {
-		fmt.Fprintln(os.Stderr, "[!] AGENT_ID and AGENT_SECRET_HEX not set — run 'make setup' first or use 'make register NEW=1'")
+		fmt.Fprintln(os.Stderr, "[!] AGENT_ID and AGENT_SECRET_HEX not set. Run 'make setup' first or use 'make register NEW=1'")
 		os.Exit(1)
 	}
 

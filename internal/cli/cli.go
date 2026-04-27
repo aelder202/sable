@@ -41,7 +41,7 @@ func New(baseURL, token string) (*CLI, error) {
 
 // Run starts the interactive shell. Blocks until the user types "exit" or "quit".
 func (c *CLI) Run() {
-	fmt.Println("[sable] operator shell — type 'help' for commands")
+	fmt.Println("[sable] operator shell. Type 'help' for commands.")
 	scanner := bufio.NewScanner(os.Stdin)
 	activeAgent := ""
 
@@ -70,16 +70,16 @@ func (c *CLI) Run() {
 		case "exit", "quit":
 			return
 		case "help":
-			fmt.Println("  agents                       — list active sessions")
-			fmt.Println("  register <id> <secret-hex>   — pre-register an agent (run before deploying)")
-			fmt.Println("  use <agent-id>               — interact with a session")
-			fmt.Println("  back                         — return to main prompt")
-			fmt.Println("  shell <cmd>                  — run shell command on active agent")
-			fmt.Println("  sleep <seconds>              — update beacon interval")
-			fmt.Println("  download <path>              — download file from agent")
-			fmt.Println("  upload <src> <dst>           — upload local file to agent (src:dst)")
-			fmt.Println("  kill                         — terminate active agent")
-			fmt.Println("  exit                         — quit")
+			fmt.Println("  agents                       - list active sessions")
+			fmt.Println("  register <id> <secret-hex>   - pre-register an agent (run before deploying)")
+			fmt.Println("  use <agent-id>               - interact with a session")
+			fmt.Println("  back                         - return to main prompt")
+			fmt.Println("  shell <cmd>                  - run shell command on active agent")
+			fmt.Println("  sleep <seconds>              - update beacon interval")
+			fmt.Println("  download <path>              - download file from agent")
+			fmt.Println("  upload <src> <dst>           - upload local file to agent (src:dst)")
+			fmt.Println("  kill                         - terminate active agent")
+			fmt.Println("  exit                         - quit")
 		case "agents":
 			c.listAgents()
 		case "register":
@@ -99,7 +99,7 @@ func (c *CLI) Run() {
 			activeAgent = ""
 		case "shell", "download", "sleep", "kill":
 			if activeAgent == "" {
-				fmt.Println("[-] no active agent — use 'use <agent-id>'")
+				fmt.Println("[-] no active agent; use 'use <agent-id>'")
 				continue
 			}
 			payload := ""
@@ -109,7 +109,7 @@ func (c *CLI) Run() {
 			c.queueTask(activeAgent, cmd, payload)
 		case "upload":
 			if activeAgent == "" {
-				fmt.Println("[-] no active agent — use 'use <agent-id>'")
+				fmt.Println("[-] no active agent; use 'use <agent-id>'")
 				continue
 			}
 			if len(parts) < 3 {

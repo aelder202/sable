@@ -135,7 +135,7 @@ func TestCrossAgentImpersonationReturns404(t *testing.T) {
 	// Rogue agent: valid beacon for "agent-1" (envelope and payload agree),
 	// but the internal AgentID is "victim". The MAC now covers "agent-1"||ct,
 	// so the only way to pass is to have envelope.id == decrypted.agent_id.
-	// This creates a beacon for "agent-1" with agent-1's secret — but sends it
+	// This creates a beacon for "agent-1" with agent-1's secret, but sends it
 	// with a raw-JSON-modified envelope to simulate the attack.
 	n, _ := protocol.RandomNonce()
 	b := &protocol.Beacon{

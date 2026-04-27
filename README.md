@@ -1,20 +1,20 @@
 <h1 align="center">Sable</h1>
 
 <p align="center">
-  Open source command and control tool
+  Open source C2
 </p>
 
 <p align="center">
   Go | HTTPS + DNS transports | Web UI + CLI
 </p>
 
-Sable is a C2 tool written in Go. The server takes encrypted beacons from agents over HTTPS — DNS as a fallback — and exposes a browser console and an interactive CLI for tasking.
+Sable is a C2 written in Go. The server takes encrypted beacons from agents over HTTPS, with DNS as a fallback, and exposes a browser console and an interactive CLI for tasking.
 
 ---
 
 ## Authorized Use
 
-Sable is for controlled labs, owned systems, and engagements where you have written authorization. Do not point it at anything else.
+Sable is intended for educational use, controlled labs, CTFs, owned systems, and engagements where you hold written authorization. Do not deploy it against systems you do not own or do not have explicit permission to test. The author accepts no responsibility for misuse.
 
 ---
 
@@ -46,7 +46,7 @@ Each beacon is AES-256-GCM with an HKDF-derived key, then HMAC-SHA256'd over the
 ## Prerequisites
 
 - Go 1.26.2 or later (matches `go.mod`)
-- `make` — Linux, macOS, or Windows (PowerShell or cmd)
+- `make` (Linux, macOS, or Windows; PowerShell or cmd)
 - Root / admin on the server host if binding `443` (and `53` when DNS fallback is on)
 
 Agents cross-compile through `GOOS`/`GOARCH`, so you can build from any host OS.
@@ -72,13 +72,13 @@ Modules pull on the first build. Run `go mod download` if you want to pre-warm t
 make setup SERVER_URL=https://<your-server-ip>:443
 ```
 
-`SERVER_URL` is the address agents will beacon to — not the operator UI.
+`SERVER_URL` is the address agents will beacon to, not the operator UI.
 
 ```text
 [+] Setup complete! (label: main)
-    config.env  — agent ID, secret, cert fingerprint, server URL, label
-    server.crt  — TLS certificate
-    server.key  — TLS private key
+    config.env  - agent ID, secret, cert fingerprint, server URL, label
+    server.crt  - TLS certificate
+    server.key  - TLS private key
 
 [*] Next: make build
 ```
@@ -95,7 +95,7 @@ Builds the server (`sable-server` or `.exe`) for the host OS plus a Linux agent 
 
 ### 4. Start the server
 
-Keep the server binary, `server.crt`, and `server.key` in the same directory. A password file is the cleanest launch — keeps the operator password out of shell history.
+Keep the server binary, `server.crt`, and `server.key` in the same directory. Use a password file to keep the operator password out of shell history.
 
 **Linux / macOS**
 
@@ -179,12 +179,12 @@ Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow
 
 **Console keys**
 
-- **Enter** / **Send** — queue the task
-- **↑ / ↓** — command history
-- **Ctrl/Cmd + K** — focus the task input
-- **Esc** — cancel an upload prompt or kill confirmation
-- **Clear** — wipe output and reset deduplication
-- **Jump To Latest** — resume the live tail after scrolling up
+- **Enter** / **Send**: queue the task
+- **↑ / ↓**: command history
+- **Ctrl/Cmd + K**: focus the task input
+- **Esc**: cancel an upload prompt or kill confirmation
+- **Clear**: wipe output and reset deduplication
+- **Jump To Latest**: resume the live tail after scrolling up
 
 #### Shell
 
@@ -192,7 +192,7 @@ Type `shell <command>` (or just type, with the `Shell` task type selected) and q
 
 ![Shell command tasking from the web console](images/shell_command.png)
 
-Output is captured to 512 KB; the command runs under a 60-second deadline. For state that persists across commands — `cd`, environment variables, `source` — use interactive mode.
+Output is captured to 512 KB; the command runs under a 60-second deadline. For state that persists across commands (`cd`, environment variables, `source`), use interactive mode.
 
 #### Interactive shell
 
@@ -204,7 +204,7 @@ The agent flips to a 100 ms beacon interval while interactive mode is on. Output
 
 `exit`, `quit`, or the **Exit** button drops back to normal mode.
 
-The shell runs over pipes, not a PTY. Anything that needs a real TTY — `vim`, `top`, `sudo` with a password prompt — will misbehave. A command that runs silently for 60+ seconds (`sleep 9999`) trips the timeout and respawns the shell.
+The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `top`, `sudo` with a password prompt) will misbehave. A command that runs silently for 60+ seconds (`sleep 9999`) trips the timeout and respawns the shell.
 
 #### Download
 
@@ -216,7 +216,7 @@ Type a partial path for live suggestions: click a directory to keep browsing, th
 
 ![Completed download in the web console](images/download_file.png)
 
-The agent reads the file, base64-encodes it, and the browser auto-decodes and saves it. Practical limit is roughly 38 KB — single-beacon delivery, capped by the 64 KB encrypted beacon body. Larger files would need chunked delivery; Sable does not implement that today.
+The agent reads the file, base64-encodes it, and the browser auto-decodes and saves it. Practical limit is roughly 38 KB (single-beacon delivery, capped by the 64 KB encrypted beacon body). Larger files would need chunked delivery; Sable does not implement that today.
 
 #### Upload
 
@@ -245,7 +245,7 @@ For a non-default loopback port or an SSH-tunneled API, point at it explicitly:
 ./sable-server --cli --api https://127.0.0.1:9443
 ```
 
-The CLI is queue-oriented — it does not live-stream output or auto-decode downloads. Use the web UI or `GET /api/agents/:id/tasks` to review results.
+The CLI is queue-oriented and does not live-stream output or auto-decode downloads. Use the web UI or `GET /api/agents/:id/tasks` to review results.
 
 | Command | Description |
 |---------|-------------|
@@ -315,7 +315,7 @@ curl -sk -X POST https://127.0.0.1:8443/api/agents \
 make build
 ```
 
-Restart the server after rebuilding. Web UI assets are embedded into the binary — a browser refresh alone will not pick up `web/` changes. If agent code changed, redeploy:
+Restart the server after rebuilding. Web UI assets are embedded into the binary, so a browser refresh alone will not pick up `web/` changes. If agent code changed, redeploy:
 
 ```sh
 pkill -f agent && scp builds/main/agent-linux user@target:/tmp/agent
@@ -496,7 +496,7 @@ server.key      - generated by `make setup` (gitignored)
 
 - Operator API binds to `127.0.0.1:8443` only. Off-host access goes through SSH.
 - Agent secrets are excluded from API responses (`json:"-"`).
-- Agents pin the server cert by SHA-256 fingerprint. A trusted-CA cert substitution does not help an attacker — the fingerprint check fails first.
+- Agents pin the server cert by SHA-256 fingerprint. A trusted-CA cert substitution does not help an attacker because the fingerprint check fails first.
 - Operator password is hashed with Argon2id (t=3, m=64 MB, p=4). No plaintext storage.
 - Nonce replay protection is an atomic check-and-record; no TOCTOU window between concurrent beacons.
 - Per-source-IP rate limiting on both transports: 200 HTTPS / 128 DNS requests per 10s window. The HTTPS limit is high because interactive and path-browse modes beacon at 100 ms.
@@ -505,7 +505,7 @@ server.key      - generated by `make setup` (gitignored)
 - The SSE stream endpoint disables its write deadline for long-lived connections; a 15s keepalive comment keeps proxies from timing the stream out. Other endpoints enforce the 10s write deadline.
 - `config.env`, `server.crt`, `server.key`, `agents/*.env`, password files, and built agent binaries are sensitive. Do not commit them.
 - On Unix-like systems: `chmod 600 config.env server.key pw.txt` and `chmod 700 agents`.
-- Agents are stripped (`-s -w`), but ldflags string literals — server URL, agent ID, cert fingerprint — remain readable in `.rodata` via `strings`. Treat built agents as sensitive artifacts.
+- Agents are stripped (`-s -w`), but ldflags string literals (server URL, agent ID, cert fingerprint) remain readable in `.rodata` via `strings`. Treat built agents as sensitive artifacts.
 
 ---
 
@@ -521,6 +521,12 @@ server.key      - generated by `make setup` (gitignored)
 | `make register` cannot connect | Run it on the server host with the server up, or hit the REST API through a tunnel. |
 | Web UI changes do not show | Rebuild and restart the server. `web/` assets are embedded. |
 | Upload rejected | Keep the file under ~36 KB so base64 fits inside the 48 KB task envelope. |
-| Download truncated or fails | Single-beacon delivery — files over ~38 KB will not fit. No chunking yet. |
+| Download truncated or fails | Single-beacon delivery; files over ~38 KB will not fit. No chunking yet. |
 | DNS fallback receives nothing | Confirm `--dns-domain` / `SABLE_DNS_DOMAIN`, UDP 53 reachability, the agent built with the same `DNS_DOMAIN`, and the NS record. |
 | Server listening but unresponsive | Restart with `--debug-addr 127.0.0.1:6060`, then capture `http://127.0.0.1:6060/debug/pprof/goroutine?debug=2`. |
+
+---
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

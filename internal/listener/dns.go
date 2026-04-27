@@ -268,7 +268,7 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		return
 	}
 
-	// Nonce replay check — atomic to close TOCTOU window between Seen and Add.
+	// Nonce replay check. Atomic to close TOCTOU window between Seen and Add.
 	if h.nonces.SeenOrAdd(beacon.Nonce) {
 		w.WriteMsg(m) //nolint:errcheck
 		return
