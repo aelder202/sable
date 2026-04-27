@@ -314,6 +314,24 @@ func TestQueueTaskRejectsInvalidUploadPayload(t *testing.T) {
 	}
 }
 
+func TestQueueTaskRejectsLargeUploadForDNSTransport(t *testing.T) {
+	router, store := setupAPI(t)
+	store.UpdateInfoWithTransport("agent-1", "victim", "linux", "amd64", "dns")
+	token := loginAndGetToken(t, router)
+
+	body, _ := json.Marshal(map[string]string{
+		"type":    "upload",
+		"payload": "/tmp/file:" + strings.Repeat("A", 12*1024),
+	})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for large DNS upload, got %d", w.Code)
+	}
+}
+
 func TestQueueTaskNormalizesInteractivePayload(t *testing.T) {
 	router, store := setupAPI(t)
 	token := loginAndGetToken(t, router)
@@ -489,7 +507,7 @@ func TestQueueTaskPayloadTooLarge(t *testing.T) {
 	router, _ := setupAPI(t)
 	token := loginAndGetToken(t, router)
 	body, _ := json.Marshal(map[string]string{
-		"type":    "upload",
+		"type":    "shell",
 		"payload": strings.Repeat("A", 49*1024),
 	})
 	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{

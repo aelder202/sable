@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	maxTaskPayloadBytes = 48 * 1024
-	maxRemotePathBytes  = 4096
+	maxRemotePathBytes        = 4096
+	maxUploadFileBytes        = 50 * 1024 * 1024
+	maxUploadTaskPayloadBytes = maxRemotePathBytes + 1 + ((maxUploadFileBytes+2)/3)*4
 )
 
 // CLI is the interactive operator shell that talks to the REST API.
@@ -228,10 +229,13 @@ func buildUploadPayload(localPath, remotePath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read local file: %w", err)
 	}
+	if len(data) > maxUploadFileBytes {
+		return "", fmt.Errorf("upload file too large: %d bytes (max %d)", len(data), maxUploadFileBytes)
+	}
 	encodedLen := base64.StdEncoding.EncodedLen(len(data))
 	payloadLen := len(remotePath) + 1 + encodedLen
-	if payloadLen > maxTaskPayloadBytes {
-		return "", fmt.Errorf("upload payload too large after base64 encoding: %d bytes (max %d)", payloadLen, maxTaskPayloadBytes)
+	if payloadLen > maxUploadTaskPayloadBytes {
+		return "", fmt.Errorf("upload payload too large after base64 encoding: %d bytes (max %d)", payloadLen, maxUploadTaskPayloadBytes)
 	}
 	return remotePath + ":" + base64.StdEncoding.EncodeToString(data), nil
 }

@@ -50,7 +50,7 @@ func TestBuildUploadPayload(t *testing.T) {
 
 func TestBuildUploadPayloadRejectsOversizedPayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "large.bin")
-	data := make([]byte, maxTaskPayloadBytes)
+	data := make([]byte, maxUploadFileBytes+1)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

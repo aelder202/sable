@@ -78,8 +78,8 @@ func main() {
 		Handler:           beaconMux,
 		TLSConfig:         agentTLSCfg,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       30 * time.Second,
 	}
 

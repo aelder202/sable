@@ -177,7 +177,7 @@ After login the console lists registered sessions, last-seen status, and the tas
 
 Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow; past 10 minutes goes red. Hover for the exact last-seen timestamp. Press `/` to focus the filter.
 
-The task composer keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, and Sleep. One-click actions such as PS, Screenshot, Snapshot, Persistence, PEAS, File Browser, and Interactive hide the command line until input is actually needed. Download path autofill and File Browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between output and input to resize the console, or double-click it to reset the height. Jobs, returned artifacts, notes/tags, and audit events open from the Session Details button as a resizable modal; use the detail filter or tabs to show everything or focus one section.
+The task composer keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, and Sleep. One-click actions such as PS, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between output and input to resize the console, or double-click it to reset the height. Jobs, returned artifacts, notes/tags, and audit events open from the Session Details button as a resizable modal; use the detail filter or tabs to show everything or focus one section.
 
 The Output search control is collapsed by default. Expanding it filters the rendered Output window entries only: task result lines, progress messages, errors, and saveable artifact/download rows. It does not filter the task input, session list, queued jobs, artifacts table, notes, or audit entries. Collapsing the search control clears the filter and restores all visible output rows.
 
@@ -206,9 +206,11 @@ Use **PS** to request a read-only process listing. Use **Persistence** to list c
 
 Use **Screenshot** to take a single operator-initiated screenshot. The agent downscales and compresses the image, then sends it through bounded result chunks; it is not a continuous capture stream.
 
-Use **PEAS** to download and run the matching PEASS-ng helper for the selected session OS: LinPEAS on Linux/macOS and winPEAS on Windows. Progress entries are posted while it downloads and runs, and the final output is captured as a text artifact and returned as a saveable result.
+Use **PEAS** to run the matching PEASS-ng helper for the selected session OS: LinPEAS on Linux/macOS and winPEAS on Windows. Agent builds can embed cached PEAS scripts for offline targets; otherwise the agent downloads the matching helper at run time. Progress entries are posted while it prepares and runs, and the final output is captured as a text artifact and returned as a saveable result.
 
-Use **Snapshot** for a bounded text report covering identity, network, route, disk, and environment basics. Use **File Browser** to open a modal directory explorer with parent navigation, refresh, and file download actions.
+For offline PEAS support, run `make update-peas` before building an agent, or use `make build-offline-peas`, `make build-agent-linux-offline-peas`, or `make build-agent-windows-offline-peas`. The updater caches the latest PEASS-ng scripts under `internal/agent/peas/`; those local copies are embedded into subsequently built agent binaries and are ignored by git.
+
+Use **Snapshot** for a bounded text report covering identity, network, route, disk, and environment basics.
 
 #### Interactive shell
 
@@ -224,7 +226,7 @@ The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `to
 
 #### Download
 
-`download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online.
+`download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online. Use **Browse** in the Download task to open the modal file explorer with parent navigation, refresh, and file download actions.
 
 ![Download path autocomplete suggestions](images/download_path_autocomplete.png)
 
@@ -232,7 +234,7 @@ Type a partial path for live suggestions: click a directory to keep browsing, th
 
 ![Completed download in the web console](images/download_file.png)
 
-The agent reads the file, base64-encodes it, and the browser auto-decodes and saves it. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action.
+The agent reads files up to 50 MB, base64-encodes them, and the browser auto-decodes and saves them. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action. Use HTTPS transport for large downloads.
 
 #### Upload
 
@@ -240,7 +242,7 @@ Click **Upload** or drag a file onto the output area. Enter the remote destinati
 
 ![Upload file task in the web console](images/upload_file.png)
 
-Uploads cap at roughly 36 KB, so the base64 payload fits inside the 48 KB task envelope.
+Uploads cap at 50 MB. Large uploads are still delivered as a single HTTPS task payload, so keep upload tasks on HTTPS rather than DNS transport.
 
 #### Kill safety
 
@@ -274,7 +276,6 @@ The CLI is queue-oriented and does not live-stream output or auto-decode downloa
 | `persistence` | Queue a defensive persistence-location listing |
 | `peas` | Run LinPEAS or winPEAS and return a text output artifact |
 | `snapshot` | Queue a bounded host snapshot text artifact |
-| `File Browser` | Open a modal file explorer with clickable folders and file download actions |
 | `cancel <task-id>` | Cancel a running background task such as PEAS |
 | `download <remote-path>` | Queue a file read |
 | `upload <local-path> <remote-path>` | Read a local file, base64-encode, queue an upload |
@@ -397,13 +398,13 @@ The agent tries HTTPS first and falls back to DNS if HTTPS is unreachable. UDP 5
 | `ps` | `ps` | Read-only process listing. Output cap 48 KB. |
 | `screenshot` | `screenshot` | One operator-initiated bounded screenshot. Returns a chunked image result, not a stream. |
 | `persistence` | `persistence` | Read-only listing of common persistence locations for the agent OS. Output cap 48 KB. |
-| `peas` | `peas` | Downloads and runs LinPEAS on Linux/macOS or winPEAS on Windows. Returns output as a text artifact. |
+| `peas` | `peas` | Runs embedded LinPEAS/winPEAS when available, otherwise downloads the matching helper. Returns output as a text artifact. |
 | `snapshot` | `snapshot` | Collects a bounded host snapshot report and returns it as a text artifact. |
-| `ls` | `ls <path>` / `File Browser` | Read-only structured directory listing. In the web Task Builder, Browse Directory opens a modal explorer with folders, parent navigation, refresh, and file download actions; it does not require command-line path entry. |
+| `ls` | Internal File Browser task | Read-only structured directory listing used by the Download task's Browse button. |
 | `cancel` | `cancel <task-id>` | Cancels a running background task when supported. |
 | `interactive` | Web UI / API | Open or close a persistent shell on the agent. |
-| `download` | `download <remote-path>` | Read a file off the agent. Results are chunked and reassembled server-side. |
-| `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. ~36 KB cap. |
+| `download` | `download <remote-path>` | Read a file off the agent. 50 MB cap; results are chunked and reassembled server-side. |
+| `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. 50 MB cap; use HTTPS transport for large files. |
 | `pathbrowse` | Web UI Download field | Internal: primes fast beaconing for the path browser. |
 | `complete` | Web UI Download field | Internal: lists matching paths under the typed prefix. Extends the fast path-browse window. |
 | `sleep` | `sleep <seconds>` | Change beacon interval. Range 1–86400. |
@@ -485,6 +486,10 @@ Use a password file or env var. Avoid pasting the password into commands that en
 | `make build-server` | server only | Rebuild the server. |
 | `make build-agent-linux` | `builds/<label>/agent-linux` | Rebuild the Linux agent. |
 | `make build-agent-windows` | `builds/<label>/agent.exe` | Build the Windows agent. |
+| `make update-peas` | `internal/agent/peas/linpeas.sh`, `internal/agent/peas/winPEAS.bat` | Cache the latest PEASS-ng scripts locally for embedding into agent builds. |
+| `make build-offline-peas` | server + Linux agent | Update PEAS cache, then run the default build with embedded offline PEAS support. |
+| `make build-agent-linux-offline-peas` | `builds/<label>/agent-linux` | Update PEAS cache, then build the Linux agent with embedded offline PEAS support. |
+| `make build-agent-windows-offline-peas` | `builds/<label>/agent.exe` | Update PEAS cache, then build the Windows agent with embedded offline PEAS support. |
 | `make register` | — | Register the selected agent. `NEW=1` creates a new identity, `LABEL=<name>` controls path names. |
 | `make gen-secret` | — | Print a random ID + 32-byte secret. |
 | `make test` | — | Unit tests. |
@@ -565,7 +570,7 @@ server.key      - generated by `make setup` (gitignored)
 | Agent does not appear | Confirm registration, matching `AGENT_ENV`, reachable `SERVER_URL`, correct cert fingerprint. |
 | `make register` cannot connect | Run it on the server host with the server up, or hit the REST API through a tunnel. |
 | Web UI changes do not show | Rebuild and restart the server. `web/` assets are embedded. |
-| Upload rejected | Keep the file under ~36 KB so base64 fits inside the 48 KB task envelope. |
+| Upload rejected | Keep the file at or below 50 MB and use HTTPS transport for large uploads. DNS transport is intended for check-ins and small responses. |
 | Download, screenshot, PEAS, or snapshot result is large | Results are split into bounded chunks and reassembled server-side before the UI offers the save action. Check output history if a chunked result appears delayed. |
 | DNS fallback receives nothing | Confirm `--dns-domain` / `SABLE_DNS_DOMAIN`, UDP 53 reachability, the agent built with the same `DNS_DOMAIN`, and the NS record. |
 | Server listening but unresponsive | Restart with `--debug-addr 127.0.0.1:6060`, then capture `http://127.0.0.1:6060/debug/pprof/goroutine?debug=2`. |

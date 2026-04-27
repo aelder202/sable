@@ -49,7 +49,7 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: setup build build-windows-server register build-server build-agent-linux build-agent-windows test test-integration gen-secret
+.PHONY: setup build build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
 .PRECIOUS: register-tool$(EXE)
 
 ## First-time setup: generates config.env, server.crt, server.key.
@@ -66,6 +66,9 @@ endif
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
+
+## Build the recommended bundle with the latest PEAS scripts embedded in the agent for offline targets.
+build-offline-peas: update-peas build
 
 ## Cross-build a Windows Sable server bundle plus a per-agent Linux binary from a Linux/macOS build host.
 ## Produces: $(WINDOWS_SERVER_BINARY) (Windows) + $(AGENT_LINUX_ARTIFACT)
@@ -104,6 +107,13 @@ endif
 	$(MKDIR_BUILD)
 	$(XWIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_WINDOWS_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(AGENT_WINDOWS_ARTIFACT)
+
+build-agent-linux-offline-peas: update-peas build-agent-linux
+
+build-agent-windows-offline-peas: update-peas build-agent-windows
+
+update-peas:
+	go run ./tools/updatepeas
 
 test:
 	go test ./...

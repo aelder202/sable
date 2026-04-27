@@ -15,7 +15,7 @@ import (
 
 const (
 	beaconPath              = "/cdn/static/update"
-	maxBeaconBody           = 64 * 1024 // 64 KB
+	maxBeaconBody           = 1 * 1024 * 1024
 	timestampSlack          = 2 * time.Minute
 	maxHTTPSRequestsPerHost = 200 // per httpsRateWindow; allows ~10/s for interactive-mode agents
 	httpsRateWindow         = 10 * time.Second
@@ -80,8 +80,8 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBeaconBody))
-	if err != nil || len(body) == 0 {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBeaconBody+1))
+	if err != nil || len(body) == 0 || len(body) > maxBeaconBody {
 		http.NotFound(w, r)
 		return
 	}
@@ -138,7 +138,7 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.UpdateInfo(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch)
+	h.store.UpdateInfoWithTransport(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch, "https")
 	outputComplete := true
 	if beacon.TaskOutput != nil {
 		outputComplete = h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)

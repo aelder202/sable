@@ -27,6 +27,10 @@ pw.txt
 # Per-agent build artifacts (live under builds/<label>/)
 /builds/
 
+# Locally cached third-party PEAS scripts embedded into offline-capable agents.
+/internal/agent/peas/linpeas.sh
+/internal/agent/peas/winPEAS.bat
+
 # Go test & coverage output
 *.test
 *.out

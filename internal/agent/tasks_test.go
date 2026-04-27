@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -96,6 +97,45 @@ func TestListDirectoryReturnsStructuredEntries(t *testing.T) {
 	}
 }
 
+func TestDownloadFileAllowsCurrentLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.bin")
+	data := []byte("download me")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	output, taskErr := downloadFile(path)
+	if taskErr != "" {
+		t.Fatalf("downloadFile error: %s", taskErr)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(output)
+	if err != nil {
+		t.Fatalf("DecodeString: %v", err)
+	}
+	if string(decoded) != string(data) {
+		t.Fatalf("downloaded data = %q, want %q", decoded, data)
+	}
+}
+
+func TestDownloadFileRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.bin")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := file.Truncate(maxDownloadBytes + 1); err != nil {
+		file.Close() //nolint:errcheck
+		t.Fatalf("Truncate: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if output, taskErr := downloadFile(path); taskErr == "" {
+		t.Fatalf("expected oversized download error, got output length %d", len(output))
+	}
+}
+
 func TestDetectImageType(t *testing.T) {
 	tests := []struct {
 		name string
@@ -115,6 +155,23 @@ func TestDetectImageType(t *testing.T) {
 				t.Fatalf("detectImageType() = %q, %q; want %q, %q", mime, ext, tt.mime, tt.ext)
 			}
 		})
+	}
+}
+
+func TestLinuxScreenshotCandidatesIncludeCommonUbuntuFallbacks(t *testing.T) {
+	candidates := linuxScreenshotCandidates("/tmp/sable_screenshot_test")
+	commands := make(map[string]bool)
+	for _, candidate := range candidates {
+		if len(candidate) == 0 {
+			t.Fatal("empty screenshot candidate")
+		}
+		commands[candidate[0]] = true
+	}
+
+	for _, command := range []string{"gdbus", "gnome-screenshot", "scrot", "grim", "maim", "import"} {
+		if !commands[command] {
+			t.Fatalf("missing screenshot candidate %q in %#v", command, candidates)
+		}
 	}
 }
 

