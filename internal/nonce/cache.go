@@ -41,7 +41,7 @@ func (c *Cache) Add(n []byte) {
 }
 
 // SeenOrAdd atomically checks whether n was already seen and, if not, records it.
-// Returns true if n was already present (replay — caller should reject).
+// Returns true if n was already present (replay; caller should reject).
 // Returns false if n was new (caller may proceed); the nonce is recorded under the same lock.
 //
 // Callers must use SeenOrAdd rather than the separate Seen+Add pair to prevent a

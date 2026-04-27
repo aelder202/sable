@@ -18,7 +18,7 @@ var sentinelSeq uint64
 // shellSession is a persistent shell process (sh or cmd.exe) with piped
 // stdin/stdout/stderr. Commands are written to stdin and output is demarcated
 // by a unique per-call sentinel echo, giving persistent cwd and environment
-// across commands — the same behaviour as Metasploit's shell session.
+// across commands, the same behaviour as Metasploit's shell session.
 type shellSession struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser

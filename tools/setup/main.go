@@ -38,7 +38,7 @@ func main() {
 	}
 
 	if _, err := os.Stat("config.env"); err == nil {
-		fmt.Println("[!] config.env already exists — delete it and run 'make setup' again to regenerate.")
+		fmt.Println("[!] config.env already exists. Delete it and run 'make setup' again to regenerate.")
 		os.Exit(0)
 	}
 
@@ -61,9 +61,9 @@ func main() {
 	}
 
 	fmt.Printf("[+] Setup complete! (label: %s)\n", label)
-	fmt.Println("    config.env  — agent ID, secret, cert fingerprint, server URL, label (keep secret)")
-	fmt.Println("    server.crt  — TLS certificate (deploy alongside sable-server)")
-	fmt.Println("    server.key  — TLS private key  (deploy alongside sable-server)")
+	fmt.Println("    config.env  - agent ID, secret, cert fingerprint, server URL, label (keep secret)")
+	fmt.Println("    server.crt  - TLS certificate (deploy alongside sable-server)")
+	fmt.Println("    server.key  - TLS private key  (deploy alongside sable-server)")
 	fmt.Println()
 	fmt.Println("[*] Next: make build")
 }

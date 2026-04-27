@@ -49,7 +49,7 @@ func Run(cfg *Config) {
 				time.Sleep(fastBeaconInterval)
 			} else {
 				base := time.Duration(cfg.SleepSeconds) * time.Second
-				jitter := time.Duration(rand.Int63n(int64(base / 5))) //nolint:gosec — jitter doesn't need crypto rand
+				jitter := time.Duration(rand.Int63n(int64(base / 5))) //nolint:gosec // jitter doesn't need crypto rand
 				time.Sleep(base + jitter)
 			}
 		}
