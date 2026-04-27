@@ -8,9 +8,19 @@ import (
 )
 
 const (
-	maxSleepSeconds = 24 * 60 * 60
-	maxRemotePath   = 4096
+	maxSleepSeconds             = 24 * 60 * 60
+	maxRemotePath               = 4096
+	maxStandardTaskPayloadBytes = 48 * 1024
+	maxUploadFileBytes          = 50 * 1024 * 1024
+	maxUploadTaskPayloadBytes   = maxRemotePath + 1 + ((maxUploadFileBytes+2)/3)*4
 )
+
+func maxTaskPayloadBytes(taskType string) int {
+	if taskType == "upload" {
+		return maxUploadTaskPayloadBytes
+	}
+	return maxStandardTaskPayloadBytes
+}
 
 func validateTaskRequest(taskType, payload string) error {
 	switch taskType {
@@ -110,8 +120,16 @@ func validateUploadPayload(payload string) error {
 		return errors.New("upload path contains invalid characters")
 	}
 
-	if _, err := base64.StdEncoding.DecodeString(payload[idx+1:]); err != nil {
+	encoded := payload[idx+1:]
+	if len(encoded) > base64.StdEncoding.EncodedLen(maxUploadFileBytes) {
+		return errors.New("upload data too large")
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
 		return errors.New("upload data must be valid base64")
+	}
+	if len(data) > maxUploadFileBytes {
+		return errors.New("upload data too large")
 	}
 
 	return nil

@@ -193,11 +193,22 @@ func runPEAS(parent context.Context, plan *peasExecutionPlan, progress func(stri
 	defer os.RemoveAll(tmpDir) //nolint:errcheck
 
 	toolPath := filepath.Join(tmpDir, plan.filename)
-	progress(fmt.Sprintf("[peas] downloading %s from %s", plan.name, plan.url))
-	if err := downloadPEASTool(parent, plan.url, toolPath); err != nil {
+	source := plan.url
+	progress(fmt.Sprintf("[peas] checking embedded %s cache", plan.name))
+	embedded, err := writeEmbeddedPEASTool(plan, toolPath)
+	if err != nil {
 		return "", err.Error()
 	}
-	progress(fmt.Sprintf("[peas] download complete: %s", plan.filename))
+	if embedded {
+		source = "embedded:" + plan.filename
+		progress(fmt.Sprintf("[peas] using embedded %s: %s", plan.name, plan.filename))
+	} else {
+		progress(fmt.Sprintf("[peas] downloading %s from %s", plan.name, plan.url))
+		if err := downloadPEASTool(parent, plan.url, toolPath); err != nil {
+			return "", err.Error()
+		}
+		progress(fmt.Sprintf("[peas] download complete: %s", plan.filename))
+	}
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(toolPath, 0700); err != nil {
 			return "", err.Error()
@@ -205,7 +216,7 @@ func runPEAS(parent context.Context, plan *peasExecutionPlan, progress func(stri
 	}
 
 	progress(fmt.Sprintf("[peas] executing %s; output is being captured", plan.name))
-	output, taskErr := executePEASTool(parent, plan, toolPath, progress)
+	output, taskErr := executePEASTool(parent, plan, toolPath, source, progress)
 	if taskErr != "" {
 		output = strings.TrimRight(output, "\r\n") + "\n[runner error] " + taskErr + "\n"
 	}
@@ -305,7 +316,7 @@ func downloadPEASTool(parent context.Context, url, dst string) error {
 	return nil
 }
 
-func executePEASTool(parent context.Context, plan *peasExecutionPlan, toolPath string, progress func(string)) (string, string) {
+func executePEASTool(parent context.Context, plan *peasExecutionPlan, toolPath, source string, progress func(string)) (string, string) {
 	ctx, cancel := context.WithTimeout(parent, peasTimeout)
 	defer cancel()
 
@@ -350,7 +361,7 @@ finished:
 	if out.truncated {
 		text += fmt.Sprintf("\n[output truncated at %d bytes]", maxPEASOutputBytes)
 	}
-	header := fmt.Sprintf("%s output collected at %s\nSource: %s\n\n", plan.name, time.Now().Format(time.RFC3339), plan.url)
+	header := fmt.Sprintf("%s output collected at %s\nSource: %s\n\n", plan.name, time.Now().Format(time.RFC3339), source)
 	text = header + text
 	if ctx.Err() == context.DeadlineExceeded {
 		return text, "PEAS timed out"
@@ -585,30 +596,127 @@ func captureScreenshotDarwin() ([]byte, error) {
 }
 
 func captureScreenshotLinux() ([]byte, error) {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("sable_screenshot_%d.jpg", time.Now().UnixNano()))
-	defer os.Remove(path) //nolint:errcheck
-
-	candidates := [][]string{
-		{"gnome-screenshot", "-f", path},
-		{"grim", path},
-		{"maim", path},
-		{"import", "-window", "root", path},
-	}
+	base := filepath.Join(os.TempDir(), fmt.Sprintf("sable_screenshot_%d", time.Now().UnixNano()))
+	defer os.Remove(base + ".jpg") //nolint:errcheck
+	defer os.Remove(base + ".png") //nolint:errcheck
+	candidates := linuxScreenshotCandidates(base)
+	env := linuxScreenshotEnv()
+	var failures []string
 	for _, candidate := range candidates {
 		if _, err := exec.LookPath(candidate[0]); err != nil {
 			continue
 		}
-		if out, taskErr := runReadOnlyCommand(situationalTimeout, candidate[0], candidate[1:]...); taskErr != "" {
+		out, taskErr := runReadOnlyCommandEnv(situationalTimeout, env, candidate[0], candidate[1:]...)
+		if taskErr != "" {
+			failures = append(failures, candidate[0]+": "+summarizeCommandFailure(taskErr, out))
 			continue
-		} else if strings.TrimSpace(out) != "" {
-			// Some tools print warnings on success; keep the image result authoritative.
 		}
+		path := candidate[len(candidate)-1]
 		data, err := os.ReadFile(path)
+		os.Remove(path) //nolint:errcheck
 		if err == nil && len(data) > 0 {
 			return data, nil
 		}
+		failures = append(failures, candidate[0]+": command completed but did not create an image")
 	}
-	return nil, fmt.Errorf("no supported screenshot utility found")
+	if len(failures) > 0 {
+		return nil, fmt.Errorf("supported screenshot utilities failed: %s. %s", strings.Join(failures, "; "), linuxScreenshotEnvSummary(env))
+	}
+	return nil, fmt.Errorf("no supported screenshot utility found; install one of gnome-screenshot, scrot, grim, maim, ImageMagick import, xfce4-screenshooter, mate-screenshot, spectacle, or flameshot, and ensure the agent has access to an active GUI session")
+}
+
+func runReadOnlyCommandEnv(timeout time.Duration, env []string, name string, args ...string) (string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	var out cappedBuffer
+	out.limit = maxSituationalOutputBytes
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err := cmd.Run()
+	text := strings.TrimRight(out.buf.String(), "\r\n")
+	if out.truncated {
+		text += fmt.Sprintf("\n[output truncated at %d bytes]", maxSituationalOutputBytes)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return text, "command timed out"
+	}
+	if err != nil {
+		return text, err.Error()
+	}
+	return text, ""
+}
+
+func linuxScreenshotEnv() []string {
+	env := os.Environ()
+	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" && os.Getuid() >= 0 {
+		busPath := fmt.Sprintf("/run/user/%d/bus", os.Getuid())
+		if _, err := os.Stat(busPath); err == nil {
+			env = append(env, "DBUS_SESSION_BUS_ADDRESS=unix:path="+busPath)
+		}
+	}
+	if os.Getenv("DISPLAY") == "" {
+		if _, err := os.Stat("/tmp/.X11-unix/X0"); err == nil {
+			env = append(env, "DISPLAY=:0")
+		}
+	}
+	return env
+}
+
+func linuxScreenshotEnvSummary(env []string) string {
+	keys := []string{"DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"}
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := envValue(env, key)
+		if value == "" {
+			value = "<empty>"
+		}
+		values = append(values, key+"="+value)
+	}
+	return "GUI environment: " + strings.Join(values, ", ")
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
+}
+
+func summarizeCommandFailure(taskErr, output string) string {
+	output = strings.TrimSpace(output)
+	if len(output) > 240 {
+		output = output[:240] + "..."
+	}
+	if output == "" {
+		return taskErr
+	}
+	return taskErr + ": " + output
+}
+
+func linuxScreenshotCandidates(base string) [][]string {
+	jpg := base + ".jpg"
+	png := base + ".png"
+	return [][]string{
+		{"gdbus", "call", "--session", "--dest", "org.gnome.Shell.Screenshot", "--object-path", "/org/gnome/Shell/Screenshot", "--method", "org.gnome.Shell.Screenshot.Screenshot", "false", "true", png},
+		{"gnome-screenshot", "-f", png},
+		{"scrot", jpg},
+		{"grim", png},
+		{"maim", png},
+		{"import", "-window", "root", png},
+		{"xfce4-screenshooter", "-f", "-s", png},
+		{"mate-screenshot", "-f", png},
+		{"spectacle", "-b", "-n", "-o", png},
+		{"flameshot", "full", "-p", png},
+	}
 }
 
 func detectPersistence() (string, string) {

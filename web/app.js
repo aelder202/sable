@@ -38,9 +38,10 @@ let fileBrowserResult = null;
 let fileBrowserMode = 'browse';
 let pendingKillAgentID = '';
 let outputSearchExpanded = false;
+let downloadTasks = new Map();
 
 const MAX_LOGIN_BODY_BYTES = 4096;
-const MAX_UPLOAD_BYTES = 36 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_SLEEP_SECONDS = 24 * 60 * 60;
 const MAX_REMOTE_PATH = 4096;
 const POLL_INTERVAL_MS = 5000;
@@ -103,7 +104,7 @@ const TASK_TYPES = {
   download: {
     buttonLabel: 'Queue Download',
     help: 'Request a remote file path and receive the result as a browser download.',
-    note: 'Path suggestions are prepared automatically for online sessions.',
+    note: 'Path suggestions are prepared automatically. Use Browse to open the remote file browser and download files directly.',
     placeholder: 'Enter a remote file path',
     requiresPayload: true,
     inputMode: 'text',
@@ -114,14 +115,6 @@ const TASK_TYPES = {
     note: 'Path suggestions are prepared automatically. Pick a file with Choose File or Browse remote directories to set the destination.',
     placeholder: 'Enter a remote destination path',
     requiresPayload: true,
-    inputMode: 'text',
-  },
-  ls: {
-    buttonLabel: 'Browse Directory',
-    help: 'Open a navigable remote file browser for the selected session.',
-    note: 'Browse folders in a modal and download files without using the command line.',
-    placeholder: 'Open File Browser to navigate remote files',
-    requiresPayload: false,
     inputMode: 'text',
   },
   sleep: {
@@ -498,7 +491,7 @@ function setQueueBusy(isBusy, message) {
 
   $('send-btn').disabled = isBusy || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
   $('choose-file-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
-  $('browse-path-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
+  $('browse-path-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
   $('cancel-task-select').disabled = isBusy;
   $('cancel-task-btn').disabled = isBusy;
   $('clear-btn').disabled = isBusy;
@@ -761,7 +754,8 @@ function buildAgentItem(agent) {
 function formatAgentPlatform(agent) {
   const os = agent.os || 'unknown';
   const arch = agent.arch || 'unknown';
-  return os + ' / ' + arch;
+  const transport = agent.transport ? ' / ' + String(agent.transport).toUpperCase() : '';
+  return os + ' / ' + arch + transport;
 }
 
 function formatLastSeenCompact(agent) {
@@ -989,6 +983,18 @@ function handleTaskOutput(output, historical) {
     return;
   }
 
+  if (output.type === 'download_progress') {
+    const baseID = baseDownloadTaskID(output.task_id);
+    const state = downloadTasks.get(baseID);
+    if (state) {
+      state.status = 'progress';
+      if (fileBrowserResult) renderFileBrowser(fileBrowserResult);
+    }
+    if (output.output && output.output.trim()) appendOutput(output.output.trimEnd());
+    renderSessionPanels();
+    return;
+  }
+
   if (output.type === 'ls' && output.output) {
     if (handleFileBrowserOutput(output)) {
       renderSessionPanels();
@@ -1012,7 +1018,7 @@ function handleTaskOutput(output, historical) {
       return;
     }
 
-    appendDownloadResult(short, ts, payload, historical);
+    appendDownloadResult(output.task_id, short, ts, payload, historical);
     renderSessionPanels();
     return;
   }
@@ -1129,6 +1135,7 @@ function applyTaskTypeUI() {
       ? String(MAX_SLEEP_SECONDS).length
       : 48000;
   const uploadSelected = selectedTaskType === 'upload';
+  const downloadSelected = selectedTaskType === 'download';
   $('send-btn').textContent = selectedTaskType === 'kill' && killConfirmationActive()
     ? 'Confirm Kill'
     : config.buttonLabel;
@@ -1141,8 +1148,13 @@ function applyTaskTypeUI() {
 
   $('choose-file-btn').hidden = !uploadSelected;
   $('choose-file-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting;
-  $('browse-path-btn').hidden = !uploadSelected;
-  $('browse-path-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting;
+  $('browse-path-btn').hidden = !(uploadSelected || downloadSelected);
+  $('browse-path-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
+  $('browse-path-btn').title = uploadSelected && !pendingUploadFile
+    ? 'Choose a local file before browsing for an upload destination'
+    : downloadSelected
+      ? 'Browse remote files and download directly'
+      : 'Browse remote directories to choose a destination';
   updateUploadFilenameLabel();
 
   if (!config.requiresPayload) {
@@ -1212,9 +1224,7 @@ function clearActiveTaskDraft(taskType) {
 function pathBrowserComposerNote(agentOnline) {
   if (!agentOnline) return 'Path browser starts automatically once the selected session is online.';
   if (!activePathBrowseReady()) {
-    return selectedTaskType === 'ls'
-      ? 'Preparing the remote file browser. Browse Directory unlocks when the session confirms fast browsing.'
-      : 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
+    return 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
   }
   return TASK_TYPES[selectedTaskType].note;
 }
@@ -1230,7 +1240,7 @@ function pathSuggestionTaskSelected() {
 }
 
 function pathBrowserTaskSelected() {
-  return selectedTaskType === 'download' || selectedTaskType === 'upload' || selectedTaskType === 'ls';
+  return selectedTaskType === 'download' || selectedTaskType === 'upload';
 }
 
 $('task-input').addEventListener('input', () => {
@@ -1824,6 +1834,9 @@ function renderFileBrowser(result) {
     actions.appendChild(fileBrowserButton('Up', () => queueFileBrowserPath(result.parent)));
   }
   actions.appendChild(fileBrowserButton('Refresh', () => queueFileBrowserPath(result.path)));
+  if (fileBrowserMode === 'select-upload') {
+    actions.appendChild(fileBrowserButton('Select This Folder', () => selectUploadDestination(result.path, true)));
+  }
   toolbar.appendChild(actions);
   panel.appendChild(toolbar);
 
@@ -1836,7 +1849,7 @@ function renderFileBrowser(result) {
   header.appendChild(fileBrowserCell('Name'));
   header.appendChild(fileBrowserCell('Size'));
   header.appendChild(fileBrowserCell('Modified'));
-  header.appendChild(fileBrowserCell('Action'));
+  header.appendChild(fileBrowserCell('Actions'));
   table.appendChild(header);
 
   if (!result.entries.length) {
@@ -1869,6 +1882,7 @@ function renderFileBrowser(result) {
     row.appendChild(fileBrowserCell(formatBrowserTime(entry.mod_time)));
 
     const actionCell = fileBrowserCell('');
+    actionCell.classList.add('file-browser-actions-cell');
     if (entry.error) {
       actionCell.textContent = entry.error;
     } else if (entry.is_dir) {
@@ -1877,7 +1891,7 @@ function renderFileBrowser(result) {
         actionCell.appendChild(fileBrowserButton('Select', () => selectUploadDestination(entry.path, true)));
       }
     } else {
-      actionCell.appendChild(fileBrowserButton('Download', () => queueDownloadFromBrowser(entry.path)));
+      actionCell.appendChild(fileBrowserDownloadButton(entry));
       if (fileBrowserMode === 'select-upload') {
         actionCell.appendChild(fileBrowserButton('Select', () => selectUploadDestination(entry.path, false)));
       }
@@ -1887,19 +1901,59 @@ function renderFileBrowser(result) {
   });
 }
 
-function selectUploadDestination(entryPath, isDir) {
-  let value = entryPath;
-  if (isDir && !isDirectorySuggestion(entryPath)) {
-    const separator = entryPath.includes('\\') ? '\\' : '/';
-    value = entryPath + separator;
+function fileBrowserDownloadButton(entry) {
+  const state = downloadStateForPath(entry.path);
+  if (state && state.status === 'done') {
+    return fileBrowserButton('Downloaded', () => openArtifactsPanel(state.artifactKey));
   }
+  if (state && state.status === 'progress') {
+    const button = fileBrowserButton('Download in progress', () => {});
+    button.disabled = true;
+    return button;
+  }
+  return fileBrowserButton('Download', () => queueDownloadFromBrowser(entry.path));
+}
+
+function downloadStateForPath(path) {
+  for (const state of downloadTasks.values()) {
+    if (state.path === path) return state;
+  }
+  return null;
+}
+
+function openArtifactsPanel(artifactKey) {
+  activeSessionPanel = 'artifacts';
+  openSessionDetailsModal();
+  if (artifactKey) {
+    const row = document.querySelector('[data-artifact-key="' + cssEscapeValue(artifactKey) + '"]');
+    if (row) {
+      row.classList.add('panel-item-highlight');
+      row.scrollIntoView({ block: 'nearest' });
+      window.setTimeout(() => row.classList.remove('panel-item-highlight'), 1800);
+    }
+  }
+}
+
+function cssEscapeValue(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+  return String(value).replace(/"/g, '\\"');
+}
+
+function selectUploadDestination(entryPath, isDir) {
+  const value = uploadDestinationPath(entryPath, isDir);
   $('task-input').value = value;
   clearTaskInputError();
   saveActiveTaskDraft();
   closeFileBrowserModal();
-  if (isDir) schedulePathCompletion();
-  else hidePathSuggestions();
+  hidePathSuggestions();
   focusPrimaryInput(false, true);
+}
+
+function uploadDestinationPath(entryPath, isDir) {
+  if (!isDir || !pendingUploadFile) return entryPath;
+  const separator = entryPath.includes('\\') ? '\\' : '/';
+  const basePath = isDirectorySuggestion(entryPath) ? entryPath : entryPath + separator;
+  return basePath + pendingUploadFile.name;
 }
 
 function fileBrowserCell(text) {
@@ -1944,6 +1998,13 @@ async function queueDownloadFromBrowser(path) {
   try {
     const data = await submitTask(targetAgentID, { type: 'download', payload: path });
     if (data) {
+      downloadTasks.set(data.task_id, {
+        path,
+        filename: basenameFromPath(path),
+        status: 'progress',
+        artifactKey: '',
+      });
+      if (fileBrowserResult) renderFileBrowser(fileBrowserResult);
       appendOutput('[>] download ' + path + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
       refreshActiveAgent();
     }
@@ -2109,17 +2170,6 @@ async function sendTask() {
     return;
   }
 
-  if (task.type === 'ls') {
-    if (!activePathBrowseReady()) {
-      setTaskStatus('Preparing the remote file browser. Browse Directory will unlock when the session confirms readiness.', 'status-busy');
-      ensurePathBrowserForAgent(activeAgent);
-      applyTaskTypeUI();
-      return;
-    }
-    openFileBrowserModal('browse');
-    return;
-  }
-
   if (task.type === 'kill' && !killConfirmationActive()) {
     armKillConfirmation();
     applyTaskTypeUI();
@@ -2138,15 +2188,16 @@ async function sendTask() {
     const data = await submitTask(targetAgentID, task);
     if (!data) return;
     recordTaskHistory(task.type, task.payload);
-    if (task.type === 'ls') {
-      fileBrowserPath = task.payload;
-      $('task-input').value = task.payload;
-      saveActiveTaskDraft();
-      renderFileBrowserLoading(task.payload);
-    } else {
-      $('task-input').value = '';
-      clearActiveTaskDraft(task.type);
+    if (task.type === 'download') {
+      downloadTasks.set(data.task_id, {
+        path: task.payload,
+        filename: basenameFromPath(task.payload),
+        status: 'progress',
+        artifactKey: '',
+      });
     }
+    $('task-input').value = '';
+    clearActiveTaskDraft(task.type);
     clearTaskInputError();
     appendOutput('[>] ' + task.type + formatTaskPayloadEcho(task) + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
     refreshActiveAgent();
@@ -2282,9 +2333,6 @@ function buildTaskFromComposer() {
       }
       return { type: 'download', payload: path };
     }
-    case 'ls': {
-      return { type: 'ls', payload: fileBrowserPath || '.' };
-    }
     case 'sleep': {
       const value = rawValue.trim();
       const seconds = Number.parseInt(value, 10);
@@ -2354,6 +2402,7 @@ function enterInteractiveMode(agentID) {
   interactiveMode = true;
   interactiveReady = false;
   $('output').classList.add('interactive-active');
+  document.querySelector('.command-line').hidden = false;
   if (taskTypeSelect) taskTypeSelect.hidden = true;
   $('send-btn').hidden = true;
   $('choose-file-btn').hidden = true;
@@ -2488,12 +2537,16 @@ $('upload-file-input').addEventListener('change', () => {
 });
 
 $('browse-path-btn').addEventListener('click', () => {
-  if (selectedTaskType !== 'upload' || !activeAgentID || taskRequestInFlight) return;
+  if ((selectedTaskType !== 'upload' && selectedTaskType !== 'download') || !activeAgentID || taskRequestInFlight) return;
+  if (selectedTaskType === 'upload' && !pendingUploadFile) {
+    setTaskInputError('Choose a local file before browsing for an upload destination.');
+    return;
+  }
   if (!activePathBrowseReady()) {
     setTaskInputError('The remote path browser is still preparing. Try again when the session confirms readiness.');
     return;
   }
-  openFileBrowserModal('select-upload');
+  openFileBrowserModal(selectedTaskType === 'upload' ? 'select-upload' : 'browse');
 });
 
 const outputEl = $('output');
@@ -2588,7 +2641,7 @@ function acceptUploadFile(file) {
   if (interactiveMode || !activeAgentID) return;
 
   if (file.size > MAX_UPLOAD_BYTES) {
-    appendOutput('[-] file too large: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB). Max is 36 KB.');
+    appendOutput('[-] file too large: ' + file.name + ' (' + formatFileSize(file.size) + '). Max is ' + formatFileSize(MAX_UPLOAD_BYTES) + '.');
     return;
   }
 
@@ -2620,6 +2673,11 @@ async function queueUploadTask() {
     setTaskInputError('Upload paths cannot contain line breaks or null bytes.');
     return;
   }
+  if (activeAgent && activeAgent.transport === 'dns' && pendingUploadFile.size > 6 * 1024) {
+    setTaskInputError('This session last checked in over DNS. Large uploads require HTTPS transport.');
+    appendOutput('[-] upload requires HTTPS transport for files larger than a few KB; reconnect the session over HTTPS and try again.', '', activeAgentID);
+    return;
+  }
 
   const file = pendingUploadFile;
   const targetAgentID = activeAgentID;
@@ -2628,10 +2686,14 @@ async function queueUploadTask() {
 
   const reader = new FileReader();
   reader.onload = async e => {
-    const bytes = new Uint8Array(e.target.result);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    const payload = remotePath + ':' + btoa(binary);
+    const dataURL = String(e.target.result || '');
+    const comma = dataURL.indexOf(',');
+    if (comma < 0) {
+      appendOutput('[-] upload read error: unable to encode local file', '', targetAgentID);
+      setQueueBusy(false, '');
+      return;
+    }
+    const payload = remotePath + ':' + dataURL.slice(comma + 1);
 
     try {
       const data = await submitTask(targetAgentID, { type: 'upload', payload });
@@ -2653,7 +2715,13 @@ async function queueUploadTask() {
     setQueueBusy(false, '');
   };
 
-  reader.readAsArrayBuffer(file);
+  reader.readAsDataURL(file);
+}
+
+function basenameFromPath(path) {
+  const value = String(path || '').replace(/[\\/]+$/, '');
+  const idx = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+  return sanitizeArchiveEntryName(idx >= 0 ? value.slice(idx + 1) : value) || 'download.bin';
 }
 
 function hasInvalidPathChars(value) {
@@ -2675,16 +2743,26 @@ function appendOutput(text, cssClass, targetAgentID) {
   updateOutputEmptyState();
 }
 
-function appendDownloadResult(short, ts, base64Value, historical) {
-  appendFileResult({
+function appendDownloadResult(taskID, short, ts, base64Value, historical) {
+  const state = downloadTasks.get(taskID);
+  const sourceName = state && state.filename ? state.filename : 'download.bin';
+  const artifact = appendFileResult({
     short,
     ts,
     base64Value,
-    filename: 'download_' + short,
-    buttonLabel: 'Save File',
+    filename: sourceName,
+    archiveFilename: 'download-' + short + '.zip',
+    mime: 'application/zip',
+    buttonLabel: 'Save Compressed',
     label: 'download ready',
     historical,
+    compress: true,
   });
+  if (state) {
+    state.status = 'done';
+    state.artifactKey = artifact ? artifact.key : '';
+    if (fileBrowserResult) renderFileBrowser(fileBrowserResult);
+  }
 }
 
 function appendArtifactResult(short, ts, payload, label, buttonLabel, historical) {
@@ -2729,10 +2807,10 @@ function appendFileResult(options) {
   button.type = 'button';
   button.className = 'output-download-btn';
   button.textContent = options.buttonLabel;
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     try {
-      triggerDownload(options.base64Value, options.filename, options.mime);
-    } catch (_) {
+      await saveArtifact(options);
+    } catch (err) {
       appendOutput('[err ' + options.short + ' ' + options.ts + '] invalid file payload');
     }
   });
@@ -2740,26 +2818,34 @@ function appendFileResult(options) {
   wrap.appendChild(text);
   wrap.appendChild(button);
   $('output').appendChild(wrap);
-  rememberArtifact(options);
+  const artifact = rememberArtifact(options);
   applyOutputSearch();
   if (shouldScroll) scrollOutputToBottom();
   else updateOutputControls();
   updateOutputEmptyState();
+  return artifact;
 }
 
 function rememberArtifact(options) {
   if (!options || !options.filename || !options.base64Value) return;
-  if (artifactLibrary.some(item => item.taskID === options.short && item.filename === options.filename)) return;
-  artifactLibrary.unshift({
+  const key = options.short + ':' + (options.archiveFilename || options.filename);
+  const existing = artifactLibrary.find(item => item.key === key);
+  if (existing) return existing;
+  const artifact = {
+    key,
     taskID: options.short,
     label: options.label,
     filename: options.filename,
+    archiveFilename: options.archiveFilename || options.filename,
     mime: options.mime || 'application/octet-stream',
     base64Value: options.base64Value,
+    compress: Boolean(options.compress),
     timestamp: options.ts,
-  });
+  };
+  artifactLibrary.unshift(artifact);
   if (artifactLibrary.length > 64) artifactLibrary.pop();
   renderArtifactList();
+  return artifact;
 }
 
 function renderSessionPanels() {
@@ -2923,7 +3009,9 @@ function renderArtifactList() {
   }
   artifactLibrary.forEach(item => {
     const row = panelItem(item.label || 'artifact', item.filename);
-    row.appendChild(panelButton('Save', () => triggerDownload(item.base64Value, item.filename, item.mime)));
+    row.dataset.artifactKey = item.key || '';
+    row.appendChild(panelHint(item.archiveFilename || item.filename));
+    row.appendChild(panelButton('Save', () => saveArtifact(item)));
     list.appendChild(row);
   });
 }
@@ -2976,12 +3064,28 @@ function panelHint(text) {
   return hint;
 }
 
-function triggerDownload(base64Value, filename, mime) {
-  const binary = atob(base64Value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+async function saveArtifact(item) {
+  if (item && item.compress) {
+    await triggerCompressedDownload(item.base64Value, item.filename, item.archiveFilename || item.filename + '.zip');
+    return;
+  }
+  triggerDownload(item.base64Value, item.archiveFilename || item.filename, item.mime);
+}
 
+async function triggerCompressedDownload(base64Value, innerFilename, archiveFilename) {
+  const fileBytes = base64ToBytes(base64Value);
+  const zipBytes = await createZipArchive(innerFilename, fileBytes);
+  const blob = new Blob([zipBytes], { type: 'application/zip' });
+  triggerBlobDownload(blob, archiveFilename);
+}
+
+function triggerDownload(base64Value, filename, mime) {
+  const bytes = base64ToBytes(base64Value);
   const blob = new Blob([bytes], mime ? { type: mime } : undefined);
+  triggerBlobDownload(blob, filename);
+}
+
+function triggerBlobDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -2990,6 +3094,110 @@ function triggerDownload(base64Value, filename, mime) {
   anchor.click();
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
+}
+
+function base64ToBytes(base64Value) {
+  const binary = atob(base64Value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function createZipArchive(filename, fileBytes) {
+  const nameBytes = new TextEncoder().encode(sanitizeArchiveEntryName(filename));
+  const crc = crc32(fileBytes);
+  const compressed = await deflateRaw(fileBytes);
+  const useDeflate = compressed && compressed.length < fileBytes.length;
+  const body = useDeflate ? compressed : fileBytes;
+  const method = useDeflate ? 8 : 0;
+  const now = new Date();
+  const dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((Math.floor(now.getSeconds() / 2)) & 31);
+  const dosDate = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+
+  const local = new Uint8Array(30 + nameBytes.length);
+  const view = new DataView(local.buffer);
+  writeZipHeader(view, 0x04034b50, 0);
+  view.setUint16(4, 20, true);
+  view.setUint16(8, method, true);
+  view.setUint16(10, dosTime, true);
+  view.setUint16(12, dosDate, true);
+  view.setUint32(14, crc, true);
+  view.setUint32(18, body.length, true);
+  view.setUint32(22, fileBytes.length, true);
+  view.setUint16(26, nameBytes.length, true);
+  local.set(nameBytes, 30);
+
+  const central = new Uint8Array(46 + nameBytes.length);
+  const centralView = new DataView(central.buffer);
+  writeZipHeader(centralView, 0x02014b50, 0);
+  centralView.setUint16(4, 20, true);
+  centralView.setUint16(6, 20, true);
+  centralView.setUint16(10, method, true);
+  centralView.setUint16(12, dosTime, true);
+  centralView.setUint16(14, dosDate, true);
+  centralView.setUint32(16, crc, true);
+  centralView.setUint32(20, body.length, true);
+  centralView.setUint32(24, fileBytes.length, true);
+  centralView.setUint16(28, nameBytes.length, true);
+  central.set(nameBytes, 46);
+
+  const eocd = new Uint8Array(22);
+  const eocdView = new DataView(eocd.buffer);
+  writeZipHeader(eocdView, 0x06054b50, 0);
+  eocdView.setUint16(8, 1, true);
+  eocdView.setUint16(10, 1, true);
+  eocdView.setUint32(12, central.length, true);
+  eocdView.setUint32(16, local.length + body.length, true);
+
+  const out = new Uint8Array(local.length + body.length + central.length + eocd.length);
+  out.set(local, 0);
+  out.set(body, local.length);
+  out.set(central, local.length + body.length);
+  out.set(eocd, local.length + body.length + central.length);
+  return out;
+}
+
+function writeZipHeader(view, signature, offset) {
+  view.setUint32(offset, signature, true);
+}
+
+async function deflateRaw(bytes) {
+  if (typeof CompressionStream !== 'function') return null;
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch (_) {
+    return null;
+  }
+}
+
+function sanitizeArchiveEntryName(filename) {
+  return String(filename || 'download.bin')
+    .replace(/^[a-zA-Z]:/, '')
+    .replace(/[\\/]+/g, '_')
+    .replace(/[\u0000-\u001f<>:"|?*]/g, '_')
+    .replace(/^\.+$/, 'download.bin')
+    .slice(0, 180) || 'download.bin';
+}
+
+let crcTable = null;
+function crc32(bytes) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[i] = c >>> 0;
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function baseDownloadTaskID(taskID) {
+  const idx = String(taskID || '').indexOf('-download-');
+  return idx > 0 ? taskID.slice(0, idx) : taskID;
 }
 
 applyTaskTypeUI();

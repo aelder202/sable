@@ -49,17 +49,18 @@ type resultChunkAssembly struct {
 // Agent holds state for a connected implant.
 // Secret is excluded from JSON to prevent it leaking through API responses.
 type Agent struct {
-	ID       string        `json:"id"`
-	Secret   []byte        `json:"-"`
-	Hostname string        `json:"hostname"`
-	OS       string        `json:"os"`
-	Arch     string        `json:"arch"`
-	LastSeen time.Time     `json:"last_seen"`
-	Notes    string        `json:"notes,omitempty"`
-	Tags     []string      `json:"tags,omitempty"`
-	Queued   []TaskSummary `json:"queued,omitempty"`
-	Outputs  []TaskOutput  `json:"outputs,omitempty"`
-	tasks    []*queuedTask
+	ID        string        `json:"id"`
+	Secret    []byte        `json:"-"`
+	Hostname  string        `json:"hostname"`
+	OS        string        `json:"os"`
+	Arch      string        `json:"arch"`
+	Transport string        `json:"transport,omitempty"`
+	LastSeen  time.Time     `json:"last_seen"`
+	Notes     string        `json:"notes,omitempty"`
+	Tags      []string      `json:"tags,omitempty"`
+	Queued    []TaskSummary `json:"queued,omitempty"`
+	Outputs   []TaskOutput  `json:"outputs,omitempty"`
+	tasks     []*queuedTask
 }
 
 // Store is a concurrency-safe in-memory session store.
@@ -81,7 +82,7 @@ const (
 	maxQueuedTasksPerAgent = 64
 	maxOutputsPerAgent     = 256
 	maxAuditEvents         = 512
-	maxChunkedOutputBytes  = 24 * 1024 * 1024
+	maxChunkedOutputBytes  = 72 * 1024 * 1024
 	chunkAssemblyTTL       = 10 * time.Minute
 )
 
@@ -147,15 +148,16 @@ func (s *Store) Get(id string) (Agent, bool) {
 	}
 	out := cloneOutputs(a.Outputs)
 	return Agent{
-		ID:       a.ID,
-		Hostname: a.Hostname,
-		OS:       a.OS,
-		Arch:     a.Arch,
-		LastSeen: a.LastSeen,
-		Notes:    a.Notes,
-		Tags:     cloneStrings(a.Tags),
-		Queued:   queuedSummaries(a.tasks),
-		Outputs:  out,
+		ID:        a.ID,
+		Hostname:  a.Hostname,
+		OS:        a.OS,
+		Arch:      a.Arch,
+		Transport: a.Transport,
+		LastSeen:  a.LastSeen,
+		Notes:     a.Notes,
+		Tags:      cloneStrings(a.Tags),
+		Queued:    queuedSummaries(a.tasks),
+		Outputs:   out,
 	}, true
 }
 
@@ -174,12 +176,21 @@ func (s *Store) Secret(id string) ([]byte, bool) {
 // UpdateInfo updates hostname, OS, arch, and last-seen from a beacon.
 // Replaces the old Touch-only pattern so beacon metadata is kept current.
 func (s *Store) UpdateInfo(id, hostname, osName, arch string) {
+	s.UpdateInfoWithTransport(id, hostname, osName, arch, "")
+}
+
+// UpdateInfoWithTransport updates beacon metadata including the transport used
+// for the most recent check-in.
+func (s *Store) UpdateInfoWithTransport(id, hostname, osName, arch, transport string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if a, ok := s.agents[id]; ok {
 		a.Hostname = hostname
 		a.OS = osName
 		a.Arch = arch
+		if transport != "" {
+			a.Transport = transport
+		}
 		a.LastSeen = time.Now()
 	}
 }
@@ -378,15 +389,16 @@ func (s *Store) UpdateMetadata(agentID, notes string, tags []string) (Agent, boo
 	a.Tags = normalizeTags(tags)
 	s.appendAuditLocked(agentID, "update_metadata", "notes/tags updated")
 	return Agent{
-		ID:       a.ID,
-		Hostname: a.Hostname,
-		OS:       a.OS,
-		Arch:     a.Arch,
-		LastSeen: a.LastSeen,
-		Notes:    a.Notes,
-		Tags:     cloneStrings(a.Tags),
-		Queued:   queuedSummaries(a.tasks),
-		Outputs:  cloneOutputs(a.Outputs),
+		ID:        a.ID,
+		Hostname:  a.Hostname,
+		OS:        a.OS,
+		Arch:      a.Arch,
+		Transport: a.Transport,
+		LastSeen:  a.LastSeen,
+		Notes:     a.Notes,
+		Tags:      cloneStrings(a.Tags),
+		Queued:    queuedSummaries(a.tasks),
+		Outputs:   cloneOutputs(a.Outputs),
 	}, true
 }
 
@@ -423,14 +435,15 @@ func (s *Store) List() []*Agent {
 			continue
 		}
 		out = append(out, &Agent{
-			ID:       a.ID,
-			Hostname: a.Hostname,
-			OS:       a.OS,
-			Arch:     a.Arch,
-			LastSeen: a.LastSeen,
-			Notes:    a.Notes,
-			Tags:     cloneStrings(a.Tags),
-			Queued:   queuedSummaries(a.tasks),
+			ID:        a.ID,
+			Hostname:  a.Hostname,
+			OS:        a.OS,
+			Arch:      a.Arch,
+			Transport: a.Transport,
+			LastSeen:  a.LastSeen,
+			Notes:     a.Notes,
+			Tags:      cloneStrings(a.Tags),
+			Queued:    queuedSummaries(a.tasks),
 		})
 	}
 	return out

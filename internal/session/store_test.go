@@ -29,6 +29,25 @@ func TestRegisterAndGet(t *testing.T) {
 	}
 }
 
+func TestUpdateInfoWithTransport(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "agent-1", Secret: []byte("secret")})
+
+	s.UpdateInfoWithTransport("agent-1", "victim", "linux", "amd64", "dns")
+	got, ok := s.Get("agent-1")
+	if !ok {
+		t.Fatal("expected agent after update")
+	}
+	if got.Transport != "dns" {
+		t.Fatalf("Transport mismatch: got %q", got.Transport)
+	}
+
+	listed := s.List()
+	if len(listed) != 1 || listed[0].Transport != "dns" {
+		t.Fatalf("List should include transport, got %+v", listed)
+	}
+}
+
 func TestGetUnknownReturnsNotFound(t *testing.T) {
 	s := session.NewStore()
 	_, ok := s.Get("nonexistent")
@@ -203,7 +222,7 @@ func TestRecordOutputRejectsOversizedChunkedOutput(t *testing.T) {
 	complete := s.RecordOutput("a1", &protocol.TaskResult{
 		TaskID:     "too-big",
 		Type:       "download",
-		Output:     strings.Repeat("x", 25*1024*1024),
+		Output:     strings.Repeat("x", 73*1024*1024),
 		ChunkIndex: 0,
 		ChunkTotal: 2,
 	})

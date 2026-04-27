@@ -26,7 +26,7 @@ const (
 	fastBeaconInterval   = 100 * time.Millisecond
 	pathBrowseFastWindow = 2 * time.Minute
 	failureLogInterval   = time.Minute
-	resultChunkBytes     = 12 * 1024
+	resultChunkBytes     = 512 * 1024
 	asyncResultQueueSize = 4096
 )
 
@@ -187,18 +187,22 @@ func queueAsyncResult(result *protocol.TaskResult) {
 }
 
 func queueAsyncProgress(taskID, message string) {
+	queueAsyncTypedProgress(taskID, "peas_progress", "peas", message)
+}
+
+func queueAsyncTypedProgress(taskID, resultType, label, message string) {
 	if message == "" {
 		return
 	}
-	progressID := taskID + "-peas-" + time.Now().UTC().Format("150405.000000000")
+	progressID := taskID + "-" + label + "-" + time.Now().UTC().Format("150405.000000000")
 	select {
 	case asyncResults <- &protocol.TaskResult{
 		TaskID: progressID,
-		Type:   "peas_progress",
+		Type:   resultType,
 		Output: message,
 	}:
 	default:
-		log.Printf("dropping PEAS progress for %s: async result queue full", taskID)
+		log.Printf("dropping %s progress for %s: async result queue full", label, taskID)
 	}
 }
 

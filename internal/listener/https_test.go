@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,24 @@ func TestTaskDeliveredOnBeacon(t *testing.T) {
 	}
 	if task.ID != "t1" || task.Type != "shell" {
 		t.Fatalf("unexpected task: %+v", task)
+	}
+}
+
+func TestLargeChunkedOutputAccepted(t *testing.T) {
+	h, store := newTestSetup(t)
+	body := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
+		TaskID:     "large-chunk",
+		Type:       "download",
+		Output:     strings.Repeat("x", 512*1024),
+		ChunkIndex: 0,
+		ChunkTotal: 2,
+	})
+	w := postBeacon(t, h, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for large chunk, got %d", w.Code)
+	}
+	if outs := store.GetOutputs("agent-1"); len(outs) != 0 {
+		t.Fatalf("expected incomplete large chunk to remain hidden, got %+v", outs)
 	}
 }
 

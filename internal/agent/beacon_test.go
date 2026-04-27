@@ -3,8 +3,10 @@ package agent
 import (
 	"bytes"
 	"errors"
+	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,6 +208,42 @@ func TestChunkTaskResultKeepsErrorsWhole(t *testing.T) {
 	if len(chunks) != 1 || chunks[0].ChunkTotal != 0 {
 		t.Fatalf("expected error result to remain unchunked, got %#v", chunks)
 	}
+}
+
+func TestSendBeaconHTTPSReadsLargeTaskResponse(t *testing.T) {
+	body := bytes.Repeat([]byte("a"), 256*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	resp, err := sendBeaconHTTPS(srv.Client(), srv.URL, []byte("beacon"))
+	if err != nil {
+		t.Fatalf("sendBeaconHTTPS returned error: %v", err)
+	}
+	if !bytes.Equal(resp, body) {
+		t.Fatalf("response length = %d, want %d", len(resp), len(body))
+	}
+}
+
+func TestSendBeaconHTTPSRejectsOversizedTaskResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(w, io.LimitReader(zeroReader{}, maxHTTPSTaskResponseBytes+1)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	if _, err := sendBeaconHTTPS(srv.Client(), srv.URL, []byte("beacon")); err == nil {
+		t.Fatal("expected oversized response error")
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func encodeTaskForTest(t *testing.T, secret []byte, task *protocol.Task) []byte {

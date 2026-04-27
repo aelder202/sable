@@ -23,9 +23,9 @@ type Config struct {
 }
 
 const (
-	maxRegisterBodyBytes = 1024
-	maxTaskBodyBytes     = 64 * 1024
-	maxTaskPayloadBytes  = 48 * 1024
+	maxRegisterBodyBytes   = 1024
+	maxTaskBodyBytes       = maxUploadTaskPayloadBytes + 1024
+	maxDNSTaskPayloadBytes = 8 * 1024
 )
 
 // Router is the operator-facing HTTP handler with security middleware applied.
@@ -169,8 +169,8 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 		if !decodeJSONBody(w, r, &req, maxTaskBodyBytes) {
 			return
 		}
-		if len(req.Payload) > maxTaskPayloadBytes {
-			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		if len(req.Payload) > maxTaskPayloadBytes(req.Type) {
+			http.Error(w, req.Type+" payload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		allowed := map[string]bool{
@@ -188,6 +188,10 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if taskTooLargeForAgentTransport(store, agentID, req.Type, req.Payload) {
+			http.Error(w, "upload payload too large for DNS transport; reconnect the agent over HTTPS before queueing large uploads", http.StatusBadRequest)
+			return
+		}
 		task := &protocol.Task{
 			ID:      uuid.New().String(),
 			Type:    req.Type,
@@ -200,6 +204,14 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"task_id": task.ID}) //nolint:errcheck
 	}
+}
+
+func taskTooLargeForAgentTransport(store *session.Store, agentID, taskType, payload string) bool {
+	if taskType != "upload" || len(payload) <= maxDNSTaskPayloadBytes {
+		return false
+	}
+	agent, ok := store.Get(agentID)
+	return ok && agent.Transport == "dns"
 }
 
 func auditHandler(store *session.Store) http.HandlerFunc {
