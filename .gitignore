@@ -1,4 +1,4 @@
-# Generated secrets and credentials — never commit these
+# Generated secrets and credentials. Never commit these.
 config.env
 agents/
 server.crt
@@ -45,3 +45,13 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# AI assistant artifacts
+.claude/
+.cursor/
+.aider*
+.continue/
+.codeium/
+.windsurfrules
+.specstory/
+.github/copilot/
