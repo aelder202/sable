@@ -108,74 +108,186 @@
               </div>
               <div class="console-actions">
                 <button id="jump-latest-btn" hidden>Jump To Latest</button>
+                <button id="session-details-btn" hidden>Session Details</button>
                 <button id="clear-btn" hidden>Clear Output</button>
               </div>
             </div>
           </header>
 
-          <div id="output-shell">
-            <div id="output-empty" class="empty-state">
-              <h3>No session selected</h3>
-              <p>Choose a session to inspect activity and queue tasks. Output is rendered as plain text only.</p>
-            </div>
-            <div id="output"></div>
+          <div id="session-workspace">
+            <section id="session-primary">
+              <div id="output-shell">
+                <div id="output-toolbar" hidden>
+                  <button id="output-search-toggle" type="button" aria-expanded="false" aria-controls="output-search-panel">
+                    Search Output
+                  </button>
+                  <div id="output-search-panel" hidden>
+                    <label class="sr-only" for="output-search">Search output</label>
+                    <input id="output-search" type="search" placeholder="Filter rendered output">
+                  </div>
+                </div>
+                <div id="output-empty" class="empty-state">
+                  <h3>No session selected</h3>
+                  <p>Choose a session to inspect activity and queue tasks. Output is rendered as plain text only.</p>
+                </div>
+                <div id="output"></div>
+              </div>
+
+              <div id="output-resizer" title="Drag to resize output" hidden></div>
+
+              <section id="input-area" hidden>
+                <div class="composer-header">
+                  <div>
+                    <p class="eyebrow">Task Builder</p>
+                    <p id="task-help" class="composer-copy">Choose an action and provide the required value.</p>
+                  </div>
+                  <p id="composer-note" class="composer-note">Tasks are validated before they are queued.</p>
+                </div>
+
+                <p id="session-warning" class="session-warning" hidden></p>
+                <p id="task-status" class="task-status" aria-live="polite" hidden></p>
+
+                <div id="cancel-task-bar" class="cancel-task-bar" hidden>
+                  <div class="cancel-task-copy">
+                    <strong id="cancel-task-title">Cancelable task running</strong>
+                    <span id="cancel-task-text">Cancel the running task from here.</span>
+                  </div>
+                  <label class="sr-only" for="cancel-task-select">Running task to cancel</label>
+                  <select id="cancel-task-select" aria-label="Running task to cancel"></select>
+                  <button id="cancel-task-btn" type="button">Cancel Task</button>
+                </div>
+
+                <div id="task-row">
+                  <div class="task-action-bar">
+                    <label class="sr-only" for="task-type-select">Task action</label>
+                    <select id="task-type-select" aria-label="Task action">
+                      <option value="shell">Shell</option>
+                      <option value="ps">PS</option>
+                      <option value="screenshot">Screenshot</option>
+                      <option value="snapshot">Snapshot</option>
+                      <option value="persistence">Persistence</option>
+                      <option value="peas">PEAS</option>
+                      <option value="download">Download</option>
+                      <option value="upload">Upload</option>
+                      <option value="ls">File Browser</option>
+                      <option value="sleep">Sleep</option>
+                      <option value="interactive">Interactive</option>
+                    </select>
+                    <button id="send-btn">Queue Task</button>
+                    <button id="exit-interactive-btn" hidden>Exit</button>
+                  </div>
+                  <div class="command-line">
+                    <span id="interactive-prompt" hidden>$</span>
+                    <span id="upload-filename-label" hidden></span>
+                    <label class="sr-only" for="task-input">Task value</label>
+                    <input
+                      type="text"
+                      id="task-input"
+                      placeholder="Task value"
+                      autocomplete="off"
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                    >
+                    <button id="choose-file-btn" type="button" hidden title="Select a local file to upload">Choose File</button>
+                    <button id="browse-path-btn" type="button" hidden title="Browse remote directories to choose a destination">Browse</button>
+                  </div>
+                </div>
+                <div id="path-suggestions" class="path-suggestions" hidden></div>
+              </section>
+            </section>
           </div>
 
-          <section id="input-area" hidden>
-            <div class="composer-header">
-              <div>
-                <p class="eyebrow">Task Builder</p>
-                <p id="task-help" class="composer-copy">Choose an action and provide the required value.</p>
+          <div id="session-details-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="session-details-title" hidden>
+            <div class="modal-backdrop" data-close-session-details></div>
+            <aside id="session-rail" class="session-details-panel">
+              <div class="rail-header">
+                <div>
+                  <p class="eyebrow">Session Details</p>
+                  <h4 id="session-details-title">Manage</h4>
+                </div>
+                <div class="modal-controls">
+                  <label class="sr-only" for="session-panel-filter">Detail filter</label>
+                  <select id="session-panel-filter" aria-label="Detail filter">
+                    <option value="all">All</option>
+                    <option value="jobs">Jobs</option>
+                    <option value="artifacts">Artifacts</option>
+                    <option value="notes">Notes</option>
+                    <option value="audit">Audit</option>
+                  </select>
+                  <button id="session-details-close-btn" type="button" aria-label="Close session details">Close</button>
+                </div>
               </div>
-              <p id="composer-note" class="composer-note">Tasks are validated before they are queued.</p>
-            </div>
+              <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Session details">
+                <button class="session-tab active" type="button" role="tab" aria-selected="true" aria-controls="session-panels" data-panel="all">All</button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-panel="jobs">Jobs <span id="jobs-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="artifacts-panel" data-panel="artifacts">Artifacts <span id="artifacts-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="notes-panel" data-panel="notes">Notes</button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-panel="audit">Audit <span id="audit-count">0</span></button>
+              </div>
+              <div id="session-panels" class="session-panels">
+                <section id="jobs-panel" class="session-panel active" role="tabpanel">
+                  <h5>Jobs</h5>
+                  <div id="jobs-list" class="panel-list"></div>
+                </section>
+                <section id="artifacts-panel" class="session-panel" role="tabpanel" hidden>
+                  <h5>Artifacts</h5>
+                  <div id="artifact-list" class="panel-list"></div>
+                </section>
+                <section id="notes-panel" class="session-panel" role="tabpanel" hidden>
+                  <h5>Notes</h5>
+                  <div class="panel-form">
+                    <label class="field-label" for="tag-input">Tags</label>
+                    <input id="tag-input" type="text" placeholder="lab, windows, review">
+                    <label class="field-label" for="notes-input">Notes</label>
+                    <textarea id="notes-input" placeholder="Session notes"></textarea>
+                    <button id="save-metadata-btn" type="button">Save Notes</button>
+                  </div>
+                </section>
+                <section id="audit-panel" class="session-panel" role="tabpanel" hidden>
+                  <h5>Audit</h5>
+                  <div id="audit-list" class="panel-list"></div>
+                </section>
+              </div>
+            </aside>
+          </div>
 
-            <p id="session-warning" class="session-warning" hidden></p>
-            <p id="task-status" class="task-status" aria-live="polite" hidden></p>
-            <p class="shortcut-hint">Shortcuts: <kbd>/</kbd> filter sessions, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>K</kbd> focus task input, <kbd>Esc</kbd> cancel pending UI state.</p>
+          <div id="file-browser-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="file-browser-title" hidden>
+            <div class="modal-backdrop" data-close-file-browser></div>
+            <aside id="file-browser-panel" class="file-browser-panel">
+              <div class="rail-header">
+                <div>
+                  <p class="eyebrow">File Browser</p>
+                  <h4 id="file-browser-title">Remote Files</h4>
+                </div>
+                <div class="modal-controls">
+                  <button id="file-browser-close-btn" type="button" aria-label="Close file browser">Close</button>
+                </div>
+              </div>
+              <div id="file-browser" class="file-browser"></div>
+            </aside>
+          </div>
 
-            <div id="task-type-list" class="task-type-list" role="tablist" aria-label="Task types">
-              <button type="button" class="task-type-button" data-task-type="shell">Shell</button>
-              <button type="button" class="task-type-button" data-task-type="download">Download</button>
-              <button type="button" class="task-type-button" data-task-type="sleep">Sleep</button>
-              <button type="button" class="task-type-button" data-task-type="kill">Kill</button>
-              <button type="button" class="task-type-button" data-task-type="interactive">Interactive</button>
-            </div>
-
-            <div id="task-row">
-              <span id="interactive-prompt" hidden>$</span>
-              <label class="sr-only" for="task-input">Task value</label>
-              <input
-                type="text"
-                id="task-input"
-                placeholder="Task value"
-                autocomplete="off"
-                spellcheck="false"
-                autocapitalize="off"
-                autocorrect="off"
-              >
-              <button id="send-btn">Queue Task</button>
-              <button id="upload-btn" title="Upload a local file to the selected session">Upload</button>
-              <button id="exit-interactive-btn" hidden>Exit</button>
-            </div>
-            <div id="path-suggestions" class="path-suggestions" hidden></div>
-
-            <div id="upload-row" hidden>
-              <span id="upload-filename-label"></span>
-              <label class="sr-only" for="upload-path">Upload destination path</label>
-              <input
-                type="text"
-                id="upload-path"
-                placeholder="Remote path"
-                autocomplete="off"
-                spellcheck="false"
-                autocapitalize="off"
-                autocorrect="off"
-              >
-              <button id="upload-confirm-btn">Send</button>
-              <button id="upload-cancel-btn">Cancel</button>
-            </div>
-          </section>
+          <div id="kill-confirm-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="kill-confirm-title" hidden>
+            <div class="modal-backdrop" data-close-kill-confirm></div>
+            <aside id="kill-confirm-panel" class="confirm-panel">
+              <div class="rail-header">
+                <div>
+                  <p class="eyebrow">Confirm Action</p>
+                  <h4 id="kill-confirm-title">Kill Session</h4>
+                </div>
+                <div class="modal-controls">
+                  <button id="kill-cancel-btn" type="button">Cancel</button>
+                </div>
+              </div>
+              <div class="confirm-body">
+                <p id="kill-confirm-copy">Queue a kill task for this session?</p>
+                <div class="confirm-actions">
+                  <button id="kill-confirm-btn" type="button">Confirm Kill</button>
+                </div>
+              </div>
+            </aside>
+          </div>
         </main>
       </div>
     </div>

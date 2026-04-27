@@ -35,6 +35,13 @@ func validateTaskRequest(taskType, payload string) error {
 		if hasDisallowedPathChars(payload) {
 			return errors.New("completion path contains invalid characters")
 		}
+	case "ls":
+		if strings.TrimSpace(payload) == "" {
+			return errors.New("ls path required")
+		}
+		if hasDisallowedPathChars(payload) {
+			return errors.New("ls path contains invalid characters")
+		}
 	case "pathbrowse":
 		value := strings.TrimSpace(payload)
 		if value != "start" && value != "stop" {
@@ -54,6 +61,17 @@ func validateTaskRequest(taskType, payload string) error {
 		if strings.TrimSpace(payload) != "" {
 			return errors.New("kill does not accept a payload")
 		}
+	case "ps", "screenshot", "persistence", "peas", "snapshot":
+		if strings.TrimSpace(payload) != "" {
+			return errors.New(taskType + " does not accept a payload")
+		}
+	case "cancel":
+		if strings.TrimSpace(payload) == "" || len(strings.TrimSpace(payload)) > 64 {
+			return errors.New("cancel requires a task id payload")
+		}
+		if strings.ContainsAny(payload, "\x00\r\n") {
+			return errors.New("cancel payload contains invalid characters")
+		}
 	case "interactive":
 		switch strings.TrimSpace(payload) {
 		case "start", "stop":
@@ -69,9 +87,9 @@ func validateTaskRequest(taskType, payload string) error {
 
 func normalizeTaskPayload(taskType, payload string) string {
 	switch taskType {
-	case "sleep", "interactive", "complete", "pathbrowse":
+	case "sleep", "interactive", "complete", "pathbrowse", "ls", "cancel":
 		return strings.TrimSpace(payload)
-	case "kill":
+	case "kill", "ps", "screenshot", "persistence", "peas", "snapshot":
 		return ""
 	default:
 		return payload

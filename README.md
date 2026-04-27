@@ -177,6 +177,12 @@ After login the console lists registered sessions, last-seen status, and the tas
 
 Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow; past 10 minutes goes red. Hover for the exact last-seen timestamp. Press `/` to focus the filter.
 
+The task composer keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, and Sleep. One-click actions such as PS, Screenshot, Snapshot, Persistence, PEAS, File Browser, and Interactive hide the command line until input is actually needed. Download path autofill and File Browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between output and input to resize the console, or double-click it to reset the height. Jobs, returned artifacts, notes/tags, and audit events open from the Session Details button as a resizable modal; use the detail filter or tabs to show everything or focus one section.
+
+The Output search control is collapsed by default. Expanding it filters the rendered Output window entries only: task result lines, progress messages, errors, and saveable artifact/download rows. It does not filter the task input, session list, queued jobs, artifacts table, notes, or audit entries. Collapsing the search control clears the filter and restores all visible output rows.
+
+When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
+
 **Console keys**
 
 - **Enter** / **Send**: queue the task
@@ -193,6 +199,16 @@ Type `shell <command>` (or just type, with the `Shell` task type selected) and q
 ![Shell command tasking from the web console](images/shell_command.png)
 
 Output is captured to 512 KB; the command runs under a 60-second deadline. For state that persists across commands (`cd`, environment variables, `source`), use interactive mode.
+
+#### Situational awareness
+
+Use **PS** to request a read-only process listing. Use **Persistence** to list common autorun locations such as Run keys, startup folders, scheduled tasks, systemd units, cron locations, and LaunchAgent folders depending on the agent OS.
+
+Use **Screenshot** to take a single operator-initiated screenshot. The agent downscales and compresses the image, then sends it through bounded result chunks; it is not a continuous capture stream.
+
+Use **PEAS** to download and run the matching PEASS-ng helper for the selected session OS: LinPEAS on Linux/macOS and winPEAS on Windows. Progress entries are posted while it downloads and runs, and the final output is captured as a text artifact and returned as a saveable result.
+
+Use **Snapshot** for a bounded text report covering identity, network, route, disk, and environment basics. Use **File Browser** to open a modal directory explorer with parent navigation, refresh, and file download actions.
 
 #### Interactive shell
 
@@ -216,7 +232,7 @@ Type a partial path for live suggestions: click a directory to keep browsing, th
 
 ![Completed download in the web console](images/download_file.png)
 
-The agent reads the file, base64-encodes it, and the browser auto-decodes and saves it. Practical limit is roughly 38 KB (single-beacon delivery, capped by the 64 KB encrypted beacon body). Larger files would need chunked delivery; Sable does not implement that today.
+The agent reads the file, base64-encodes it, and the browser auto-decodes and saves it. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action.
 
 #### Upload
 
@@ -253,6 +269,13 @@ The CLI is queue-oriented and does not live-stream output or auto-decode downloa
 | `register <id> <secret-hex>` | Pre-register an agent |
 | `use <agent-id>` | Select a session |
 | `shell <command>` | Queue a shell command |
+| `ps` | Queue a read-only process listing |
+| `screenshot` | Queue one bounded screenshot |
+| `persistence` | Queue a defensive persistence-location listing |
+| `peas` | Run LinPEAS or winPEAS and return a text output artifact |
+| `snapshot` | Queue a bounded host snapshot text artifact |
+| `File Browser` | Open a modal file explorer with clickable folders and file download actions |
+| `cancel <task-id>` | Cancel a running background task such as PEAS |
 | `download <remote-path>` | Queue a file read |
 | `upload <local-path> <remote-path>` | Read a local file, base64-encode, queue an upload |
 | `sleep <seconds>` | Change the beacon interval |
@@ -371,8 +394,15 @@ The agent tries HTTPS first and falls back to DNS if HTTPS is unreachable. UDP 5
 | Command | Syntax | Notes |
 |---------|--------|-------|
 | `shell` | `shell <command>` | One-shot in normal mode (`/bin/sh -c` or `cmd /C`). In interactive mode, writes to the persistent shell. 512 KB output cap, 60s timeout. |
+| `ps` | `ps` | Read-only process listing. Output cap 48 KB. |
+| `screenshot` | `screenshot` | One operator-initiated bounded screenshot. Returns a chunked image result, not a stream. |
+| `persistence` | `persistence` | Read-only listing of common persistence locations for the agent OS. Output cap 48 KB. |
+| `peas` | `peas` | Downloads and runs LinPEAS on Linux/macOS or winPEAS on Windows. Returns output as a text artifact. |
+| `snapshot` | `snapshot` | Collects a bounded host snapshot report and returns it as a text artifact. |
+| `ls` | `ls <path>` / `File Browser` | Read-only structured directory listing. In the web Task Builder, Browse Directory opens a modal explorer with folders, parent navigation, refresh, and file download actions; it does not require command-line path entry. |
+| `cancel` | `cancel <task-id>` | Cancels a running background task when supported. |
 | `interactive` | Web UI / API | Open or close a persistent shell on the agent. |
-| `download` | `download <remote-path>` | Read a file off the agent. Practical limit ~38 KB (single-beacon delivery). |
+| `download` | `download <remote-path>` | Read a file off the agent. Results are chunked and reassembled server-side. |
 | `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. ~36 KB cap. |
 | `pathbrowse` | Web UI Download field | Internal: primes fast beaconing for the path browser. |
 | `complete` | Web UI Download field | Internal: lists matching paths under the typed prefix. Extends the fast path-browse window. |
@@ -391,9 +421,13 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `GET` | `/api/agents` | List agents. |
 | `POST` | `/api/agents` | Register. `{"id":"...","secret_hex":"..."}`. `id` is 1–64 alphanumeric+hyphen. |
 | `GET` | `/api/agents/:id` | Single agent with task output history. |
-| `POST` | `/api/agents/:id/task` | Queue a task. `{"type":"shell","payload":"id"}`. Types: `shell`, `download`, `upload`, `complete`, `pathbrowse`, `sleep`, `kill`, `interactive`. `sleep` takes 1–86400, `kill` takes no payload, `interactive` and `pathbrowse` take `start` or `stop`. |
+| `POST` | `/api/agents/:id/task` | Queue a task. `{"type":"shell","payload":"id"}`. Types: `shell`, `ps`, `screenshot`, `persistence`, `peas`, `snapshot`, `ls`, `cancel`, `download`, `upload`, `complete`, `pathbrowse`, `sleep`, `kill`, `interactive`. `sleep` takes 1–86400, `cancel` takes a task ID, `ls`/`download` take a path, no-payload actions reject payloads. |
+| `GET` | `/api/agents/:id/queued` | List queued tasks that have not yet been delivered to the agent. |
+| `DELETE` | `/api/agents/:id/tasks/:taskID` | Remove a queued task before delivery. |
+| `PUT` | `/api/agents/:id/metadata` | Update operator notes and tags for a session. |
 | `GET` | `/api/agents/:id/tasks` | Output history. |
 | `GET` | `/api/agents/:id/terminal/stream` | SSE stream of task output. Used by the web UI for real-time interactive output and path completion. Write deadline is disabled here; everywhere else it is 10s. |
+| `GET` | `/api/audit` | Recent operator and session audit events. |
 
 ---
 
@@ -405,6 +439,8 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 |----------|---------|-------|
 | `SERVER_URL` | `make setup`, agent builds | HTTPS URL agents beacon to. Usually `https://<public-ip>:443`. |
 | `LABEL` | `make setup`, `make register NEW=1` | Identity / build directory name. |
+| `PROFILE` | `make setup` | Optional setup profile: `default`, `fast`, `quiet`, or `dns`. |
+| `AGENT_PROFILE` | generated env, agent builds | Profile name baked into the env file for traceability. |
 | `AGENT_ENV` | build + register targets | Env file. Defaults to `config.env`; `agents/<label>.env` for additionals. |
 | `AGENT_ID` | agent builds, registration | Identity. Generated by `make setup` or `make register NEW=1`. |
 | `AGENT_SECRET_HEX` | agent builds, registration | 32-byte secret as 64 hex chars. |
@@ -416,6 +452,15 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `--debug-addr` | server | Loopback-only pprof endpoint, e.g. `127.0.0.1:6060`. For diagnosing stalls. |
 | `NEW` | `make register` | `NEW=1` mints another identity. |
 | `PASSWORD` | `make register` | Operator password used by the registration call. |
+
+### Agent profiles
+
+`make setup` defaults to a 30-second beacon. Use `PROFILE=fast` for local testing, `PROFILE=quiet` for a slower default interval, or `PROFILE=dns DNS_DOMAIN=<domain>` to generate an env file with DNS fallback configured.
+
+```sh
+make setup SERVER_URL=https://<your-server-ip>:443 PROFILE=fast
+make setup SERVER_URL=https://<your-server-ip>:443 PROFILE=dns DNS_DOMAIN=c2.example.com
+```
 
 ### Operator password sources
 
@@ -434,7 +479,7 @@ Use a password file or env var. Avoid pasting the password into commands that en
 
 | Target | Output | Purpose |
 |--------|--------|---------|
-| `make setup` | `config.env`, `server.crt`, `server.key` | One-time init. Pass `SERVER_URL`. |
+| `make setup` | `config.env`, `server.crt`, `server.key` | One-time init. Pass `SERVER_URL`, optional `LABEL`, `PROFILE`, and `DNS_DOMAIN`. |
 | `make build` | server + Linux agent | Default build for the current host. |
 | `make build-windows-server` | `sable-server.exe` + Linux agent | Windows server bundle from a non-Windows host. |
 | `make build-server` | server only | Rebuild the server. |
@@ -521,7 +566,7 @@ server.key      - generated by `make setup` (gitignored)
 | `make register` cannot connect | Run it on the server host with the server up, or hit the REST API through a tunnel. |
 | Web UI changes do not show | Rebuild and restart the server. `web/` assets are embedded. |
 | Upload rejected | Keep the file under ~36 KB so base64 fits inside the 48 KB task envelope. |
-| Download truncated or fails | Single-beacon delivery; files over ~38 KB will not fit. No chunking yet. |
+| Download, screenshot, PEAS, or snapshot result is large | Results are split into bounded chunks and reassembled server-side before the UI offers the save action. Check output history if a chunked result appears delayed. |
 | DNS fallback receives nothing | Confirm `--dns-domain` / `SABLE_DNS_DOMAIN`, UDP 53 reachability, the agent built with the same `DNS_DOMAIN`, and the NS record. |
 | Server listening but unresponsive | Restart with `--debug-addr 127.0.0.1:6060`, then capture `http://127.0.0.1:6060/debug/pprof/goroutine?debug=2`. |
 

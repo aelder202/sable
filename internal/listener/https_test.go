@@ -180,3 +180,77 @@ func TestTaskDeliveredOnBeacon(t *testing.T) {
 		t.Fatalf("unexpected task: %+v", task)
 	}
 }
+
+func TestChunkedOutputDefersTaskDeliveryUntilComplete(t *testing.T) {
+	h, store := newTestSetup(t)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "next-task", Type: "shell", Payload: "id"}); err != nil {
+		t.Fatalf("EnqueueTask agent-1: %v", err)
+	}
+
+	first := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
+		TaskID:     "chunked-result",
+		Type:       "download",
+		Output:     "hello ",
+		ChunkIndex: 0,
+		ChunkTotal: 2,
+	})
+	w := postBeacon(t, h, first)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first chunk, got %d", w.Code)
+	}
+	task, err := protocol.DecodeTask(w.Body.Bytes(), testSecret)
+	if err != nil {
+		t.Fatalf("DecodeTask first chunk: %v", err)
+	}
+	if task.Type != "noop" {
+		t.Fatalf("expected noop while chunked output is incomplete, got %+v", task)
+	}
+	if outs := store.GetOutputs("agent-1"); len(outs) != 0 {
+		t.Fatalf("expected no visible output before reassembly, got %+v", outs)
+	}
+
+	second := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
+		TaskID:     "chunked-result",
+		Type:       "download",
+		Output:     "world",
+		ChunkIndex: 1,
+		ChunkTotal: 2,
+	})
+	w = postBeacon(t, h, second)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for second chunk, got %d", w.Code)
+	}
+	task, err = protocol.DecodeTask(w.Body.Bytes(), testSecret)
+	if err != nil {
+		t.Fatalf("DecodeTask second chunk: %v", err)
+	}
+	if task.ID != "next-task" {
+		t.Fatalf("expected queued task after final chunk, got %+v", task)
+	}
+	outs := store.GetOutputs("agent-1")
+	if len(outs) != 1 || outs[0].Output != "hello world" {
+		t.Fatalf("expected reassembled output, got %+v", outs)
+	}
+}
+
+func makeBeaconWithOutput(t *testing.T, agentID string, secret []byte, output *protocol.TaskResult) []byte {
+	t.Helper()
+	n, err := protocol.RandomNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &protocol.Beacon{
+		AgentID:    agentID,
+		Timestamp:  time.Now().Unix(),
+		Nonce:      n,
+		Hostname:   "victim",
+		OS:         "linux",
+		Arch:       "amd64",
+		TaskOutput: output,
+	}
+	encoded, err := protocol.EncodeBeacon(b, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}

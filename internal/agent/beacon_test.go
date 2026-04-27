@@ -171,6 +171,43 @@ func TestLogBeaconFailureThrottlesRepeatedFailures(t *testing.T) {
 	}
 }
 
+func TestChunkTaskResultSplitsLargeOutput(t *testing.T) {
+	output := strings.Repeat("a", resultChunkBytes*2+7)
+	chunks := chunkTaskResult(&protocol.TaskResult{
+		TaskID: "task-large",
+		Type:   "download",
+		Output: output,
+	})
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	var rebuilt strings.Builder
+	for i, chunk := range chunks {
+		if chunk.TaskID != "task-large" || chunk.Type != "download" {
+			t.Fatalf("unexpected chunk identity: %#v", chunk)
+		}
+		if chunk.ChunkIndex != i || chunk.ChunkTotal != len(chunks) {
+			t.Fatalf("unexpected chunk metadata: %#v", chunk)
+		}
+		rebuilt.WriteString(chunk.Output)
+	}
+	if rebuilt.String() != output {
+		t.Fatal("chunked output did not reassemble to original output")
+	}
+}
+
+func TestChunkTaskResultKeepsErrorsWhole(t *testing.T) {
+	chunks := chunkTaskResult(&protocol.TaskResult{
+		TaskID: "task-error",
+		Type:   "shell",
+		Output: strings.Repeat("x", resultChunkBytes*2),
+		Error:  "failed",
+	})
+	if len(chunks) != 1 || chunks[0].ChunkTotal != 0 {
+		t.Fatalf("expected error result to remain unchunked, got %#v", chunks)
+	}
+}
+
 func encodeTaskForTest(t *testing.T, secret []byte, task *protocol.Task) []byte {
 	t.Helper()
 	encoded, err := protocol.EncodeTask(task, secret)

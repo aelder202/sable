@@ -40,6 +40,7 @@ func NewRouter(store *session.Store, cfg *Config) *Router {
 	auth := requireJWT(cfg.JWTSecret)
 
 	mux.HandleFunc("/api/auth/login", limitLogin(rl, loginHandler(cfg)))
+	mux.Handle("/api/audit", auth(http.HandlerFunc(auditHandler(store))))
 	mux.Handle("/api/agents", auth(http.HandlerFunc(agentsCollectionHandler(store))))
 	mux.Handle("/api/agents/", auth(http.HandlerFunc(agentRouter(store))))
 
@@ -132,7 +133,17 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 		case "task":
 			queueTaskHandler(store, agentID)(w, r)
 		case "tasks":
-			getTaskOutputsHandler(store, agentID)(w, r)
+			if len(parts) == 2 {
+				getTaskOutputsHandler(store, agentID)(w, r)
+			} else if len(parts) == 3 {
+				deleteQueuedTaskHandler(store, agentID, parts[2])(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+		case "queued":
+			getQueuedTasksHandler(store, agentID)(w, r)
+		case "metadata":
+			updateAgentMetadataHandler(store, agentID)(w, r)
 		case "terminal":
 			if len(parts) > 2 && parts[2] == "stream" {
 				terminalStreamHandler(store, agentID)(w, r)
@@ -166,6 +177,8 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 			"shell": true, "upload": true, "download": true,
 			"sleep": true, "kill": true, "interactive": true,
 			"complete": true, "pathbrowse": true,
+			"ps": true, "screenshot": true, "persistence": true, "peas": true,
+			"snapshot": true, "cancel": true, "ls": true,
 		}
 		if !allowed[req.Type] {
 			http.Error(w, "invalid task type", http.StatusBadRequest)
@@ -189,6 +202,17 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 	}
 }
 
+func auditHandler(store *session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.AuditLog()) //nolint:errcheck
+	}
+}
+
 // getTaskOutputsHandler returns the task output history for a given agent.
 func getTaskOutputsHandler(store *session.Store, agentID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -199,5 +223,61 @@ func getTaskOutputsHandler(store *session.Store, agentID string) http.HandlerFun
 		outputs := store.GetOutputs(agentID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(outputs) //nolint:errcheck
+	}
+}
+
+func getQueuedTasksHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.GetQueuedTasks(agentID)) //nolint:errcheck
+	}
+}
+
+func deleteQueuedTaskHandler(store *session.Store, agentID, taskID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if taskID == "" || len(taskID) > 64 {
+			http.Error(w, "invalid task id", http.StatusBadRequest)
+			return
+		}
+		if !store.RemoveQueuedTask(agentID, taskID) {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func updateAgentMetadataHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Notes string   `json:"notes"`
+			Tags  []string `json:"tags"`
+		}
+		if !decodeJSONBody(w, r, &req, maxTaskBodyBytes) {
+			return
+		}
+		if len(req.Notes) > 4096 || len(req.Tags) > 32 {
+			http.Error(w, "metadata too large", http.StatusBadRequest)
+			return
+		}
+		agent, ok := store.UpdateMetadata(agentID, req.Notes, req.Tags)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(agent) //nolint:errcheck
 	}
 }

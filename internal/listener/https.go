@@ -139,11 +139,15 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.store.UpdateInfo(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch)
+	outputComplete := true
 	if beacon.TaskOutput != nil {
-		h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)
+		outputComplete = h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)
 	}
 
-	task := h.store.DequeueTask(beacon.AgentID)
+	var task *protocol.Task
+	if outputComplete {
+		task = h.store.DequeueTask(beacon.AgentID)
+	}
 	if task == nil {
 		task = &protocol.Task{Type: "noop"}
 	}
