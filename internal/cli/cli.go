@@ -75,6 +75,13 @@ func (c *CLI) Run() {
 			fmt.Println("  use <agent-id>               - interact with a session")
 			fmt.Println("  back                         - return to main prompt")
 			fmt.Println("  shell <cmd>                  - run shell command on active agent")
+			fmt.Println("  ps                           - list processes on active agent")
+			fmt.Println("  screenshot                   - capture one bounded screenshot")
+			fmt.Println("  persistence                  - list common persistence locations")
+			fmt.Println("  peas                         - run LinPEAS or winPEAS based on agent OS")
+			fmt.Println("  snapshot                     - collect host snapshot report")
+			fmt.Println("  ls <path>                    - list remote directory")
+			fmt.Println("  cancel <task-id>             - cancel supported running background task")
 			fmt.Println("  sleep <seconds>              - update beacon interval")
 			fmt.Println("  download <path>              - download file from agent")
 			fmt.Println("  upload <src> <dst>           - upload local file to agent (src:dst)")
@@ -97,7 +104,7 @@ func (c *CLI) Run() {
 			fmt.Printf("[*] interacting with %s\n", activeAgent)
 		case "back":
 			activeAgent = ""
-		case "shell", "download", "sleep", "kill":
+		case "shell", "download", "sleep", "kill", "ps", "screenshot", "persistence", "peas", "snapshot", "ls", "cancel":
 			if activeAgent == "" {
 				fmt.Println("[-] no active agent; use 'use <agent-id>'")
 				continue

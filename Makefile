@@ -26,6 +26,7 @@ SERVER_URL       ?= https://127.0.0.1:443
 CERT_FP_HEX      ?= changeme-fingerprint-hex
 SLEEP_SECONDS    ?= 30
 DNS_DOMAIN       ?=
+PROFILE          ?=
 
 # Fall back to the first hyphen-separated chunk of AGENT_ID (the first 8 hex
 # chars of a standard UUID) when AGENT_LABEL is absent. This keeps env files
@@ -52,9 +53,9 @@ LDFLAGS := $(STRIP) \
 .PRECIOUS: register-tool$(EXE)
 
 ## First-time setup: generates config.env, server.crt, server.key.
-## Usage: make setup SERVER_URL=https://<public-server-ip>:443 [LABEL=<label>]
+## Usage: make setup SERVER_URL=https://<public-server-ip>:443 [LABEL=<label>] [PROFILE=fast|quiet|dns] [DNS_DOMAIN=example.com]
 setup:
-	go run ./tools/setup $(if $(LABEL),--label "$(LABEL)")
+	go run ./tools/setup $(if $(LABEL),--label "$(LABEL)") $(if $(PROFILE),--profile "$(PROFILE)") $(if $(DNS_DOMAIN),--dns-domain "$(DNS_DOMAIN)")
 
 ## Build the recommended bundle for this machine: host-native Sable server + a per-agent Linux binary.
 build:

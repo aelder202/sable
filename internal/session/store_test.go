@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +160,59 @@ func TestRecordAndGetOutputs(t *testing.T) {
 	}
 	if outs[0].TaskID != "t1" || outs[1].Error != "oops" {
 		t.Fatalf("output mismatch: %+v", outs)
+	}
+}
+
+func TestRecordOutputReassemblesChunks(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+
+	if complete := s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID:     "chunked",
+		Type:       "download",
+		Output:     "hello ",
+		ChunkIndex: 0,
+		ChunkTotal: 2,
+	}); complete {
+		t.Fatal("expected first chunk to be incomplete")
+	}
+
+	if complete := s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID:     "chunked",
+		Type:       "download",
+		Output:     "world",
+		ChunkIndex: 1,
+		ChunkTotal: 2,
+	}); !complete {
+		t.Fatal("expected second chunk to complete output")
+	}
+
+	outs := s.GetOutputs("a1")
+	if len(outs) != 1 {
+		t.Fatalf("expected one reassembled output, got %d", len(outs))
+	}
+	if outs[0].TaskID != "chunked" || outs[0].Type != "download" || outs[0].Output != "hello world" {
+		t.Fatalf("unexpected reassembled output: %+v", outs[0])
+	}
+}
+
+func TestRecordOutputRejectsOversizedChunkedOutput(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+
+	complete := s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID:     "too-big",
+		Type:       "download",
+		Output:     strings.Repeat("x", 25*1024*1024),
+		ChunkIndex: 0,
+		ChunkTotal: 2,
+	})
+	if !complete {
+		t.Fatal("oversized output should complete with an error record")
+	}
+	outs := s.GetOutputs("a1")
+	if len(outs) != 1 || outs[0].Error == "" {
+		t.Fatalf("expected oversized error record, got %+v", outs)
 	}
 }
 

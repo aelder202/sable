@@ -30,6 +30,14 @@ let pathCompletionTimer = null;
 let pathBrowseStates = new Map();
 let deferredPathCompletionOutputs = new Map();
 let deferredPathBrowseOutputs = new Map();
+let artifactLibrary = [];
+let auditLog = [];
+let activeSessionPanel = 'all';
+let fileBrowserPath = '';
+let fileBrowserResult = null;
+let fileBrowserMode = 'browse';
+let pendingKillAgentID = '';
+let outputSearchExpanded = false;
 
 const MAX_LOGIN_BODY_BYTES = 4096;
 const MAX_UPLOAD_BYTES = 36 * 1024;
@@ -52,12 +60,68 @@ const TASK_TYPES = {
     requiresPayload: true,
     inputMode: 'text',
   },
+  ps: {
+    buttonLabel: 'Queue PS',
+    help: 'List running processes for the selected session.',
+    note: 'Process listing is a read-only, one-shot situational awareness task.',
+    placeholder: 'No additional value required',
+    requiresPayload: false,
+    inputMode: 'text',
+  },
+  screenshot: {
+    buttonLabel: 'Take Screenshot',
+    help: 'Capture one bounded screenshot from the selected session.',
+    note: 'Screenshots are operator-initiated, downsampled, and delivered as bounded chunks.',
+    placeholder: 'No additional value required',
+    requiresPayload: false,
+    inputMode: 'text',
+  },
+  snapshot: {
+    buttonLabel: 'Queue Snapshot',
+    help: 'Collect a bounded host snapshot report from the selected session.',
+    note: 'Snapshot returns identity, network, route, disk, and environment basics as a text artifact.',
+    placeholder: 'No additional value required',
+    requiresPayload: false,
+    inputMode: 'text',
+  },
+  persistence: {
+    buttonLabel: 'Check Persistence',
+    help: 'List common persistence locations for defensive review.',
+    note: 'Persistence detection reads common autorun locations and does not modify them.',
+    placeholder: 'No additional value required',
+    requiresPayload: false,
+    inputMode: 'text',
+  },
+  peas: {
+    buttonLabel: 'Run PEAS',
+    help: 'Run LinPEAS or winPEAS based on the selected session OS.',
+    note: 'PEAS output is captured as a text artifact and returned through chunked results.',
+    placeholder: 'No additional value required',
+    requiresPayload: false,
+    inputMode: 'text',
+  },
   download: {
     buttonLabel: 'Queue Download',
     help: 'Request a remote file path and receive the result as a browser download.',
     note: 'Path suggestions are prepared automatically for online sessions.',
     placeholder: 'Enter a remote file path',
     requiresPayload: true,
+    inputMode: 'text',
+  },
+  upload: {
+    buttonLabel: 'Queue Upload',
+    help: 'Send a local file to a remote destination path on the selected session.',
+    note: 'Path suggestions are prepared automatically. Pick a file with Choose File or Browse remote directories to set the destination.',
+    placeholder: 'Enter a remote destination path',
+    requiresPayload: true,
+    inputMode: 'text',
+  },
+  ls: {
+    buttonLabel: 'Browse Directory',
+    help: 'Open a navigable remote file browser for the selected session.',
+    note: 'Browse folders in a modal and download files without using the command line.',
+    placeholder: 'Open File Browser to navigate remote files',
+    requiresPayload: false,
     inputMode: 'text',
   },
   sleep: {
@@ -88,10 +152,14 @@ const TASK_TYPES = {
 
 const $ = id => document.getElementById(id);
 const taskTypeButtons = Array.from(document.querySelectorAll('[data-task-type]'));
+const taskTypeSelect = $('task-type-select');
+const sessionPanelTabs = Array.from(document.querySelectorAll('.session-tab'));
+const sessionPanelFilter = $('session-panel-filter');
+const outputShellEl = $('output-shell');
+const outputResizerEl = $('output-resizer');
 const outputEmptyTitle = $('output-empty').querySelector('h3');
 const outputEmptyText = $('output-empty').querySelector('p');
 
-$('upload-path').maxLength = MAX_REMOTE_PATH;
 
 async function apiFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -204,8 +272,15 @@ function setLoggedOutState(message) {
   pathBrowseStates = new Map();
   deferredPathCompletionOutputs = new Map();
   deferredPathBrowseOutputs = new Map();
+  artifactLibrary = [];
+  auditLog = [];
+  activeSessionPanel = 'all';
+  fileBrowserPath = '';
+  fileBrowserResult = null;
+  outputSearchExpanded = false;
   clearPathCompletionTimer();
   hidePathSuggestions();
+  hideFileBrowser();
 
   $('main-view').hidden = true;
   $('login-view').hidden = false;
@@ -217,10 +292,16 @@ function setLoggedOutState(message) {
   $('agent-list').textContent = '';
   $('output').textContent = '';
   $('input-area').hidden = true;
+  $('output-toolbar').hidden = true;
   $('clear-btn').hidden = true;
   $('clear-btn').disabled = false;
+  $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
   $('console-title').textContent = 'Select a session';
+  closeSessionDetailsModal();
+  closeFileBrowserModal();
+  closeKillConfirmModal();
+  $('output-resizer').hidden = true;
   $('session-count').textContent = '0 sessions';
   $('refresh-indicator').textContent = 'Signed out';
   $('count-online').textContent = '0';
@@ -229,7 +310,15 @@ function setLoggedOutState(message) {
   $('meta-state').className = 'meta-chip meta-state-chip';
   $('session-warning').hidden = true;
   $('session-warning').textContent = '';
-  hideUploadPrompt();
+  $('jobs-list').textContent = '';
+  $('artifact-list').textContent = '';
+  $('audit-list').textContent = '';
+  $('tag-input').value = '';
+  $('notes-input').value = '';
+  $('output-search').value = '';
+  updateOutputSearchUI(false);
+  clearPendingUpload();
+  closeKillConfirmModal();
   setQueueBusy(false, '');
   updateOutputControls();
   updateOutputEmptyState();
@@ -340,12 +429,6 @@ function scrollOutputToBottom() {
 function focusPrimaryInput(selectContents, allowWhileBusy) {
   if (!activeAgentID || (taskRequestInFlight && !allowWhileBusy)) return;
 
-  if (!$('upload-row').hidden) {
-    $('upload-path').focus();
-    if (selectContents) $('upload-path').select();
-    return;
-  }
-
   if (interactiveMode) {
     if (interactiveReady) {
       $('task-input').focus();
@@ -406,24 +489,24 @@ function updateTaskContextStatus() {
 
 function setQueueBusy(isBusy, message) {
   taskRequestInFlight = isBusy;
-  const downloadWaiting = selectedTaskType === 'download' && !activePathBrowseReady();
+  const pathBrowserWaiting = pathBrowserTaskSelected() && !activePathBrowseReady();
 
   taskTypeButtons.forEach(button => {
     button.disabled = isBusy || interactiveMode;
   });
+  if (taskTypeSelect) taskTypeSelect.disabled = isBusy || interactiveMode;
 
-  $('send-btn').disabled = isBusy || downloadWaiting;
-  $('upload-btn').disabled = isBusy || interactiveMode || !activeAgentID;
-  $('upload-confirm-btn').disabled = isBusy;
-  $('upload-cancel-btn').disabled = isBusy;
+  $('send-btn').disabled = isBusy || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
+  $('choose-file-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
+  $('browse-path-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
+  $('cancel-task-select').disabled = isBusy;
+  $('cancel-task-btn').disabled = isBusy;
   $('clear-btn').disabled = isBusy;
 
   if (interactiveMode) {
     $('task-input').disabled = isBusy || !interactiveReady;
-  } else if (!$('upload-row').hidden) {
-    $('upload-path').disabled = isBusy;
   } else {
-    $('task-input').disabled = isBusy || !TASK_TYPES[selectedTaskType].requiresPayload || downloadWaiting;
+    $('task-input').disabled = isBusy || !TASK_TYPES[selectedTaskType].requiresPayload || pathBrowserWaiting;
   }
 
   if (isBusy) setTaskStatus(message || 'Submitting task...', 'status-busy');
@@ -459,6 +542,8 @@ async function loadAgents() {
     warmOnlinePathBrowsers(allAgents);
     syncActiveAgent();
     renderAgentList();
+    renderSessionPanels();
+    loadAudit();
   } catch (_) {
     $('refresh-indicator').textContent = 'Refresh failed';
   }
@@ -535,17 +620,28 @@ function clearActiveSession() {
   activeAgent = null;
   currentOutputs = [];
   seenTaskIDs = new Set();
+  fileBrowserPath = '';
+  fileBrowserResult = null;
   clearKillConfirmation();
   hasHydratedOutputs = false;
   followOutput = true;
   $('output').textContent = '';
   $('input-area').hidden = true;
   $('clear-btn').hidden = true;
+  $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
   $('console-title').textContent = 'Select a session';
+  closeSessionDetailsModal();
+  closeFileBrowserModal();
+  $('output-resizer').hidden = true;
   $('session-warning').hidden = true;
   $('session-warning').textContent = '';
-  hideUploadPrompt();
+  artifactLibrary = [];
+  hideFileBrowser();
+  activeSessionPanel = 'all';
+  updateSessionPanelTabs();
+  renderSessionPanels();
+  clearPendingUpload();
   updateTaskContextStatus();
   updateOutputControls();
   updateOutputEmptyState();
@@ -592,12 +688,20 @@ function buildAgentItem(agent) {
   li.className = 'agent-item';
   if (agent.id === activeAgentID) li.classList.add('active');
 
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'agent-card';
-  button.title = agent.id;
-  button.disabled = taskRequestInFlight;
-  button.addEventListener('click', () => selectAgent(agent));
+  const card = document.createElement('article');
+  card.className = 'agent-card';
+  card.title = agent.id;
+  card.tabIndex = taskRequestInFlight ? -1 : 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-disabled', taskRequestInFlight ? 'true' : 'false');
+  card.addEventListener('click', () => {
+    if (!taskRequestInFlight) selectAgent(agent);
+  });
+  card.addEventListener('keydown', e => {
+    if (taskRequestInFlight || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    selectAgent(agent);
+  });
 
   const topRow = document.createElement('div');
   topRow.className = 'agent-row-top';
@@ -631,10 +735,25 @@ function buildAgentItem(agent) {
   idLabel.className = 'agent-id';
   idLabel.textContent = 'ID ' + (agent.id || '').slice(0, 8);
 
-  button.appendChild(topRow);
-  button.appendChild(bottomRow);
-  button.appendChild(idLabel);
-  li.appendChild(button);
+  const actions = document.createElement('div');
+  actions.className = 'agent-actions';
+
+  const killButton = document.createElement('button');
+  killButton.type = 'button';
+  killButton.className = 'agent-kill-btn';
+  killButton.textContent = 'Kill';
+  killButton.disabled = taskRequestInFlight;
+  killButton.addEventListener('click', e => {
+    e.stopPropagation();
+    openKillConfirmModal(agent);
+  });
+  actions.appendChild(killButton);
+
+  card.appendChild(topRow);
+  card.appendChild(bottomRow);
+  card.appendChild(idLabel);
+  card.appendChild(actions);
+  li.appendChild(card);
 
   return li;
 }
@@ -714,7 +833,9 @@ function selectAgent(agent) {
   hasHydratedOutputs = false;
   followOutput = true;
   $('output').textContent = '';
-  hideUploadPrompt();
+  $('output-search').value = '';
+  updateOutputSearchUI(false);
+  clearPendingUpload();
   stopSSEStream();
   renderAgentList();
   updateSessionHeader();
@@ -734,6 +855,12 @@ function updateSessionHeader() {
     $('console-meta').hidden = true;
     $('input-area').hidden = true;
     $('clear-btn').hidden = true;
+    $('session-details-btn').hidden = true;
+    closeSessionDetailsModal();
+    closeFileBrowserModal();
+    closeKillConfirmModal();
+    $('output-toolbar').hidden = true;
+    $('output-resizer').hidden = true;
     $('session-warning').hidden = true;
     updateOutputEmptyState();
     return;
@@ -751,9 +878,47 @@ function updateSessionHeader() {
   $('console-meta').hidden = false;
   $('input-area').hidden = false;
   $('clear-btn').hidden = false;
+  $('session-details-btn').hidden = false;
+  $('output-toolbar').hidden = false;
+  $('output-resizer').hidden = false;
+  $('tag-input').value = (activeAgent.tags || []).join(', ');
+  $('notes-input').value = activeAgent.notes || '';
   updateSessionWarning();
 
   if (!interactiveMode) applyTaskTypeUI();
+  renderSessionPanels();
+}
+
+function applyOutputSearch() {
+  const input = $('output-search');
+  const query = input ? input.value.trim().toLowerCase() : '';
+  Array.from($('output').children).forEach(child => {
+    if (!query) {
+      child.hidden = false;
+      return;
+    }
+    const haystack = child.dataset.searchText || child.textContent.toLowerCase();
+    child.hidden = !haystack.includes(query);
+  });
+}
+
+function updateOutputSearchUI(expanded) {
+  outputSearchExpanded = Boolean(expanded);
+  const toggle = $('output-search-toggle');
+  const panel = $('output-search-panel');
+  if (!toggle || !panel) return;
+
+  toggle.setAttribute('aria-expanded', outputSearchExpanded ? 'true' : 'false');
+  toggle.classList.toggle('active', outputSearchExpanded);
+  panel.hidden = !outputSearchExpanded;
+
+  if (!outputSearchExpanded) {
+    $('output-search').value = '';
+    applyOutputSearch();
+    return;
+  }
+
+  window.requestAnimationFrame(() => $('output-search').focus());
 }
 
 function updateOutputEmptyState() {
@@ -824,8 +989,19 @@ function handleTaskOutput(output, historical) {
     return;
   }
 
+  if (output.type === 'ls' && output.output) {
+    if (handleFileBrowserOutput(output)) {
+      renderSessionPanels();
+      return;
+    }
+  }
+
   if (output.error) {
+    if (output.type === 'ls' && !$('file-browser-modal').hidden) {
+      renderFileBrowserError(output.error);
+    }
     appendOutput('[err ' + short + ' ' + ts + '] ' + output.error);
+    renderSessionPanels();
     return;
   }
 
@@ -837,6 +1013,24 @@ function handleTaskOutput(output, historical) {
     }
 
     appendDownloadResult(short, ts, payload, historical);
+    renderSessionPanels();
+    return;
+  }
+
+  if ((output.type === 'screenshot' || output.type === 'peas' || output.type === 'snapshot') && output.output) {
+    appendArtifactResult(
+      short,
+      ts,
+      output.output.trim(),
+      output.type === 'peas'
+        ? 'PEAS output ready'
+        : output.type === 'snapshot'
+          ? 'snapshot ready'
+          : 'screenshot ready',
+      output.type === 'screenshot' ? 'Save Screenshot' : 'Save Output',
+      historical,
+    );
+    renderSessionPanels();
     return;
   }
 
@@ -847,11 +1041,31 @@ function handleTaskOutput(output, historical) {
       appendOutput('[' + short + ' ' + ts + ']\n' + output.output.trimEnd());
     }
   }
+  renderSessionPanels();
 }
 
 taskTypeButtons.forEach(button => {
   button.addEventListener('click', () => setTaskType(button.dataset.taskType));
 });
+if (taskTypeSelect) {
+  taskTypeSelect.addEventListener('change', () => setTaskType(taskTypeSelect.value));
+}
+
+sessionPanelTabs.forEach(button => {
+  button.addEventListener('click', () => setSessionPanel(button.dataset.panel));
+});
+if (sessionPanelFilter) {
+  sessionPanelFilter.addEventListener('change', () => setSessionPanel(sessionPanelFilter.value));
+}
+$('output-search-toggle').addEventListener('click', () => updateOutputSearchUI(!outputSearchExpanded));
+$('session-details-btn').addEventListener('click', openSessionDetailsModal);
+$('session-details-close-btn').addEventListener('click', closeSessionDetailsModal);
+document.querySelector('[data-close-session-details]').addEventListener('click', closeSessionDetailsModal);
+$('file-browser-close-btn').addEventListener('click', closeFileBrowserModal);
+document.querySelector('[data-close-file-browser]').addEventListener('click', closeFileBrowserModal);
+$('kill-cancel-btn').addEventListener('click', closeKillConfirmModal);
+document.querySelector('[data-close-kill-confirm]').addEventListener('click', closeKillConfirmModal);
+$('kill-confirm-btn').addEventListener('click', confirmKillSession);
 
 function setTaskType(type) {
   if (!TASK_TYPES[type]) return;
@@ -866,14 +1080,15 @@ function setTaskType(type) {
   clearTaskInputError();
   applyTaskTypeUI();
   restoreActiveTaskDraft();
-  if (type === 'download') schedulePathCompletion();
+  if (pathSuggestionTaskSelected()) schedulePathCompletion();
   focusPrimaryInput(true);
 }
 
 function applyTaskTypeUI() {
   const config = TASK_TYPES[selectedTaskType];
-  const downloadSelected = selectedTaskType === 'download';
-  const downloadWaiting = downloadSelected && !activePathBrowseReady();
+  const pathTaskSelected = pathSuggestionTaskSelected();
+  const pathBrowserSelected = pathBrowserTaskSelected();
+  const pathBrowserWaiting = pathBrowserSelected && !activePathBrowseReady();
   const agentOnline = activeAgent && getAgentState(activeAgent) === 'online';
 
   taskTypeButtons.forEach(button => {
@@ -882,50 +1097,72 @@ function applyTaskTypeUI() {
     button.setAttribute('aria-selected', active ? 'true' : 'false');
     button.disabled = taskRequestInFlight;
   });
+  if (taskTypeSelect) {
+    taskTypeSelect.value = selectedTaskType;
+    taskTypeSelect.disabled = taskRequestInFlight;
+  }
 
   if (interactiveMode) {
-    $('task-type-list').hidden = true;
+    if (taskTypeSelect) taskTypeSelect.hidden = true;
+    document.querySelector('.command-line').hidden = false;
     hidePathSuggestions();
     return;
   }
 
-  $('task-type-list').hidden = false;
+  if (taskTypeSelect) taskTypeSelect.hidden = false;
+  document.querySelector('.command-line').hidden = !config.requiresPayload;
   $('task-help').classList.remove('error-copy');
   $('composer-note').classList.remove('error-note');
   $('task-help').textContent = config.help;
-  $('composer-note').textContent = downloadSelected
+  $('composer-note').textContent = pathBrowserSelected
     ? pathBrowserComposerNote(agentOnline)
     : config.note;
   $('task-input').classList.remove('input-error');
-  $('task-input').disabled = taskRequestInFlight || !config.requiresPayload || downloadWaiting;
-  $('task-input').placeholder = downloadSelected
+  $('task-input').disabled = taskRequestInFlight || !config.requiresPayload || pathBrowserWaiting;
+  $('task-input').placeholder = pathTaskSelected
     ? pathBrowserPlaceholder(agentOnline)
     : config.placeholder;
   $('task-input').inputMode = config.inputMode;
-  $('task-input').maxLength = selectedTaskType === 'download'
+  $('task-input').maxLength = pathTaskSelected
     ? MAX_REMOTE_PATH
     : selectedTaskType === 'sleep'
       ? String(MAX_SLEEP_SECONDS).length
       : 48000;
+  const uploadSelected = selectedTaskType === 'upload';
   $('send-btn').textContent = selectedTaskType === 'kill' && killConfirmationActive()
     ? 'Confirm Kill'
     : config.buttonLabel;
   $('send-btn').hidden = false;
-  $('send-btn').disabled = taskRequestInFlight || downloadWaiting;
+  $('send-btn').disabled = taskRequestInFlight || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
   $('send-btn').classList.toggle('warn-button', selectedTaskType === 'interactive');
   $('send-btn').classList.toggle('danger-button', selectedTaskType === 'kill');
-  $('upload-btn').hidden = false;
-  $('upload-btn').disabled = taskRequestInFlight || !activeAgentID;
   $('exit-interactive-btn').hidden = true;
   $('interactive-prompt').hidden = true;
+
+  $('choose-file-btn').hidden = !uploadSelected;
+  $('choose-file-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting;
+  $('browse-path-btn').hidden = !uploadSelected;
+  $('browse-path-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting;
+  updateUploadFilenameLabel();
 
   if (!config.requiresPayload) {
     $('task-input').value = '';
   }
-  if (selectedTaskType !== 'download') hidePathSuggestions();
-  if (downloadSelected && agentOnline) ensurePathBrowserForAgent(activeAgent);
+  if (!pathTaskSelected) hidePathSuggestions();
+  if (pathBrowserSelected && agentOnline) ensurePathBrowserForAgent(activeAgent);
 
   updateTaskContextStatus();
+}
+
+function updateUploadFilenameLabel() {
+  const label = $('upload-filename-label');
+  if (selectedTaskType === 'upload' && pendingUploadFile) {
+    label.textContent = pendingUploadFile.name + ' ->';
+    label.hidden = false;
+  } else {
+    label.textContent = '';
+    label.hidden = true;
+  }
 }
 
 function setTaskInputError(message) {
@@ -946,7 +1183,7 @@ function taskDraftKey(agentID, taskType) {
 }
 
 function saveActiveTaskDraft() {
-  if (!activeAgentID || interactiveMode || !$('upload-row').hidden) return;
+  if (!activeAgentID || interactiveMode) return;
   const config = TASK_TYPES[selectedTaskType];
   if (!config || !config.requiresPayload) return;
 
@@ -957,14 +1194,14 @@ function saveActiveTaskDraft() {
 }
 
 function restoreActiveTaskDraft() {
-  if (!activeAgentID || interactiveMode || !$('upload-row').hidden) return;
+  if (!activeAgentID || interactiveMode) return;
   const config = TASK_TYPES[selectedTaskType];
   if (!config || !config.requiresPayload) return;
 
   const key = taskDraftKey(activeAgentID, selectedTaskType);
   $('task-input').value = taskDrafts.get(key) || '';
   clearTaskInputError();
-  if (selectedTaskType === 'download') schedulePathCompletion();
+  if (pathSuggestionTaskSelected()) schedulePathCompletion();
 }
 
 function clearActiveTaskDraft(taskType) {
@@ -974,28 +1211,68 @@ function clearActiveTaskDraft(taskType) {
 
 function pathBrowserComposerNote(agentOnline) {
   if (!agentOnline) return 'Path browser starts automatically once the selected session is online.';
-  if (!activePathBrowseReady()) return 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
-  return TASK_TYPES.download.note;
+  if (!activePathBrowseReady()) {
+    return selectedTaskType === 'ls'
+      ? 'Preparing the remote file browser. Browse Directory unlocks when the session confirms fast browsing.'
+      : 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
+  }
+  return TASK_TYPES[selectedTaskType].note;
 }
 
 function pathBrowserPlaceholder(agentOnline) {
   if (!agentOnline) return 'Waiting for online session...';
   if (!activePathBrowseReady()) return 'Preparing remote path browser...';
-  return TASK_TYPES.download.placeholder;
+  return TASK_TYPES[selectedTaskType].placeholder;
+}
+
+function pathSuggestionTaskSelected() {
+  return selectedTaskType === 'download' || selectedTaskType === 'upload';
+}
+
+function pathBrowserTaskSelected() {
+  return selectedTaskType === 'download' || selectedTaskType === 'upload' || selectedTaskType === 'ls';
 }
 
 $('task-input').addEventListener('input', () => {
   clearTaskInputError();
   saveActiveTaskDraft();
-  if (selectedTaskType === 'download' && !interactiveMode) {
+  if (pathSuggestionTaskSelected() && !interactiveMode) {
     schedulePathCompletion();
   } else {
     hidePathSuggestions();
   }
 });
-$('upload-path').addEventListener('input', () => $('upload-path').classList.remove('input-error'));
 
 $('send-btn').addEventListener('click', sendTask);
+$('cancel-task-btn').addEventListener('click', () => {
+  const taskID = $('cancel-task-select').value;
+  if (taskID) queueCancelTask(taskID);
+});
+$('cancel-task-select').addEventListener('change', updateCancellationControls);
+
+$('save-metadata-btn').addEventListener('click', async () => {
+  if (!activeAgentID) return;
+  const tags = $('tag-input').value.split(',').map(tag => tag.trim()).filter(Boolean);
+  try {
+    const resp = await apiFetch('/api/agents/' + activeAgentID + '/metadata', {
+      method: 'PUT',
+      body: JSON.stringify({ notes: $('notes-input').value, tags }),
+    });
+    if (!resp.ok) {
+      appendOutput('[-] save notes failed (' + resp.status + ')');
+      return;
+    }
+    activeAgent = await resp.json();
+    allAgents = allAgents.map(agent => agent.id === activeAgentID ? { ...agent, ...activeAgent } : agent);
+    appendOutput('[>] notes saved');
+    renderAgentList();
+    renderSessionPanels();
+  } catch (err) {
+    appendOutput('[-] save notes error: ' + err.message);
+  }
+});
+
+$('output-search').addEventListener('input', applyOutputSearch);
 
 $('task-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') {
@@ -1021,7 +1298,7 @@ function schedulePathCompletion() {
   clearPathCompletionTimer();
 
   const path = $('task-input').value.trim();
-  if (!activePathBrowseReady() || !path || !activeAgentID || taskRequestInFlight || selectedTaskType !== 'download' || hasInvalidPathChars(path)) {
+  if (!activePathBrowseReady() || !path || !activeAgentID || taskRequestInFlight || !pathSuggestionTaskSelected() || hasInvalidPathChars(path)) {
     hidePathSuggestions();
     return;
   }
@@ -1175,7 +1452,7 @@ function handlePathBrowseOutput(output) {
       return;
     }
     schedulePathBrowseRenewal(activeAgentID);
-    if (selectedTaskType === 'download' && $('task-input').value.trim()) schedulePathCompletion();
+    if (pathSuggestionTaskSelected() && $('task-input').value.trim()) schedulePathCompletion();
   }
   applyPathBrowserUI(activeAgentID);
 }
@@ -1238,11 +1515,11 @@ function resetActivePathCompletion() {
 }
 
 function applyPathBrowserUI(agentID) {
-  if (agentID === activeAgentID && selectedTaskType === 'download' && !interactiveMode) applyTaskTypeUI();
+  if (agentID === activeAgentID && pathBrowserTaskSelected() && !interactiveMode) applyTaskTypeUI();
 }
 
 async function requestPathCompletion(path) {
-  if (!activePathBrowseReady() || !activeAgentID || taskRequestInFlight || selectedTaskType !== 'download') return;
+  if (!activePathBrowseReady() || !activeAgentID || taskRequestInFlight || !pathSuggestionTaskSelected()) return;
   if (!path || hasInvalidPathChars(path)) return;
 
   if (pendingPathCompletion) {
@@ -1409,6 +1686,294 @@ function hidePathSuggestions() {
   panel.textContent = '';
 }
 
+function handleFileBrowserOutput(output) {
+  let result;
+  try {
+    result = JSON.parse(output.output || '{}');
+  } catch (_) {
+    return false;
+  }
+  if (!result || !Array.isArray(result.entries) || typeof result.path !== 'string') return false;
+
+  fileBrowserResult = result;
+  fileBrowserPath = result.path;
+  if (!$('file-browser-modal').hidden) {
+    renderFileBrowser(result);
+  }
+  return true;
+}
+
+function renderFileBrowserPlaceholder() {
+  const panel = $('file-browser');
+  if (!panel) return;
+  panel.hidden = false;
+  panel.textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'file-browser-empty';
+  empty.textContent = 'Loading remote file browser...';
+  panel.appendChild(empty);
+}
+
+function renderFileBrowserLoading(path) {
+  const panel = $('file-browser');
+  if (!panel) return;
+  panel.hidden = false;
+  panel.textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'file-browser-empty';
+  empty.textContent = 'Loading ' + path + '...';
+  panel.appendChild(empty);
+}
+
+function renderFileBrowserError(message) {
+  const panel = $('file-browser');
+  if (!panel) return;
+  panel.hidden = false;
+  panel.textContent = '';
+  const empty = document.createElement('div');
+  empty.className = 'file-browser-empty error-copy';
+  empty.textContent = message || 'Unable to browse this directory.';
+  panel.appendChild(empty);
+}
+
+function hideFileBrowser() {
+  const panel = $('file-browser');
+  if (!panel) return;
+  panel.textContent = '';
+}
+
+function openFileBrowserModal(mode) {
+  if (!activeAgentID || taskRequestInFlight) return;
+  fileBrowserMode = mode === 'select-upload' ? 'select-upload' : 'browse';
+  $('file-browser-title').textContent = fileBrowserMode === 'select-upload'
+    ? 'Choose Upload Destination'
+    : 'Remote Files';
+  $('file-browser-modal').hidden = false;
+  ensurePathBrowserForAgent(activeAgent);
+  if (fileBrowserResult) {
+    renderFileBrowser(fileBrowserResult);
+  } else {
+    renderFileBrowserPlaceholder();
+    queueFileBrowserPath(fileBrowserPath || '.');
+  }
+  window.requestAnimationFrame(() => $('file-browser-close-btn').focus());
+}
+
+function closeFileBrowserModal() {
+  const modal = $('file-browser-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  fileBrowserMode = 'browse';
+}
+
+function openKillConfirmModal(agent) {
+  if (!agent || !agent.id || taskRequestInFlight) return;
+  pendingKillAgentID = agent.id;
+  const label = agent.hostname || ('Session ' + agent.id.slice(0, 8));
+  $('kill-confirm-copy').textContent = 'Queue a kill task for ' + label + '? This only takes effect after that session checks in and processes the task.';
+  $('kill-confirm-modal').hidden = false;
+  window.requestAnimationFrame(() => $('kill-cancel-btn').focus());
+}
+
+function closeKillConfirmModal() {
+  const modal = $('kill-confirm-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  pendingKillAgentID = '';
+}
+
+async function confirmKillSession() {
+  if (!pendingKillAgentID || taskRequestInFlight) return;
+  const targetAgentID = pendingKillAgentID;
+  closeKillConfirmModal();
+  setQueueBusy(true, 'Queueing kill task...');
+
+  try {
+    const data = await submitTask(targetAgentID, { type: 'kill', payload: '' });
+    if (data) {
+      appendOutput('[>] kill queued  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
+      if (targetAgentID === activeAgentID) await refreshActiveAgent();
+      else await loadAgents();
+    }
+  } catch (err) {
+    appendOutput('[-] kill request error: ' + err.message, '', targetAgentID);
+  } finally {
+    setQueueBusy(false, '');
+    renderAgentList();
+  }
+}
+
+function renderFileBrowser(result) {
+  const panel = $('file-browser');
+  if (!panel) return;
+  panel.hidden = false;
+  panel.textContent = '';
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'file-browser-toolbar';
+
+  const pathLabel = document.createElement('div');
+  pathLabel.className = 'file-browser-path';
+  pathLabel.textContent = result.path;
+  pathLabel.title = result.path;
+  toolbar.appendChild(pathLabel);
+
+  const actions = document.createElement('div');
+  actions.className = 'file-browser-actions';
+  if (result.parent) {
+    actions.appendChild(fileBrowserButton('Up', () => queueFileBrowserPath(result.parent)));
+  }
+  actions.appendChild(fileBrowserButton('Refresh', () => queueFileBrowserPath(result.path)));
+  toolbar.appendChild(actions);
+  panel.appendChild(toolbar);
+
+  const table = document.createElement('div');
+  table.className = 'file-browser-table';
+  panel.appendChild(table);
+
+  const header = document.createElement('div');
+  header.className = 'file-browser-row file-browser-header';
+  header.appendChild(fileBrowserCell('Name'));
+  header.appendChild(fileBrowserCell('Size'));
+  header.appendChild(fileBrowserCell('Modified'));
+  header.appendChild(fileBrowserCell('Action'));
+  table.appendChild(header);
+
+  if (!result.entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'file-browser-empty';
+    empty.textContent = 'This directory is empty.';
+    panel.appendChild(empty);
+    return;
+  }
+
+  result.entries.forEach(entry => {
+    const row = document.createElement('div');
+    row.className = 'file-browser-row';
+    if (entry.is_dir) row.classList.add('directory');
+
+    const nameCell = fileBrowserCell('');
+    const nameButton = document.createElement('button');
+    nameButton.type = 'button';
+    nameButton.className = 'file-browser-name';
+    nameButton.textContent = (entry.is_dir ? '[dir] ' : '[file] ') + entry.name;
+    nameButton.title = entry.path;
+    nameButton.addEventListener('click', () => {
+      if (entry.is_dir) queueFileBrowserPath(entry.path);
+      else queueDownloadFromBrowser(entry.path);
+    });
+    nameCell.appendChild(nameButton);
+    row.appendChild(nameCell);
+
+    row.appendChild(fileBrowserCell(entry.is_dir ? '' : formatFileSize(entry.size)));
+    row.appendChild(fileBrowserCell(formatBrowserTime(entry.mod_time)));
+
+    const actionCell = fileBrowserCell('');
+    if (entry.error) {
+      actionCell.textContent = entry.error;
+    } else if (entry.is_dir) {
+      actionCell.appendChild(fileBrowserButton('Open', () => queueFileBrowserPath(entry.path)));
+      if (fileBrowserMode === 'select-upload') {
+        actionCell.appendChild(fileBrowserButton('Select', () => selectUploadDestination(entry.path, true)));
+      }
+    } else {
+      actionCell.appendChild(fileBrowserButton('Download', () => queueDownloadFromBrowser(entry.path)));
+      if (fileBrowserMode === 'select-upload') {
+        actionCell.appendChild(fileBrowserButton('Select', () => selectUploadDestination(entry.path, false)));
+      }
+    }
+    row.appendChild(actionCell);
+    table.appendChild(row);
+  });
+}
+
+function selectUploadDestination(entryPath, isDir) {
+  let value = entryPath;
+  if (isDir && !isDirectorySuggestion(entryPath)) {
+    const separator = entryPath.includes('\\') ? '\\' : '/';
+    value = entryPath + separator;
+  }
+  $('task-input').value = value;
+  clearTaskInputError();
+  saveActiveTaskDraft();
+  closeFileBrowserModal();
+  if (isDir) schedulePathCompletion();
+  else hidePathSuggestions();
+  focusPrimaryInput(false, true);
+}
+
+function fileBrowserCell(text) {
+  const cell = document.createElement('div');
+  cell.className = 'file-browser-cell';
+  cell.textContent = text || '';
+  return cell;
+}
+
+function fileBrowserButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+async function queueFileBrowserPath(path) {
+  if (!activeAgentID || taskRequestInFlight) return;
+  fileBrowserPath = path;
+  clearTaskInputError();
+  hidePathSuggestions();
+  renderFileBrowserLoading(path);
+
+  const targetAgentID = activeAgentID;
+  setQueueBusy(true, 'Browsing directory...');
+  try {
+    const data = await submitTask(targetAgentID, { type: 'ls', payload: path });
+    if (!data) renderFileBrowserError('Browse request failed.');
+  } catch (err) {
+    renderFileBrowserError(err.message);
+    appendOutput('[-] browse error: ' + err.message, '', targetAgentID);
+  } finally {
+    setQueueBusy(false, '');
+  }
+}
+
+async function queueDownloadFromBrowser(path) {
+  if (!activeAgentID || taskRequestInFlight) return;
+  const targetAgentID = activeAgentID;
+  setQueueBusy(true, 'Queueing download...');
+  try {
+    const data = await submitTask(targetAgentID, { type: 'download', payload: path });
+    if (data) {
+      appendOutput('[>] download ' + path + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
+      refreshActiveAgent();
+    }
+  } catch (err) {
+    appendOutput('[-] download request error: ' + err.message, '', targetAgentID);
+  } finally {
+    setQueueBusy(false, '');
+  }
+}
+
+function formatFileSize(size) {
+  if (!Number.isFinite(size) || size < 0) return '';
+  if (size < 1024) return String(size) + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = size / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return value.toFixed(value >= 10 ? 0 : 1) + ' ' + units[unit];
+}
+
+function formatBrowserTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  return date.toLocaleString();
+}
+
 document.addEventListener('keydown', e => {
   if (e.defaultPrevented) return;
 
@@ -1427,9 +1992,36 @@ document.addEventListener('keydown', e => {
 
   if (e.key !== 'Escape') return;
 
-  if (!$('upload-row').hidden) {
+  if (!$('kill-confirm-modal').hidden) {
     e.preventDefault();
-    hideUploadPrompt();
+    closeKillConfirmModal();
+    return;
+  }
+
+  if (!$('session-details-modal').hidden) {
+    e.preventDefault();
+    closeSessionDetailsModal();
+    $('session-details-btn').focus();
+    return;
+  }
+
+  if (!$('file-browser-modal').hidden) {
+    e.preventDefault();
+    closeFileBrowserModal();
+    $('send-btn').focus();
+    return;
+  }
+
+  if (outputSearchExpanded && document.activeElement === $('output-search')) {
+    e.preventDefault();
+    updateOutputSearchUI(false);
+    $('output-search-toggle').focus();
+    return;
+  }
+
+  if (selectedTaskType === 'upload' && pendingUploadFile) {
+    e.preventDefault();
+    clearPendingUpload();
     return;
   }
 
@@ -1500,11 +2092,31 @@ async function sendTask() {
     return;
   }
 
+  if (selectedTaskType === 'upload') {
+    if (!pendingUploadFile) {
+      setTaskInputError('Choose a file with Choose File before queueing the upload.');
+      return;
+    }
+    await queueUploadTask();
+    return;
+  }
+
   const task = buildTaskFromComposer();
   if (!task) return;
 
   if (task.type === 'interactive') {
     await queueInteractiveStart();
+    return;
+  }
+
+  if (task.type === 'ls') {
+    if (!activePathBrowseReady()) {
+      setTaskStatus('Preparing the remote file browser. Browse Directory will unlock when the session confirms readiness.', 'status-busy');
+      ensurePathBrowserForAgent(activeAgent);
+      applyTaskTypeUI();
+      return;
+    }
+    openFileBrowserModal('browse');
     return;
   }
 
@@ -1526,10 +2138,18 @@ async function sendTask() {
     const data = await submitTask(targetAgentID, task);
     if (!data) return;
     recordTaskHistory(task.type, task.payload);
-    $('task-input').value = '';
-    clearActiveTaskDraft(task.type);
+    if (task.type === 'ls') {
+      fileBrowserPath = task.payload;
+      $('task-input').value = task.payload;
+      saveActiveTaskDraft();
+      renderFileBrowserLoading(task.payload);
+    } else {
+      $('task-input').value = '';
+      clearActiveTaskDraft(task.type);
+    }
     clearTaskInputError();
     appendOutput('[>] ' + task.type + formatTaskPayloadEcho(task) + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
+    refreshActiveAgent();
   } catch (err) {
     appendOutput('[-] network error: ' + err.message, '', targetAgentID);
   } finally {
@@ -1551,6 +2171,64 @@ async function submitTask(agentID, task) {
   }
 
   return resp.json();
+}
+
+async function deleteQueuedTask(taskID) {
+  if (!activeAgentID || !taskID) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + activeAgentID + '/tasks/' + encodeURIComponent(taskID), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      appendOutput('[-] remove queued task failed (' + resp.status + ')');
+      return;
+    }
+    appendOutput('[>] removed queued task ' + taskID.slice(0, 8));
+    await refreshActiveAgent();
+  } catch (err) {
+    appendOutput('[-] remove queued task error: ' + err.message);
+  }
+}
+
+async function queueCancelTask(taskID) {
+  if (!activeAgentID || !taskID || taskRequestInFlight) return;
+  const targetAgentID = activeAgentID;
+  setQueueBusy(true, 'Queueing cancellation request...');
+  try {
+    const data = await submitTask(targetAgentID, { type: 'cancel', payload: taskID });
+    if (data) {
+      appendOutput('[>] cancel ' + taskID.slice(0, 8) + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
+      await refreshActiveAgent();
+    }
+  } catch (err) {
+    appendOutput('[-] cancel request error: ' + err.message, '', targetAgentID);
+  } finally {
+    setQueueBusy(false, '');
+    updateCancellationControls();
+  }
+}
+
+async function refreshActiveAgent() {
+  if (!activeAgentID) return;
+  const resp = await apiFetch('/api/agents/' + activeAgentID);
+  if (!resp.ok) return;
+  activeAgent = await resp.json();
+  allAgents = allAgents.map(agent => agent.id === activeAgentID ? { ...agent, ...activeAgent } : agent);
+  renderAgentList();
+  renderSessionPanels();
+}
+
+async function loadAudit() {
+  if (!token) return;
+  try {
+    const resp = await apiFetch('/api/audit');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    auditLog = Array.isArray(data) ? data : [];
+    renderAuditList();
+  } catch (_) {
+    // Audit is supporting context; ignore transient refresh failures.
+  }
 }
 
 async function queueInteractiveStart() {
@@ -1582,6 +2260,16 @@ function buildTaskFromComposer() {
         return null;
       }
       return { type: 'shell', payload: rawValue };
+    case 'ps':
+      return { type: 'ps', payload: '' };
+    case 'screenshot':
+      return { type: 'screenshot', payload: '' };
+    case 'snapshot':
+      return { type: 'snapshot', payload: '' };
+    case 'persistence':
+      return { type: 'persistence', payload: '' };
+    case 'peas':
+      return { type: 'peas', payload: '' };
     case 'download': {
       const path = rawValue.trim();
       if (!path) {
@@ -1593,6 +2281,9 @@ function buildTaskFromComposer() {
         return null;
       }
       return { type: 'download', payload: path };
+    }
+    case 'ls': {
+      return { type: 'ls', payload: fileBrowserPath || '.' };
     }
     case 'sleep': {
       const value = rawValue.trim();
@@ -1663,9 +2354,11 @@ function enterInteractiveMode(agentID) {
   interactiveMode = true;
   interactiveReady = false;
   $('output').classList.add('interactive-active');
-  $('task-type-list').hidden = true;
+  if (taskTypeSelect) taskTypeSelect.hidden = true;
   $('send-btn').hidden = true;
-  $('upload-btn').hidden = true;
+  $('choose-file-btn').hidden = true;
+  $('browse-path-btn').hidden = true;
+  $('upload-filename-label').hidden = true;
   $('exit-interactive-btn').hidden = false;
 
   const prompt = activeAgent && activeAgent.hostname ? activeAgent.hostname + ' $' : '$';
@@ -1783,14 +2476,24 @@ function stopSSEStream() {
   sseReader = null;
 }
 
-$('upload-btn').addEventListener('click', () => {
+$('choose-file-btn').addEventListener('click', () => {
+  if (selectedTaskType !== 'upload' || !activeAgentID || taskRequestInFlight) return;
   $('upload-file-input').click();
 });
 
 $('upload-file-input').addEventListener('change', () => {
   const file = $('upload-file-input').files[0];
-  if (file) showUploadPrompt(file);
+  if (file) acceptUploadFile(file);
   $('upload-file-input').value = '';
+});
+
+$('browse-path-btn').addEventListener('click', () => {
+  if (selectedTaskType !== 'upload' || !activeAgentID || taskRequestInFlight) return;
+  if (!activePathBrowseReady()) {
+    setTaskInputError('The remote path browser is still preparing. Try again when the session confirms readiness.');
+    return;
+  }
+  openFileBrowserModal('select-upload');
 });
 
 const outputEl = $('output');
@@ -1798,6 +2501,63 @@ const outputEl = $('output');
 $('jump-latest-btn').addEventListener('click', () => {
   scrollOutputToBottom();
 });
+
+if (outputResizerEl) {
+  let resizeStartY = 0;
+  let resizeStartHeight = 0;
+
+  outputResizerEl.addEventListener('pointerdown', event => {
+    if (!activeAgentID) return;
+    event.preventDefault();
+    resizeStartY = event.clientY;
+    resizeStartHeight = outputShellEl.getBoundingClientRect().height;
+    outputResizerEl.classList.add('dragging');
+    outputResizerEl.setPointerCapture(event.pointerId);
+  });
+
+  outputResizerEl.addEventListener('pointermove', event => {
+    if (!outputResizerEl.classList.contains('dragging')) return;
+    const nextHeight = resizeStartHeight + (event.clientY - resizeStartY);
+    setOutputPaneHeight(nextHeight);
+  });
+
+  outputResizerEl.addEventListener('pointerup', event => {
+    outputResizerEl.classList.remove('dragging');
+    try {
+      outputResizerEl.releasePointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer capture may already be released by the browser.
+    }
+  });
+
+  outputResizerEl.addEventListener('pointercancel', () => {
+    outputResizerEl.classList.remove('dragging');
+  });
+
+  outputResizerEl.addEventListener('dblclick', () => {
+    outputShellEl.style.flex = '';
+    outputShellEl.style.height = '';
+  });
+
+  window.addEventListener('resize', () => {
+    if (!outputShellEl.style.height) return;
+    setOutputPaneHeight(outputShellEl.getBoundingClientRect().height);
+  });
+}
+
+function setOutputPaneHeight(height) {
+  const inputArea = $('input-area');
+  const primaryEl = $('session-primary') || $('console');
+  const minHeight = 180;
+  const maxHeight = Math.max(
+    minHeight,
+    primaryEl.clientHeight - inputArea.offsetHeight - 36,
+  );
+  const nextHeight = Math.min(maxHeight, Math.max(minHeight, height));
+  outputShellEl.style.flex = '0 0 auto';
+  outputShellEl.style.height = nextHeight + 'px';
+  updateOutputControls();
+}
 
 outputEl.addEventListener('scroll', () => {
   followOutput = isOutputNearBottom();
@@ -1821,12 +2581,11 @@ outputEl.addEventListener('drop', e => {
   e.preventDefault();
   outputEl.classList.remove('drag-over');
   const file = e.dataTransfer.files[0];
-  if (file) showUploadPrompt(file);
+  if (file) acceptUploadFile(file);
 });
 
-function showUploadPrompt(file) {
-  if (interactiveMode || !activeAgentID || taskRequestInFlight) return;
-  clearKillConfirmation();
+function acceptUploadFile(file) {
+  if (interactiveMode || !activeAgentID) return;
 
   if (file.size > MAX_UPLOAD_BYTES) {
     appendOutput('[-] file too large: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB). Max is 36 KB.');
@@ -1834,53 +2593,37 @@ function showUploadPrompt(file) {
   }
 
   pendingUploadFile = file;
-  $('upload-filename-label').textContent = file.name + ' ->';
-  $('upload-path').value = '';
-  $('upload-path').disabled = false;
-  $('upload-path').classList.remove('input-error');
-  $('task-type-list').hidden = true;
-  $('task-row').hidden = true;
-  $('upload-row').hidden = false;
-  $('task-help').textContent = 'Choose a destination path for the selected file.';
-  $('composer-note').textContent = 'Upload payloads are size-limited and base64 validated before queueing.';
-  updateTaskContextStatus();
-  $('upload-path').focus();
+  if (selectedTaskType !== 'upload') {
+    setTaskType('upload');
+  } else {
+    applyTaskTypeUI();
+    focusPrimaryInput(false);
+  }
 }
 
-function hideUploadPrompt() {
+function clearPendingUpload() {
   pendingUploadFile = null;
-  $('upload-row').hidden = true;
-  $('task-row').hidden = false;
-  if (!interactiveMode) applyTaskTypeUI();
-  focusPrimaryInput(false);
+  if (!interactiveMode) updateUploadFilenameLabel();
+  if (!interactiveMode && selectedTaskType === 'upload') applyTaskTypeUI();
 }
 
-$('upload-cancel-btn').addEventListener('click', hideUploadPrompt);
-
-$('upload-path').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doUpload();
-  if (e.key === 'Escape') hideUploadPrompt();
-});
-
-$('upload-confirm-btn').addEventListener('click', doUpload);
-
-function doUpload() {
+async function queueUploadTask() {
   if (!pendingUploadFile || !activeAgentID || taskRequestInFlight) return;
 
-  const remotePath = $('upload-path').value.trim();
+  const remotePath = $('task-input').value.trim();
   if (!remotePath) {
-    setUploadPathError('Enter a remote destination path before sending the upload.');
+    setTaskInputError('Enter a remote destination path before sending the upload.');
     return;
   }
 
   if (hasInvalidPathChars(remotePath)) {
-    setUploadPathError('Upload paths cannot contain line breaks or null bytes.');
+    setTaskInputError('Upload paths cannot contain line breaks or null bytes.');
     return;
   }
 
   const file = pendingUploadFile;
   const targetAgentID = activeAgentID;
-  hideUploadPrompt();
+  hidePathSuggestions();
   setQueueBusy(true, 'Submitting upload...');
 
   const reader = new FileReader();
@@ -1894,6 +2637,10 @@ function doUpload() {
       const data = await submitTask(targetAgentID, { type: 'upload', payload });
       if (!data) return;
       appendOutput('[>] upload ' + file.name + ' -> ' + remotePath + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
+      pendingUploadFile = null;
+      $('task-input').value = '';
+      clearActiveTaskDraft('upload');
+      updateUploadFilenameLabel();
       focusPrimaryInput(false, true);
     } catch (err) {
       appendOutput('[-] upload network error: ' + err.message, '', targetAgentID);
@@ -1909,12 +2656,6 @@ function doUpload() {
   reader.readAsArrayBuffer(file);
 }
 
-function setUploadPathError(message) {
-  $('upload-path').classList.add('input-error');
-  $('upload-path').focus();
-  appendOutput('[-] ' + message);
-}
-
 function hasInvalidPathChars(value) {
   return !value || value.length > MAX_REMOTE_PATH || /[\u0000\r\n]/.test(value);
 }
@@ -1926,49 +2667,321 @@ function appendOutput(text, cssClass, targetAgentID) {
   const line = document.createElement('div');
   if (cssClass) line.classList.add(cssClass);
   line.textContent = text;
+  line.dataset.searchText = text.toLowerCase();
   $('output').appendChild(line);
+  applyOutputSearch();
   if (shouldScroll) scrollOutputToBottom();
   else updateOutputControls();
   updateOutputEmptyState();
 }
 
 function appendDownloadResult(short, ts, base64Value, historical) {
-  const label = '[' + short + ' ' + ts + '] download ready';
+  appendFileResult({
+    short,
+    ts,
+    base64Value,
+    filename: 'download_' + short,
+    buttonLabel: 'Save File',
+    label: 'download ready',
+    historical,
+  });
+}
+
+function appendArtifactResult(short, ts, payload, label, buttonLabel, historical) {
+  let result;
+  try {
+    result = JSON.parse(payload);
+  } catch (_) {
+    appendOutput('[err ' + short + ' ' + ts + '] invalid artifact payload');
+    return;
+  }
+
+  if (!result || !result.data || !result.filename) {
+    appendOutput('[err ' + short + ' ' + ts + '] invalid artifact payload');
+    return;
+  }
+
+  appendFileResult({
+    short,
+    ts,
+    base64Value: result.data,
+    filename: result.filename,
+    mime: result.mime || 'application/octet-stream',
+    buttonLabel,
+    label,
+    historical,
+  });
+}
+
+function appendFileResult(options) {
+  const label = '[' + options.short + ' ' + options.ts + '] ' + options.label;
   const shouldScroll = followOutput || isOutputNearBottom();
   const wrap = document.createElement('div');
   wrap.className = 'output-download';
+  wrap.dataset.searchText = (options.label + ' ' + options.filename).toLowerCase();
 
   const text = document.createElement('span');
-  text.textContent = historical
+  text.textContent = options.historical
     ? label + ' from session history. Click to save it locally.'
     : label + '. Click to save it locally.';
 
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'output-download-btn';
-  button.textContent = 'Save File';
+  button.textContent = options.buttonLabel;
   button.addEventListener('click', () => {
     try {
-      triggerDownload(base64Value, 'download_' + short);
+      triggerDownload(options.base64Value, options.filename, options.mime);
     } catch (_) {
-      appendOutput('[err ' + short + ' ' + ts + '] invalid download payload');
+      appendOutput('[err ' + options.short + ' ' + options.ts + '] invalid file payload');
     }
   });
 
   wrap.appendChild(text);
   wrap.appendChild(button);
   $('output').appendChild(wrap);
+  rememberArtifact(options);
+  applyOutputSearch();
   if (shouldScroll) scrollOutputToBottom();
   else updateOutputControls();
   updateOutputEmptyState();
 }
 
-function triggerDownload(base64Value, filename) {
+function rememberArtifact(options) {
+  if (!options || !options.filename || !options.base64Value) return;
+  if (artifactLibrary.some(item => item.taskID === options.short && item.filename === options.filename)) return;
+  artifactLibrary.unshift({
+    taskID: options.short,
+    label: options.label,
+    filename: options.filename,
+    mime: options.mime || 'application/octet-stream',
+    base64Value: options.base64Value,
+    timestamp: options.ts,
+  });
+  if (artifactLibrary.length > 64) artifactLibrary.pop();
+  renderArtifactList();
+}
+
+function renderSessionPanels() {
+  updateSessionPanelTabs();
+  updateSessionPanelCounts();
+  updateCancellationControls();
+  renderJobsList();
+  renderArtifactList();
+  renderAuditList();
+}
+
+function updateCancellationControls() {
+  const bar = $('cancel-task-bar');
+  if (!bar) return;
+
+  const tasks = activeAgentID ? cancellableTasks() : [];
+  bar.hidden = tasks.length === 0;
+  if (!tasks.length) {
+    $('cancel-task-select').textContent = '';
+    return;
+  }
+
+  const select = $('cancel-task-select');
+  const previous = select.value;
+  select.textContent = '';
+  tasks.forEach(task => {
+    const option = document.createElement('option');
+    option.value = task.id;
+    option.textContent = cancelTaskLabel(task);
+    select.appendChild(option);
+  });
+  if (tasks.some(task => task.id === previous)) select.value = previous;
+
+  const selected = tasks.find(task => task.id === select.value) || tasks[0];
+  $('cancel-task-title').textContent = tasks.length === 1 ? selected.label + ' running' : tasks.length + ' cancellable tasks running';
+  $('cancel-task-text').textContent = tasks.length === 1
+    ? 'Task ' + selected.id.slice(0, 8) + ' can be cancelled from here.'
+    : 'Choose the running task to cancel.';
+  select.hidden = tasks.length === 1;
+  select.disabled = taskRequestInFlight;
+  $('cancel-task-btn').textContent = tasks.length === 1 ? 'Cancel ' + selected.label : 'Cancel Selected';
+  $('cancel-task-btn').disabled = taskRequestInFlight;
+}
+
+function cancellableTasks() {
+  return runningPEASJobs();
+}
+
+function cancelTaskLabel(task) {
+  return task.label + ' ' + task.id.slice(0, 8);
+}
+
+function openSessionDetailsModal() {
+  if (!activeAgentID) return;
+  renderSessionPanels();
+  $('session-details-modal').hidden = false;
+  window.requestAnimationFrame(() => $('session-details-close-btn').focus());
+}
+
+function closeSessionDetailsModal() {
+  const modal = $('session-details-modal');
+  if (!modal) return;
+  modal.hidden = true;
+}
+
+function setSessionPanel(panel) {
+  if (panel !== 'all' && (!panel || !$(panel + '-panel'))) return;
+  activeSessionPanel = panel;
+  updateSessionPanelTabs();
+}
+
+function updateSessionPanelTabs() {
+  const showAll = activeSessionPanel === 'all';
+
+  sessionPanelTabs.forEach(button => {
+    const isActive = button.dataset.panel === activeSessionPanel;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  if (sessionPanelFilter) sessionPanelFilter.value = activeSessionPanel;
+
+  const panels = $('session-panels');
+  if (panels) panels.classList.toggle('show-all', showAll);
+
+  ['jobs', 'artifacts', 'notes', 'audit'].forEach(panel => {
+    const el = $(panel + '-panel');
+    if (!el) return;
+    const isActive = showAll || panel === activeSessionPanel;
+    el.hidden = !isActive;
+    el.classList.toggle('active', isActive);
+  });
+}
+
+function updateSessionPanelCounts() {
+  const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued.length : 0;
+  const running = runningPEASJobs().length;
+  const recent = currentOutputs.length;
+  $('jobs-count').textContent = String(queued + running + recent);
+  $('artifacts-count').textContent = String(artifactLibrary.length);
+  $('audit-count').textContent = String(auditLog.length);
+}
+
+function renderJobsList() {
+  const list = $('jobs-list');
+  if (!list) return;
+  list.textContent = '';
+  if (!activeAgentID) return;
+
+  const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued : [];
+  const running = runningPEASJobs();
+  if (!queued.length && !running.length && !currentOutputs.length) {
+    list.appendChild(panelText('No jobs for this session.'));
+    return;
+  }
+
+  running.forEach(job => {
+    const row = panelItem('RUNNING', job.id.slice(0, 8) + ' PEAS');
+    row.appendChild(panelHint('Cancel from Task Builder.'));
+    list.appendChild(row);
+  });
+
+  queued.forEach(job => {
+    const row = panelItem('QUEUED', job.id.slice(0, 8) + ' ' + job.type);
+    const button = panelButton('Remove', () => deleteQueuedTask(job.id));
+    row.appendChild(button);
+    list.appendChild(row);
+  });
+
+  currentOutputs.slice(-8).reverse().forEach(output => {
+    if (!output || !output.task_id) return;
+    const status = output.error ? 'FAILED' : output.type === 'peas_progress' ? 'PROGRESS' : 'DONE';
+    list.appendChild(panelItem(status, output.task_id.slice(0, 8) + ' ' + output.type));
+  });
+}
+
+function runningPEASJobs() {
+  const completed = new Set();
+  const running = new Map();
+  currentOutputs.forEach(output => {
+    if (!output || !output.task_id) return;
+    if (output.type === 'peas') {
+      completed.add(output.task_id);
+      running.delete(output.task_id);
+      return;
+    }
+    if (output.type !== 'peas_progress') return;
+    const idx = output.task_id.indexOf('-peas-');
+    const id = idx > 0 ? output.task_id.slice(0, idx) : output.task_id;
+    if (!completed.has(id)) running.set(id, { id, label: 'PEAS' });
+  });
+  return Array.from(running.values());
+}
+
+function renderArtifactList() {
+  const list = $('artifact-list');
+  if (!list) return;
+  list.textContent = '';
+  if (!artifactLibrary.length) {
+    list.appendChild(panelText('No artifacts captured in this view.'));
+    return;
+  }
+  artifactLibrary.forEach(item => {
+    const row = panelItem(item.label || 'artifact', item.filename);
+    row.appendChild(panelButton('Save', () => triggerDownload(item.base64Value, item.filename, item.mime)));
+    list.appendChild(row);
+  });
+}
+
+function renderAuditList() {
+  const list = $('audit-list');
+  if (!list) return;
+  list.textContent = '';
+  const rows = auditLog.slice(-20).reverse();
+  if (!rows.length) {
+    list.appendChild(panelText('No audit events loaded.'));
+    return;
+  }
+  rows.forEach(event => {
+    const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
+    list.appendChild(panelItem(time + ' ' + event.action, event.detail || event.agent_id || ''));
+  });
+}
+
+function panelText(text) {
+  const item = document.createElement('div');
+  item.className = 'panel-item';
+  item.textContent = text;
+  return item;
+}
+
+function panelItem(label, text) {
+  const item = document.createElement('div');
+  item.className = 'panel-item';
+  const content = document.createElement('span');
+  content.innerHTML = '<strong></strong> ';
+  content.querySelector('strong').textContent = label;
+  content.appendChild(document.createTextNode(text ? ' ' + text : ''));
+  item.appendChild(content);
+  return item;
+}
+
+function panelButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function panelHint(text) {
+  const hint = document.createElement('span');
+  hint.className = 'panel-hint';
+  hint.textContent = text;
+  return hint;
+}
+
+function triggerDownload(base64Value, filename, mime) {
   const binary = atob(base64Value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-  const blob = new Blob([bytes]);
+  const blob = new Blob([bytes], mime ? { type: mime } : undefined);
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
