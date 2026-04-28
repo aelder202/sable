@@ -446,6 +446,22 @@ func TestGetTaskOutputs(t *testing.T) {
 	}
 }
 
+func TestClearTaskOutputs(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	store.RecordOutput("agent-1", &protocol.TaskResult{TaskID: "task-1", Type: "shell", Output: "hello"})
+
+	w := doRequest(t, router, http.MethodDelete, "/api/agents/agent-1/tasks", nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for clear outputs, got %d", w.Code)
+	}
+	if outputs := store.GetOutputs("agent-1"); len(outputs) != 0 {
+		t.Fatalf("expected cleared outputs, got %+v", outputs)
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	router, _ := setupAPI(t)
 	token := loginAndGetToken(t, router)

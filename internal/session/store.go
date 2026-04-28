@@ -337,6 +337,26 @@ func (s *Store) GetOutputs(agentID string) []TaskOutput {
 	return cloneOutputs(a.Outputs)
 }
 
+// ClearOutputs removes recorded task output history and incomplete output
+// assemblies for an agent. It returns false when the agent does not exist.
+func (s *Store) ClearOutputs(agentID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.agents[agentID]
+	if !ok {
+		return false
+	}
+	a.Outputs = nil
+	prefix := agentID + "\x00"
+	for key := range s.chunks {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.chunks, key)
+		}
+	}
+	s.appendAuditLocked(agentID, "clear_outputs", "task output history cleared")
+	return true
+}
+
 // EnqueueTask adds a task to an agent's pending queue.
 func (s *Store) EnqueueTask(agentID string, t *protocol.Task) error {
 	s.mu.Lock()

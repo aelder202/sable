@@ -134,7 +134,7 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 			queueTaskHandler(store, agentID)(w, r)
 		case "tasks":
 			if len(parts) == 2 {
-				getTaskOutputsHandler(store, agentID)(w, r)
+				taskOutputsHandler(store, agentID)(w, r)
 			} else if len(parts) == 3 {
 				deleteQueuedTaskHandler(store, agentID, parts[2])(w, r)
 			} else {
@@ -225,16 +225,23 @@ func auditHandler(store *session.Store) http.HandlerFunc {
 	}
 }
 
-// getTaskOutputsHandler returns the task output history for a given agent.
-func getTaskOutputsHandler(store *session.Store, agentID string) http.HandlerFunc {
+// taskOutputsHandler returns or clears the task output history for a given agent.
+func taskOutputsHandler(store *session.Store, agentID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			outputs := store.GetOutputs(agentID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(outputs) //nolint:errcheck
+		case http.MethodDelete:
+			if !store.ClearOutputs(agentID) {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		outputs := store.GetOutputs(agentID)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(outputs) //nolint:errcheck
 	}
 }
 

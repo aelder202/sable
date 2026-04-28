@@ -169,7 +169,7 @@ The agent shows up in the console within one beacon interval.
 
 ![Sable login screen](images/login.png)
 
-After login the console lists registered sessions, last-seen status, and the task composer.
+After login the console lists registered sessions, last-seen status, output, and the Task Builder.
 
 ![Sable web console with active sessions](images/landing_page.png)
 
@@ -181,30 +181,52 @@ After login the console lists registered sessions, last-seen status, and the tas
 
 Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow; past 10 minutes goes red. Hover for the exact last-seen timestamp. Press `/` to focus the filter.
 
-The task composer keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, and Sleep. One-click actions such as PS, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between output and input to resize the console, or double-click it to reset the height. Jobs, returned artifacts, notes/tags, and audit events open from the Session Details button as a resizable modal; use the detail filter or tabs to show everything or focus one section.
+The main console is split into Output and Task Builder. Output shows queued task echoes, task results, progress messages, errors, and saveable artifact rows. Expand **Search Output** to filter rendered output rows only. **Jump To Latest** resumes the live tail after scrolling up.
 
-The Output search control is collapsed by default. Expanding it filters the rendered Output window entries only: task result lines, progress messages, errors, and saveable artifact/download rows. It does not filter the task input, session list, queued jobs, artifacts table, notes, or audit entries. Collapsing the search control clears the filter and restores all visible output rows.
+Use **Clear Output** to clear the selected session's output history on the server. Cleared output stays cleared after switching sessions or reloading the page. Use **Save Output** to snapshot the currently rendered output as a `.txt` artifact under **Session Details -> Artifacts**.
+
+The Task Builder keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
+
+Session metadata and saved results open from **Session Details**. Use the detail filter or tabs to show everything or focus on Jobs, Artifacts, Notes, or Audit.
+
+![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
 
 When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
 
 **Console keys**
 
 - **Enter** / **Send**: queue the task
-- **↑ / ↓**: command history
+- **Up / Down**: command history
 - **Ctrl/Cmd + K**: focus the task input
 - **Esc**: cancel an upload prompt or kill confirmation
-- **Clear**: wipe output and reset deduplication
+- **Clear Output**: clear persisted output history for the selected session
+- **Save Output**: save rendered output as a text artifact
 - **Jump To Latest**: resume the live tail after scrolling up
 
-#### Shell
+#### Task Builder Actions
+
+| Action | Input | Result |
+|--------|-------|--------|
+| **Shell** | Command string | Runs one bounded shell command (`/bin/sh -c` or `cmd /C`). Output cap 512 KB, timeout 60 seconds. Use Interactive for shell state that must persist across commands. |
+| **Processes** | None | Returns a read-only process listing. |
+| **Screenshot** | None | Captures one operator-initiated screenshot. The agent downscales/compresses it and returns a saveable artifact row. |
+| **Snapshot** | None | Collects a bounded host snapshot report covering identity, network, route, disk, and environment basics. Returns a text artifact. |
+| **Persistence** | None | Lists common autorun and persistence locations for defensive review. It does not modify the host. |
+| **PEAS** | None | Runs the matching PEASS-ng helper for the session OS. Progress appears in Output; the final result is a saveable text artifact. |
+| **Download** | Remote path | Reads a remote file up to 50 MB. Path suggestions and **Browse** help select a path; large results are chunked and reassembled server-side before the save action appears. |
+| **Upload** | Local file and remote path | Sends a local file up to 50 MB to the selected session. Drag a file onto Output or use **Choose File**. Keep large uploads on HTTPS transport. |
+| **Sleep** | Seconds, `1`-`86400` | Changes the selected session's beacon interval. |
+| **Interactive** | None | Opens a persistent `/bin/sh` or `cmd.exe` session. The agent uses a 100 ms beacon interval while interactive mode is active. Use `exit`, `quit`, or **Exit** to return to normal tasking. |
+
+#### Task Notes
+
+##### Shell
 
 Type `shell <command>` (or just type, with the `Shell` task type selected) and queue it.
 
-![Shell command tasking from the web console](images/shell_command.png)
-
 Output is captured to 512 KB; the command runs under a 60-second deadline. For state that persists across commands (`cd`, environment variables, `source`), use interactive mode.
 
-#### Situational awareness
+##### Situational awareness
 
 Use **PS** to request a read-only process listing. Use **Persistence** to list common autorun locations such as Run keys, startup folders, scheduled tasks, systemd units, cron locations, and LaunchAgent folders depending on the agent OS.
 
@@ -216,11 +238,9 @@ For offline PEAS support, run `make update-peas` before building an agent, or us
 
 Use **Snapshot** for a bounded text report covering identity, network, route, disk, and environment basics.
 
-#### Interactive shell
+##### Interactive shell
 
 Select **Interactive** in the composer to bring up `/bin/sh` (Linux) or `cmd.exe` (Windows), bound to the agent for the life of the session.
-
-![Interactive shell mode in the web console](images/interactive_shell.png)
 
 The agent flips to a 100 ms beacon interval while interactive mode is on. Output streams over SSE as fast as each beacon round-trips. The console border turns green and the prompt picks up the agent hostname. Input stays locked with `waiting for agent...` until the agent confirms it is in fast-beacon mode.
 
@@ -228,23 +248,17 @@ The agent flips to a 100 ms beacon interval while interactive mode is on. Output
 
 The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `top`, `sudo` with a password prompt) will misbehave. A command that runs silently for 60+ seconds (`sleep 9999`) trips the timeout and respawns the shell.
 
-#### Download
+##### Download
 
 `download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online. Use **Browse** in the Download task to open the modal file explorer with parent navigation, refresh, and file download actions.
 
-![Download path autocomplete suggestions](images/download_path_autocomplete.png)
-
 Type a partial path for live suggestions: click a directory to keep browsing, the `...` row to go up, or a file to fill the final path.
-
-![Completed download in the web console](images/download_file.png)
 
 The agent reads files up to 50 MB, base64-encodes them, and the browser auto-decodes and saves them. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action. Use HTTPS transport for large downloads.
 
-#### Upload
+##### Upload
 
 Click **Upload** or drag a file onto the output area. Enter the remote destination path when prompted.
-
-![Upload file task in the web console](images/upload_file.png)
 
 Uploads cap at 50 MB. Large uploads are still delivered as a single HTTPS task payload, so keep upload tasks on HTTPS rather than DNS transport.
 
@@ -435,6 +449,7 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `DELETE` | `/api/agents/:id/tasks/:taskID` | Remove a queued task before delivery. |
 | `PUT` | `/api/agents/:id/metadata` | Update operator notes and tags for a session. |
 | `GET` | `/api/agents/:id/tasks` | Output history. |
+| `DELETE` | `/api/agents/:id/tasks` | Clear output history for the selected session. |
 | `GET` | `/api/agents/:id/terminal/stream` | SSE stream of task output. Used by the web UI for real-time interactive output and path completion. Write deadline is disabled here; everywhere else it is 10s. |
 | `GET` | `/api/audit` | Recent operator and session audit events. |
 

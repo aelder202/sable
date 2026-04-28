@@ -15,6 +15,7 @@ let interactiveMode = false;
 let interactiveReady = false;
 let sseReader = null;
 let sseStreamID = 0;
+let outputsRequestID = 0;
 let agentsPollTimer = null;
 let authExpiryTimer = null;
 let allAgents = [];
@@ -253,6 +254,7 @@ function setLoggedOutState(message) {
   allAgents = [];
   seenTaskIDs = new Set();
   currentOutputs = [];
+  outputsRequestID++;
   pendingUploadFile = null;
   taskHistory = [];
   taskHistoryIndex = -1;
@@ -292,6 +294,8 @@ function setLoggedOutState(message) {
   $('output-toolbar').hidden = true;
   $('clear-btn').hidden = true;
   $('clear-btn').disabled = false;
+  $('save-output-btn').hidden = true;
+  $('save-output-btn').disabled = false;
   $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
   $('console-title').textContent = 'Select a session';
@@ -501,6 +505,7 @@ function setQueueBusy(isBusy, message) {
   $('cancel-task-select').disabled = isBusy;
   $('cancel-task-btn').disabled = isBusy;
   $('clear-btn').disabled = isBusy;
+  $('save-output-btn').disabled = isBusy;
 
   if (interactiveMode) {
     $('task-input').disabled = isBusy || !interactiveReady;
@@ -619,6 +624,7 @@ function clearActiveSession() {
   activeAgent = null;
   currentOutputs = [];
   seenTaskIDs = new Set();
+  outputsRequestID++;
   fileBrowserPath = '';
   fileBrowserResult = null;
   clearKillConfirmation();
@@ -627,6 +633,7 @@ function clearActiveSession() {
   $('output').textContent = '';
   $('input-area').hidden = true;
   $('clear-btn').hidden = true;
+  $('save-output-btn').hidden = true;
   $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
   $('console-title').textContent = 'Select a session';
@@ -829,6 +836,7 @@ function selectAgent(agent) {
   activeAgent = agent;
   seenTaskIDs = new Set();
   currentOutputs = [];
+  outputsRequestID++;
   clearKillConfirmation();
   hasHydratedOutputs = false;
   followOutput = true;
@@ -855,6 +863,7 @@ function updateSessionHeader() {
     $('console-meta').hidden = true;
     $('input-area').hidden = true;
     $('clear-btn').hidden = true;
+    $('save-output-btn').hidden = true;
     $('session-details-btn').hidden = true;
     closeSessionDetailsModal();
     closeFileBrowserModal();
@@ -878,6 +887,7 @@ function updateSessionHeader() {
   $('console-meta').hidden = false;
   $('input-area').hidden = false;
   $('clear-btn').hidden = false;
+  $('save-output-btn').hidden = false;
   $('session-details-btn').hidden = false;
   $('output-toolbar').hidden = false;
   $('output-resizer').hidden = false;
@@ -947,12 +957,15 @@ async function loadOutputs() {
     return;
   }
 
+  const agentID = activeAgentID;
+  const requestID = ++outputsRequestID;
   try {
-    const resp = await apiFetch('/api/agents/' + activeAgentID + '/tasks');
+    const resp = await apiFetch('/api/agents/' + agentID + '/tasks');
     if (!resp.ok) return;
 
     const hydrateOnly = !hasHydratedOutputs;
     const outputs = await resp.json();
+    if (agentID !== activeAgentID || requestID !== outputsRequestID) return;
     currentOutputs = Array.isArray(outputs) ? outputs : [];
     currentOutputs.forEach(output => handleTaskOutput(output, hydrateOnly));
     hasHydratedOutputs = true;
@@ -2236,12 +2249,44 @@ function navigateInteractiveHistory(direction) {
   $('task-input').value = interactiveHistory[interactiveHistoryIndex];
 }
 
-$('clear-btn').addEventListener('click', () => {
-  $('output').textContent = '';
-  seenTaskIDs = new Set(currentOutputs.map(output => output.task_id));
-  followOutput = true;
-  updateOutputControls();
-  updateOutputEmptyState();
+$('save-output-btn').addEventListener('click', saveRenderedOutputArtifact);
+
+$('clear-btn').addEventListener('click', async () => {
+  if (!activeAgentID || taskRequestInFlight) return;
+
+  const agentID = activeAgentID;
+  $('clear-btn').disabled = true;
+  $('save-output-btn').disabled = true;
+  outputsRequestID++;
+
+  try {
+    const resp = await apiFetch('/api/agents/' + agentID + '/tasks', {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      const message = await readResponseMessage(resp, 'clear output failed (' + resp.status + ')');
+      appendOutput('[-] ' + message, '', agentID);
+      return;
+    }
+    if (agentID !== activeAgentID) return;
+    stopSSEStream();
+    $('output').textContent = '';
+    currentOutputs = [];
+    seenTaskIDs = new Set();
+    followOutput = true;
+    hasHydratedOutputs = true;
+    startSSEStream(agentID, interactiveMode);
+    renderSessionPanels();
+    updateOutputControls();
+    updateOutputEmptyState();
+  } catch (err) {
+    appendOutput('[-] clear output error: ' + err.message, '', agentID);
+  } finally {
+    if (agentID === activeAgentID && !taskRequestInFlight) {
+      $('clear-btn').disabled = false;
+      $('save-output-btn').disabled = false;
+    }
+  }
 });
 
 $('exit-interactive-btn').addEventListener('click', () => exitInteractiveMode(true));
@@ -2827,6 +2872,73 @@ function basenameFromPath(path) {
 
 function hasInvalidPathChars(value) {
   return !value || value.length > MAX_REMOTE_PATH || /[\u0000\r\n]/.test(value);
+}
+
+function saveRenderedOutputArtifact() {
+  if (!activeAgentID) return;
+
+  const text = renderedOutputText();
+  if (!text.trim()) {
+    appendOutput('[-] no output to save', '', activeAgentID);
+    return;
+  }
+
+  const now = new Date();
+  const stamp = timestampForFilename(now);
+  const host = activeAgent && activeAgent.hostname ? activeAgent.hostname : activeAgentID.slice(0, 8);
+  const filename = 'session-output-' + sanitizeArchiveEntryName(host) + '-' + stamp + '.txt';
+  const artifact = rememberArtifact({
+    short: activeAgentID.slice(0, 8),
+    ts: now.toLocaleTimeString(),
+    base64Value: textToBase64(text.endsWith('\n') ? text : text + '\n'),
+    filename,
+    archiveFilename: filename,
+    mime: 'text/plain;charset=utf-8',
+    label: 'saved output',
+  });
+  renderSessionPanels();
+  if (artifact) openArtifactsPanel(artifact.key);
+}
+
+function renderedOutputText() {
+  return Array.from($('output').children)
+    .map(child => {
+      if (child.classList.contains('output-download')) {
+        const label = child.querySelector('span');
+        return label ? label.textContent : child.textContent;
+      }
+      return child.textContent;
+    })
+    .map(text => String(text || '').trimEnd())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function timestampForFilename(date) {
+  const pad = value => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('') + '-' + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join('');
+}
+
+function textToBase64(text) {
+  return bytesToBase64(new TextEncoder().encode(text));
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
 }
 
 function appendOutput(text, cssClass, targetAgentID) {
