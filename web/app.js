@@ -146,6 +146,10 @@ const TASK_TYPES = {
 const $ = id => document.getElementById(id);
 const taskTypeButtons = Array.from(document.querySelectorAll('[data-task-type]'));
 const taskTypeSelect = $('task-type-select');
+const taskTypeMenu = $('task-type-menu');
+const taskTypeButton = $('task-type-button');
+const taskTypeButtonLabel = $('task-type-button-label');
+const taskTypeList = $('task-type-list');
 const sessionPanelTabs = Array.from(document.querySelectorAll('.session-tab'));
 const sessionPanelFilter = $('session-panel-filter');
 const outputShellEl = $('output-shell');
@@ -488,6 +492,8 @@ function setQueueBusy(isBusy, message) {
     button.disabled = isBusy || interactiveMode;
   });
   if (taskTypeSelect) taskTypeSelect.disabled = isBusy || interactiveMode;
+  if (taskTypeButton) taskTypeButton.disabled = isBusy || interactiveMode;
+  if (isBusy || interactiveMode) closeTaskTypeMenu();
 
   $('send-btn').disabled = isBusy || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
   $('choose-file-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
@@ -1056,6 +1062,7 @@ taskTypeButtons.forEach(button => {
 if (taskTypeSelect) {
   taskTypeSelect.addEventListener('change', () => setTaskType(taskTypeSelect.value));
 }
+initTaskTypeMenu();
 
 sessionPanelTabs.forEach(button => {
   button.addEventListener('click', () => setSessionPanel(button.dataset.panel));
@@ -1072,6 +1079,96 @@ document.querySelector('[data-close-file-browser]').addEventListener('click', cl
 $('kill-cancel-btn').addEventListener('click', closeKillConfirmModal);
 document.querySelector('[data-close-kill-confirm]').addEventListener('click', closeKillConfirmModal);
 $('kill-confirm-btn').addEventListener('click', confirmKillSession);
+
+function initTaskTypeMenu() {
+  if (!taskTypeSelect || !taskTypeButton || !taskTypeList) return;
+
+  taskTypeList.textContent = '';
+  Array.from(taskTypeSelect.options).forEach(option => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'task-type-option';
+    item.role = 'option';
+    item.dataset.value = option.value;
+    item.textContent = option.textContent;
+    item.addEventListener('click', () => {
+      setTaskType(option.value);
+      closeTaskTypeMenu();
+      taskTypeButton.focus();
+    });
+    taskTypeList.appendChild(item);
+  });
+
+  taskTypeButton.addEventListener('click', () => {
+    if (taskTypeButton.disabled) return;
+    setTaskTypeMenuOpen(taskTypeList.hidden);
+  });
+  taskTypeButton.addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      setTaskTypeMenuOpen(true);
+      focusTaskTypeOption(selectedTaskType);
+      return;
+    }
+    if (event.key === 'Escape') {
+      closeTaskTypeMenu();
+    }
+  });
+  taskTypeList.addEventListener('keydown', event => {
+    const options = taskTypeOptions();
+    const index = options.indexOf(document.activeElement);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeTaskTypeMenu();
+      taskTypeButton.focus();
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      (options[index + 1] || options[0])?.focus();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      (options[index - 1] || options[options.length - 1])?.focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (!taskTypeMenu || taskTypeMenu.contains(event.target)) return;
+    closeTaskTypeMenu();
+  });
+  syncTaskTypeMenu();
+}
+
+function setTaskTypeMenuOpen(isOpen) {
+  if (!taskTypeButton || !taskTypeList) return;
+  if (isOpen && taskTypeButton.disabled) return;
+  taskTypeButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  taskTypeList.hidden = !isOpen;
+}
+
+function closeTaskTypeMenu() {
+  setTaskTypeMenuOpen(false);
+}
+
+function taskTypeOptions() {
+  return Array.from(taskTypeList ? taskTypeList.querySelectorAll('.task-type-option') : []);
+}
+
+function focusTaskTypeOption(value) {
+  const option = taskTypeOptions().find(item => item.dataset.value === value) || taskTypeOptions()[0];
+  if (option) option.focus();
+}
+
+function syncTaskTypeMenu() {
+  if (!taskTypeSelect || !taskTypeButtonLabel || !taskTypeButton) return;
+  const option = taskTypeSelect.options[taskTypeSelect.selectedIndex];
+  taskTypeButtonLabel.textContent = option ? option.textContent : selectedTaskType;
+  taskTypeOptions().forEach(item => {
+    const active = item.dataset.value === selectedTaskType;
+    item.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+}
 
 function setTaskType(type) {
   if (!TASK_TYPES[type]) return;
@@ -1107,15 +1204,22 @@ function applyTaskTypeUI() {
     taskTypeSelect.value = selectedTaskType;
     taskTypeSelect.disabled = taskRequestInFlight;
   }
+  if (taskTypeButton) {
+    taskTypeButton.disabled = taskRequestInFlight;
+    syncTaskTypeMenu();
+  }
 
   if (interactiveMode) {
     if (taskTypeSelect) taskTypeSelect.hidden = true;
+    if (taskTypeMenu) taskTypeMenu.hidden = true;
+    closeTaskTypeMenu();
     document.querySelector('.command-line').hidden = false;
     hidePathSuggestions();
     return;
   }
 
   if (taskTypeSelect) taskTypeSelect.hidden = false;
+  if (taskTypeMenu) taskTypeMenu.hidden = false;
   document.querySelector('.command-line').hidden = !config.requiresPayload;
   $('task-help').classList.remove('error-copy');
   $('composer-note').classList.remove('error-note');
@@ -1926,18 +2030,14 @@ function openArtifactsPanel(artifactKey) {
   activeSessionPanel = 'artifacts';
   openSessionDetailsModal();
   if (artifactKey) {
-    const row = document.querySelector('[data-artifact-key="' + cssEscapeValue(artifactKey) + '"]');
+    const row = Array.from(document.querySelectorAll('[data-artifact-key]'))
+      .find(item => item.dataset.artifactKey === artifactKey);
     if (row) {
       row.classList.add('panel-item-highlight');
       row.scrollIntoView({ block: 'nearest' });
       window.setTimeout(() => row.classList.remove('panel-item-highlight'), 1800);
     }
   }
-}
-
-function cssEscapeValue(value) {
-  if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
-  return String(value).replace(/"/g, '\\"');
 }
 
 function selectUploadDestination(entryPath, isDir) {
@@ -3043,8 +3143,9 @@ function panelItem(label, text) {
   const item = document.createElement('div');
   item.className = 'panel-item';
   const content = document.createElement('span');
-  content.innerHTML = '<strong></strong> ';
-  content.querySelector('strong').textContent = label;
+  const strong = document.createElement('strong');
+  strong.textContent = label;
+  content.appendChild(strong);
   content.appendChild(document.createTextNode(text ? ' ' + text : ''));
   item.appendChild(content);
   return item;
@@ -3090,7 +3191,7 @@ function triggerBlobDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = filename;
+  anchor.download = sanitizeDownloadName(filename);
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
@@ -3178,6 +3279,13 @@ function sanitizeArchiveEntryName(filename) {
     .replace(/[\\/]+/g, '_')
     .replace(/[\u0000-\u001f<>:"|?*]/g, '_')
     .replace(/^\.+$/, 'download.bin')
+    .slice(0, 180) || 'download.bin';
+}
+
+function sanitizeDownloadName(filename) {
+  return sanitizeArchiveEntryName(filename)
+    .replace(/^\.+/, '')
+    .trim()
     .slice(0, 180) || 'download.bin';
 }
 

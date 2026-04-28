@@ -64,36 +64,40 @@ cd sable
 
 Modules pull on the first build. Run `go mod download` if you want to pre-warm the cache.
 
-### 2. Generate identity and certificate
+### 2. Run the setup wizard
 
-`make setup` writes `config.env` (agent ID, shared secret, server URL, label) and `server.crt` / `server.key`.
+The wizard creates the first agent identity, generates the server certificate, and builds the selected artifacts.
 
 ```sh
-make setup SERVER_URL=https://<your-server-ip>:443
+make wizard
 ```
 
-`SERVER_URL` is the address agents will beacon to, not the operator UI.
+It prompts for the agent listener URL, initial label, profile, and build outputs. `SERVER_URL` is the address agents will beacon to, not the operator UI.
 
 ```text
-[+] Setup complete! (label: main)
-    config.env  - agent ID, secret, cert fingerprint, server URL, label
-    server.crt  - TLS certificate
-    server.key  - TLS private key
-
-[*] Next: make build
+Sable setup wizard
+Agent listener URL [https://127.0.0.1:443]: https://<your-server-ip>:443
+Initial agent label [main]:
+Agent profile [default, fast, quiet, dns] [default]:
+Build server binary now [y/n] [y]:
+Build agent artifacts [linux, windows, both, none] [linux]:
 ```
+
+When you choose `both`, the wizard creates a separate Windows identity under `agents/<label>.env` instead of baking the same agent ID into two binaries. Reusing one ID for Linux and Windows would make the session appear to switch platforms when both agents check in. After the wizard finishes, start the server, then run the printed `make register ...` commands for each generated identity.
+
+For non-interactive setup:
+
+```sh
+make wizard WIZARD_ARGS="--yes --server-url https://<your-server-ip>:443 --agents both --windows-label win01"
+```
+
+`make install` is an alias for `make wizard`. If `config.env` already exists, the wizard reuses it and offers to rebuild artifacts. Use that after modifying server, agent, or web UI source.
+
+The wizard writes `config.env` (agent ID, shared secret, server URL, label) and `server.crt` / `server.key`, then builds the server (`sable-server` or `.exe`) and selected agents under `builds/<label>/`.
 
 `config.env`, `server.crt`, and `server.key` are gitignored. Keep them off shared storage.
 
-### 3. Build
-
-```sh
-make build
-```
-
-Builds the server (`sable-server` or `.exe`) for the host OS plus a Linux agent at `builds/main/agent-linux`. For a Windows server binary from a non-Windows host, use `make build-windows-server`.
-
-### 4. Start the server
+### 3. Start the server
 
 Keep the server binary, `server.crt`, and `server.key` in the same directory. Use a password file to keep the operator password out of shell history.
 
@@ -121,7 +125,7 @@ The server prints its TLS fingerprint and listener status:
 [*] Operator API on https://127.0.0.1:8443 | Agent listener on :443
 ```
 
-The fingerprint is already baked into the agent binary because `make setup` runs before compile.
+The fingerprint is already baked into the agent binary because setup runs before compile.
 
 The operator API binds to loopback only. Reach it on the server host directly, or tunnel:
 
@@ -129,7 +133,7 @@ The operator API binds to loopback only. Reach it on the server host directly, o
 ssh -L 8443:127.0.0.1:8443 user@sable-host
 ```
 
-### 5. Register the first agent
+### 4. Register the first agent
 
 With the server running:
 
@@ -140,7 +144,7 @@ make register PASSWORD=yourpassword
 
 `make register` reads from `config.env` and POSTs to `https://127.0.0.1:8443`, so run it on the server host. Through an SSH tunnel or a different loopback port, use the CLI with `--api` or hit the REST API directly.
 
-### 6. Deploy the agent
+### 5. Deploy the agent
 
 Linux:
 
@@ -159,7 +163,7 @@ Start-Process -FilePath C:\Temp\agent.exe -WindowStyle Hidden
 
 The agent shows up in the console within one beacon interval.
 
-### 7. Open the console
+### 6. Open the console
 
 `https://127.0.0.1:8443` on the server host (or through the tunnel). Accept the self-signed cert and log in with the operator password.
 
@@ -291,7 +295,7 @@ The CLI is queue-oriented and does not live-stream output or auto-decode downloa
 
 ### Adding more agents
 
-`make setup` creates the first identity in `config.env`; `make register PASSWORD=...` registers it. Every additional agent uses `make register NEW=1`, which writes a new env file under `agents/<label>.env`.
+`make wizard` creates the first identity in `config.env`; `make register PASSWORD=...` registers it. Every additional agent uses `make register NEW=1`, which writes a new env file under `agents/<label>.env`.
 
 ```sh
 make register NEW=1 PASSWORD=yourpassword LABEL=web01
@@ -336,17 +340,21 @@ curl -sk -X POST https://127.0.0.1:8443/api/agents \
 ### Rebuilding after changes
 
 ```sh
+make wizard
+# or, for the standard server + Linux agent bundle:
 make build
 ```
 
-Restart the server after rebuilding. Web UI assets are embedded into the binary, so a browser refresh alone will not pick up `web/` changes. If agent code changed, redeploy:
+The wizard detects the existing `config.env` and lets you rebuild server and agent artifacts without re-entering secrets. `make rebuild` is an alias for `make build`.
+
+Restart the server after rebuilding. Web UI assets are embedded into the binary, so a browser refresh alone will not pick up `web/` changes. If agent code changed, redeploy the agent artifact to authorized systems:
 
 ```sh
 pkill -f agent && scp builds/main/agent-linux user@target:/tmp/agent
 ssh user@target "chmod +x /tmp/agent && /tmp/agent &"
 ```
 
-To re-key, delete `config.env`, `server.crt`, and `server.key` and re-run `make setup`.
+To re-key, delete `config.env`, `server.crt`, and `server.key` and re-run `make wizard`.
 
 ### Building for other platforms
 
@@ -438,12 +446,12 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 
 | Variable | Used by | Notes |
 |----------|---------|-------|
-| `SERVER_URL` | `make setup`, agent builds | HTTPS URL agents beacon to. Usually `https://<public-ip>:443`. |
-| `LABEL` | `make setup`, `make register NEW=1` | Identity / build directory name. |
-| `PROFILE` | `make setup` | Optional setup profile: `default`, `fast`, `quiet`, or `dns`. |
+| `SERVER_URL` | `make wizard`, `make setup`, agent builds | HTTPS URL agents beacon to. Usually `https://<public-ip>:443`. |
+| `LABEL` | `make wizard`, `make setup`, `make register NEW=1` | Identity / build directory name. |
+| `PROFILE` | `make wizard`, `make setup` | Optional setup profile: `default`, `fast`, `quiet`, or `dns`. |
 | `AGENT_PROFILE` | generated env, agent builds | Profile name baked into the env file for traceability. |
 | `AGENT_ENV` | build + register targets | Env file. Defaults to `config.env`; `agents/<label>.env` for additionals. |
-| `AGENT_ID` | agent builds, registration | Identity. Generated by `make setup` or `make register NEW=1`. |
+| `AGENT_ID` | agent builds, registration | Identity. Generated by `make wizard`, `make setup`, or `make register NEW=1`. |
 | `AGENT_SECRET_HEX` | agent builds, registration | 32-byte secret as 64 hex chars. |
 | `CERT_FP_HEX` | agent builds | SHA-256 of the server cert. Pinned by the agent. |
 | `SLEEP_SECONDS` | agent builds | Initial beacon interval. Default `30`. |
@@ -451,14 +459,16 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `SABLE_DNS_DOMAIN` | server | Preferred env var for DNS fallback. |
 | `--dns-domain` | server | Flag form. |
 | `--debug-addr` | server | Loopback-only pprof endpoint, e.g. `127.0.0.1:6060`. For diagnosing stalls. |
+| `WIZARD_ARGS` | `make wizard`, `make install` | Optional flags forwarded to the setup wizard, such as `--yes --server-url ... --agents both`. |
 | `NEW` | `make register` | `NEW=1` mints another identity. |
 | `PASSWORD` | `make register` | Operator password used by the registration call. |
 
 ### Agent profiles
 
-`make setup` defaults to a 30-second beacon. Use `PROFILE=fast` for local testing, `PROFILE=quiet` for a slower default interval, or `PROFILE=dns DNS_DOMAIN=<domain>` to generate an env file with DNS fallback configured.
+`make wizard` and `make setup` default to a 30-second beacon. Use `PROFILE=fast` for local testing, `PROFILE=quiet` for a slower default interval, or `PROFILE=dns DNS_DOMAIN=<domain>` to generate an env file with DNS fallback configured.
 
 ```sh
+make wizard WIZARD_ARGS="--server-url https://<your-server-ip>:443 --profile fast"
 make setup SERVER_URL=https://<your-server-ip>:443 PROFILE=fast
 make setup SERVER_URL=https://<your-server-ip>:443 PROFILE=dns DNS_DOMAIN=c2.example.com
 ```
@@ -480,8 +490,11 @@ Use a password file or env var. Avoid pasting the password into commands that en
 
 | Target | Output | Purpose |
 |--------|--------|---------|
+| `make wizard` | config + selected builds | Guided first-run and rebuild flow. Pass flags with `WIZARD_ARGS`. |
+| `make install` | config + selected builds | Alias for `make wizard`. |
 | `make setup` | `config.env`, `server.crt`, `server.key` | One-time init. Pass `SERVER_URL`, optional `LABEL`, `PROFILE`, and `DNS_DOMAIN`. |
 | `make build` | server + Linux agent | Default build for the current host. |
+| `make rebuild` | server + Linux agent | Alias for `make build` after source changes. |
 | `make build-windows-server` | `sable-server.exe` + Linux agent | Windows server bundle from a non-Windows host. |
 | `make build-server` | server only | Rebuild the server. |
 | `make build-agent-linux` | `builds/<label>/agent-linux` | Rebuild the Linux agent. |
@@ -529,15 +542,16 @@ internal/
   protocol/     - beacon / task encode + decode
   session/      - in-memory session store with pub/sub for SSE
 tools/
+  wizard/       - guided local setup + rebuild flow
   setup/        - generates config.env + cert pair
   register/     - registers an agent via the REST API
   gensecret/    - prints a random agent ID + 32-byte secret
 web/            - browser UI (HTML/CSS/JS), embedded into the server binary
 agents/         - per-agent env files for additional identities (gitignored)
 builds/         - per-agent build artifacts keyed by label (gitignored)
-config.env      - generated by `make setup` (gitignored - secrets)
-server.crt      - generated by `make setup` (gitignored)
-server.key      - generated by `make setup` (gitignored)
+config.env      - generated by `make wizard` or `make setup` (gitignored - secrets)
+server.crt      - generated by `make wizard` or `make setup` (gitignored)
+server.key      - generated by `make wizard` or `make setup` (gitignored)
 ```
 
 ---

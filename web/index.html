@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>Sable Operator</title>
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -38,15 +39,15 @@
     <div id="main-view" hidden>
       <nav class="topbar">
         <div class="brand-block">
-          <span class="logo-mark">S</span>
           <div>
-            <p class="eyebrow">Sable Console</p>
-            <h2 class="brand-title">Session Control</h2>
+            <p class="eyebrow">Operator Console</p>
+            <h2 class="brand-title">Sable</h2>
+            <p class="brand-subtitle">Session Control</p>
           </div>
         </div>
 
         <div class="topbar-meta">
-          <span id="refresh-indicator" class="status-pill">Waiting for data</span>
+          <span id="refresh-indicator" class="status-pill" aria-live="polite">Waiting for data</span>
           <span id="session-count" class="status-pill">0 sessions</span>
           <button id="logout-btn">Logout</button>
         </div>
@@ -160,9 +161,9 @@
                 <div id="task-row">
                   <div class="task-action-bar">
                     <label class="sr-only" for="task-type-select">Task action</label>
-                    <select id="task-type-select" aria-label="Task action">
+                    <select id="task-type-select" class="native-task-select" aria-label="Task action" tabindex="-1">
                       <option value="shell">Shell</option>
-                      <option value="ps">PS</option>
+                      <option value="ps">Processes</option>
                       <option value="screenshot">Screenshot</option>
                       <option value="snapshot">Snapshot</option>
                       <option value="persistence">Persistence</option>
@@ -172,6 +173,19 @@
                       <option value="sleep">Sleep</option>
                       <option value="interactive">Interactive</option>
                     </select>
+                    <div id="task-type-menu" class="task-type-menu">
+                      <button
+                        id="task-type-button"
+                        class="task-type-button"
+                        type="button"
+                        aria-haspopup="listbox"
+                        aria-expanded="false"
+                        aria-controls="task-type-list"
+                      >
+                        <span id="task-type-button-label">Shell</span>
+                      </button>
+                      <div id="task-type-list" class="task-type-list" role="listbox" aria-label="Task action" hidden></div>
+                    </div>
                     <button id="send-btn">Queue Task</button>
                     <button id="exit-interactive-btn" hidden>Exit</button>
                   </div>
