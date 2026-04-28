@@ -282,6 +282,27 @@
             </aside>
           </div>
 
+          <div id="clear-confirm-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="clear-confirm-title" hidden>
+            <div class="modal-backdrop" data-close-clear-confirm></div>
+            <aside id="clear-confirm-panel" class="confirm-panel">
+              <div class="rail-header">
+                <div>
+                  <p class="eyebrow">Confirm Action</p>
+                  <h4 id="clear-confirm-title">Clear Output</h4>
+                </div>
+                <div class="modal-controls">
+                  <button id="clear-cancel-btn" type="button">Cancel</button>
+                </div>
+              </div>
+              <div class="confirm-body">
+                <p id="clear-confirm-copy">Clear output history for this session?</p>
+                <div class="confirm-actions">
+                  <button id="clear-confirm-btn" type="button">Confirm Clear</button>
+                </div>
+              </div>
+            </aside>
+          </div>
+
           <div id="kill-confirm-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="kill-confirm-title" hidden>
             <div class="modal-backdrop" data-close-kill-confirm></div>
             <aside id="kill-confirm-panel" class="confirm-panel">
