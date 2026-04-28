@@ -52,7 +52,7 @@ LDFLAGS := $(STRIP) \
 .PHONY: wizard install setup build rebuild build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
 .PRECIOUS: register-tool$(EXE)
 
-## Interactive first-run and rebuild wizard. Pass flags with WIZARD_ARGS='--yes --server-url https://host:443 --agents both --windows-label win01'.
+## Interactive first-run and rebuild wizard. Pass flags with WIZARD_ARGS='--yes --server-url https://host:443 --agents both --windows-label win01'. Use --wipe-clean to remove existing builds, agents, and config.env before starting.
 wizard:
 	go run ./tools/wizard $(WIZARD_ARGS)
 

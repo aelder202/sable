@@ -30,6 +30,7 @@ type wizardConfig struct {
 	BuildServer  bool
 	AgentTargets string
 	AssumeYes    bool
+	WipeClean    bool
 }
 
 type agentConfig struct {
@@ -85,6 +86,7 @@ func parseFlags(args []string) (*wizardConfig, error) {
 	fs.BoolVar(&cfg.BuildServer, "server", true, "build the host-native server binary")
 	fs.StringVar(&cfg.AgentTargets, "agents", "linux", "agent artifacts to build: linux, windows, both, none")
 	fs.BoolVar(&cfg.AssumeYes, "yes", false, "accept defaults and do not prompt")
+	fs.BoolVar(&cfg.WipeClean, "wipe-clean", false, "remove existing builds/, agents/, and config.env before running the wizard")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -95,11 +97,63 @@ func parseFlags(args []string) (*wizardConfig, error) {
 	return cfg, nil
 }
 
+func performWipeClean(reader *bufio.Reader, out io.Writer) (bool, error) {
+	candidates := []struct{ path, label string }{
+		{"config.env", "config.env"},
+		{"builds", "builds/"},
+		{"agents", "agents/"},
+	}
+
+	var targets []string
+	for _, c := range candidates {
+		if _, err := os.Stat(c.path); err == nil {
+			targets = append(targets, c.label)
+		}
+	}
+
+	if len(targets) == 0 {
+		fmt.Fprintln(out, "[*] Nothing to clean — no existing builds, agents, or config.env found.")
+		fmt.Fprintln(out)
+		return true, nil
+	}
+
+	fmt.Fprintln(out, "The following will be permanently removed:")
+	for _, t := range targets {
+		fmt.Fprintf(out, "  - %s\n", t)
+	}
+	if !promptYesNo(reader, out, "Proceed with clean", false) {
+		fmt.Fprintln(out, "[*] Wipe-clean cancelled. No changes made.")
+		return false, nil
+	}
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c.path); err != nil {
+			continue
+		}
+		if err := os.RemoveAll(c.path); err != nil {
+			return false, fmt.Errorf("remove %s: %w", c.label, err)
+		}
+		fmt.Fprintf(out, "[-] Removed %s\n", c.label)
+	}
+	fmt.Fprintln(out)
+	return true, nil
+}
+
 func runWizard(in io.Reader, out io.Writer, runner commandRunner, cfg *wizardConfig) error {
 	reader := bufio.NewReader(in)
 	fmt.Fprintln(out, "Sable setup wizard")
 	fmt.Fprintln(out, "This wizard prepares local config and build artifacts only. Remote deployment remains an explicit operator step.")
 	fmt.Fprintln(out)
+
+	if cfg.WipeClean {
+		proceed, err := performWipeClean(reader, out)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return nil
+		}
+	}
 
 	agent, created, err := ensureConfig(reader, out, cfg)
 	if err != nil {
