@@ -26,7 +26,7 @@ var backgroundTasks sync.Map
 const (
 	situationalTimeout        = 20 * time.Second
 	maxSituationalOutputBytes = 48 * 1024
-	maxScreenshotBytes        = 512 * 1024
+	maxScreenshotBytes        = 50 * 1024 * 1024
 	peasTimeout               = 10 * time.Minute
 	maxPEASToolBytes          = 5 * 1024 * 1024
 	maxPEASOutputBytes        = 8 * 1024 * 1024
@@ -36,6 +36,10 @@ const (
 	linPEASURL = "https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh"
 	winPEASURL = "https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEAS.bat"
 )
+
+// gnomeWaylandCmdTimeout is a shorter timeout for the individual gsettings/gdbus
+// calls inside captureScreenshotGNOMEWayland — each step should complete quickly.
+const gnomeWaylandCmdTimeout = 6 * time.Second
 
 type fileArtifactResult struct {
 	MIME     string `json:"mime"`
@@ -505,67 +509,6 @@ func parentDirectory(path string) string {
 	return parent
 }
 
-func captureScreenshotWindows() ([]byte, error) {
-	limit := fmt.Sprintf("%d", maxScreenshotBytes)
-	script := `
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$limit = ` + limit + `
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw 'primary screen unavailable' }
-$src = New-Object System.Drawing.Bitmap -ArgumentList $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($src)
-try {
-  $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-  $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-  $widths = @(1280, 1024, 800, 640, 480)
-  $qualities = @(55, 40, 30, 22, 16)
-  foreach ($width in $widths) {
-    $scale = [Math]::Min(1.0, $width / [double]$src.Width)
-    $newWidth = [Math]::Max(1, [int]($src.Width * $scale))
-    $newHeight = [Math]::Max(1, [int]($src.Height * $scale))
-    $dst = New-Object System.Drawing.Bitmap -ArgumentList $newWidth, $newHeight
-    $draw = [System.Drawing.Graphics]::FromImage($dst)
-    try {
-      $draw.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-      $draw.DrawImage($src, 0, 0, $newWidth, $newHeight)
-      foreach ($quality in $qualities) {
-        $params = New-Object System.Drawing.Imaging.EncoderParameters -ArgumentList 1
-        $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter -ArgumentList ([System.Drawing.Imaging.Encoder]::Quality), ([int64]$quality)
-        $ms = New-Object System.IO.MemoryStream
-        try {
-          $dst.Save($ms, $codec, $params)
-          $bytes = $ms.ToArray()
-          if ($bytes.Length -le $limit) {
-            [Convert]::ToBase64String($bytes)
-            return
-          }
-        } finally {
-          $ms.Dispose()
-          $params.Dispose()
-        }
-      }
-    } finally {
-      $draw.Dispose()
-      $dst.Dispose()
-    }
-  }
-  throw "screenshot exceeds bounded limit of $limit bytes"
-} finally {
-  $graphics.Dispose()
-  $src.Dispose()
-}
-`
-	out, taskErr := runReadOnlyCommand(situationalTimeout, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
-	if taskErr != "" {
-		if strings.TrimSpace(out) != "" {
-			return nil, fmt.Errorf("%s: %s", taskErr, strings.TrimSpace(out))
-		}
-		return nil, fmt.Errorf("%s", taskErr)
-	}
-	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
-}
 
 func detectImageType(data []byte) (string, string) {
 	if len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
@@ -597,11 +540,23 @@ func captureScreenshotDarwin() ([]byte, error) {
 
 func captureScreenshotLinux() ([]byte, error) {
 	base := filepath.Join(os.TempDir(), fmt.Sprintf("sable_screenshot_%d", time.Now().UnixNano()))
+	png := base + ".png"
+	defer os.Remove(png)           //nolint:errcheck
 	defer os.Remove(base + ".jpg") //nolint:errcheck
-	defer os.Remove(base + ".png") //nolint:errcheck
-	candidates := linuxScreenshotCandidates(base)
 	env := linuxScreenshotEnv()
 	var failures []string
+
+	// On Wayland, X11 tools only capture XWayland content, not native Wayland
+	// windows. Run the GNOME Shell-based path first so it captures the full desktop.
+	if envValue(env, "WAYLAND_DISPLAY") != "" {
+		if data, err := captureScreenshotGNOMEWayland(png, env); err == nil && len(data) > 0 {
+			return data, nil
+		} else if err != nil {
+			failures = append(failures, "gnome-wayland: "+err.Error())
+		}
+	}
+
+	candidates := linuxScreenshotCandidates(base)
 	for _, candidate := range candidates {
 		if _, err := exec.LookPath(candidate[0]); err != nil {
 			continue
@@ -611,18 +566,272 @@ func captureScreenshotLinux() ([]byte, error) {
 			failures = append(failures, candidate[0]+": "+summarizeCommandFailure(taskErr, out))
 			continue
 		}
-		path := candidate[len(candidate)-1]
-		data, err := os.ReadFile(path)
-		os.Remove(path) //nolint:errcheck
+		candidatePath := candidate[len(candidate)-1]
+		data, err := os.ReadFile(candidatePath)
+		os.Remove(candidatePath) //nolint:errcheck
 		if err == nil && len(data) > 0 {
 			return data, nil
 		}
 		failures = append(failures, candidate[0]+": command completed but did not create an image")
 	}
-	if len(failures) > 0 {
-		return nil, fmt.Errorf("supported screenshot utilities failed: %s. %s", strings.Join(failures, "; "), linuxScreenshotEnvSummary(env))
+
+	// Detect GNOME 45+ Wayland: unsafe-mode removed means XGetImage on root also
+	// returns BadMatch, so X11-based tools (scrot, maim, import) all fail too.
+	gnome45Wayland := false
+	for _, f := range failures {
+		if strings.Contains(f, "unsafe-mode key absent") {
+			gnome45Wayland = true
+			break
+		}
 	}
-	return nil, fmt.Errorf("no supported screenshot utility found; install one of gnome-screenshot, scrot, grim, maim, ImageMagick import, xfce4-screenshooter, mate-screenshot, spectacle, or flameshot, and ensure the agent has access to an active GUI session")
+
+	envSummary := linuxScreenshotEnvSummary(env)
+	if len(failures) > 0 {
+		msg := fmt.Sprintf("supported screenshot utilities failed: %s. %s", strings.Join(failures, "; "), envSummary)
+		if envValue(env, "WAYLAND_DISPLAY") != "" {
+			if gnome45Wayland {
+				msg += ". GNOME 45+ Wayland: ensure python3-gi is installed (sudo apt install python3-gi) and xdg-desktop-portal is running"
+			} else {
+				msg += ". Install scrot or maim for XWayland capture (DISPLAY=" + envValue(env, "DISPLAY") + ")"
+			}
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	noUtilMsg := "no supported screenshot utility found; install one of gnome-screenshot, scrot, grim, maim, ImageMagick import, xfce4-screenshooter, mate-screenshot, spectacle, or flameshot"
+	if envValue(env, "WAYLAND_DISPLAY") != "" {
+		if gnome45Wayland {
+			noUtilMsg += ". GNOME 45+ Wayland: ensure python3-gi is installed (sudo apt install python3-gi) and xdg-desktop-portal is running"
+		} else {
+			noUtilMsg += ". On Wayland with XWayland available (DISPLAY=" + envValue(env, "DISPLAY") + "), scrot and maim work without extra configuration"
+		}
+	}
+	return nil, fmt.Errorf("%s", noUtilMsg)
+}
+
+// captureScreenshotGNOMEWayland captures the full GNOME Wayland desktop by
+// injecting screenshot code into GNOME Shell via Shell.Eval (requires unsafe-mode).
+// Unlike external D-Bus callers, code running inside the compositor has access
+// to the full composited frame and is not subject to the session-trust check.
+func captureScreenshotGNOMEWayland(png string, env []string) ([]byte, error) {
+	if _, err := exec.LookPath("gsettings"); err != nil {
+		return nil, fmt.Errorf("gsettings not available")
+	}
+	if _, err := exec.LookPath("gdbus"); err != nil {
+		return nil, fmt.Errorf("gdbus not available")
+	}
+
+	// unsafe-mode was removed in GNOME 45+. Shell.Eval is unavailable without it.
+	unsafeModeOut, unsafeModeErr := runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "writable", "org.gnome.shell", "unsafe-mode")
+	if unsafeModeErr != "" || strings.TrimSpace(unsafeModeOut) != "true" {
+		// GNOME 45+: unsafe-mode is gone. Use the XDG Desktop Portal Screenshot
+		// interface instead. python3-gi ships with the default Ubuntu GNOME desktop
+		// and the portal takes a silent full-screen capture with interactive=false.
+		if _, err := exec.LookPath("python3"); err == nil {
+			out, taskErr := runReadOnlyCommandEnv(20*time.Second, env, "python3", "-c", python3PortalScreenshot, png)
+			if taskErr == "" {
+				if data, err := os.ReadFile(png); err == nil && len(data) > 0 {
+					return data, nil
+				}
+				return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); xdg-portal: script succeeded but wrote no image")
+			}
+			return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); xdg-portal: %s", summarizeCommandFailure(taskErr, out))
+		}
+		return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); python3 not found")
+	}
+
+	// unsafe-mode enables org.gnome.Shell.Eval which runs JS inside the compositor.
+	runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "set", "org.gnome.shell", "unsafe-mode", "true")
+	defer runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "set", "org.gnome.shell", "unsafe-mode", "false") //nolint:errcheck
+
+	// GNOME Shell processes the GSettings change asynchronously via its main loop.
+	// Wait for it to apply before making any Eval calls, otherwise they are denied.
+	time.Sleep(600 * time.Millisecond)
+
+	// Record the time before any screenshot attempt so gnomeWaylandWaitFile can
+	// distinguish files we created from pre-existing ones in the Pictures folder.
+	before := time.Now()
+
+	// eval calls org.gnome.Shell.Eval and returns the raw gdbus output and error.
+	eval := func(js string) (string, string) {
+		return runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env,
+			"gdbus", "call", "--session",
+			"--dest", "org.gnome.Shell",
+			"--object-path", "/org/gnome/Shell",
+			"--method", "org.gnome.Shell.Eval", js)
+	}
+
+	// Attempt 1: direct D-Bus Screenshot — works on GNOME builds where unsafe-mode
+	// relaxes the session-trust check on the Screenshot interface.
+	runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, //nolint:errcheck
+		"gdbus", "call", "--session",
+		"--dest", "org.gnome.Shell.Screenshot",
+		"--object-path", "/org/gnome/Shell/Screenshot",
+		"--method", "org.gnome.Shell.Screenshot.Screenshot",
+		"false", "true", png)
+	if data, err := os.ReadFile(png); err == nil && len(data) > 0 {
+		os.Remove(png) //nolint:errcheck
+		return data, nil
+	}
+
+	// Attempt 2: Shell.Eval with GNOME 42+ async JS API.
+	// Signature: screenshot(include_cursor, callback) — no cancellable parameter.
+	// screenshot_finish returns [success, GFile].
+	//
+	// We pump the GLib main loop from within the Eval so the async callback fires
+	// before gdbus returns, letting us capture the actual save path. Status codes
+	// returned by the JS:
+	//   C  — Gio.File.copy() to our temp path succeeded
+	//   S|<path> — screenshot saved but copy failed; <path> is GNOME's save location
+	//   N|<ok>   — screenshot_finish returned ok=false
+	//   E|<err>  — JS exception
+	//   P        — 3-second main-loop pump timed out (callback fired after Eval returned)
+	js42 := fmt.Sprintf(
+		`(function(){`+
+			`try{`+
+			`var st='P';`+
+			`global.screenshot.screenshot(false,function(src,res){`+
+			`try{`+
+			`var a=src.screenshot_finish(res);`+
+			`if(a[0]&&a[1]){`+
+			`var p=a[1].get_path()||'';`+
+			`try{`+
+			`const G=imports.gi.Gio;`+
+			`a[1].copy(G.File.new_for_path(%q),1,null,null);`+
+			`st='C';`+
+			`}catch(e2){st='S|'+p;}`+
+			`}else{st='N|'+a[0];}`+
+			`}catch(e){st='E|'+e;}`+
+			`});`+
+			`var ctx=imports.gi.GLib.MainContext.default();`+
+			`var t0=imports.gi.GLib.get_monotonic_time();`+
+			`while(st==='P'&&imports.gi.GLib.get_monotonic_time()-t0<3000000)`+
+			`{ctx.iteration(false)}`+
+			`return st;`+
+			`}catch(outerE){return 'OUTER|'+outerE;}`+
+			`})()`, png)
+	out42, taskErr42 := eval(js42)
+	if taskErr42 == "" {
+		status42 := gnomeEvalString(out42)
+		if status42 == "C" {
+			if data, err := os.ReadFile(png); err == nil && len(data) > 0 {
+				os.Remove(png) //nolint:errcheck
+				return data, nil
+			}
+		}
+		if strings.HasPrefix(status42, "S|") {
+			// Copy failed, but GNOME saved to its default path — read it directly.
+			savedPath := strings.TrimPrefix(status42, "S|")
+			if savedPath != "" {
+				if data, err := os.ReadFile(savedPath); err == nil && len(data) > 0 {
+					os.Remove(savedPath) //nolint:errcheck
+					return data, nil
+				}
+			}
+		}
+		// "P" (pump timed out) or "C" file read failure: the callback may still
+		// fire after Eval returned. Scan GNOME's default screenshot directories.
+		if data := gnomeWaylandWaitFile(png, before, 5*time.Second); len(data) > 0 {
+			return data, nil
+		}
+	}
+
+	// Attempt 3: Shell.Eval with GNOME 40/41 four-arg JS API.
+	// screenshot(include_cursor, flash, filename, callback) — writes directly to path.
+	// The callback is called synchronously on GNOME <42.
+	js40 := fmt.Sprintf(
+		`(function(){`+
+			`try{`+
+			`var done=false;`+
+			`global.screenshot.screenshot(false,false,%q,function(){done=true;});`+
+			`var ctx=imports.gi.GLib.MainContext.default();`+
+			`var t0=imports.gi.GLib.get_monotonic_time();`+
+			`while(!done&&imports.gi.GLib.get_monotonic_time()-t0<2000000){ctx.iteration(false)}`+
+			`return done?'D':'P';`+
+			`}catch(outerE){return 'OUTER|'+outerE;}`+
+			`})()`, png)
+	out40, taskErr40 := eval(js40)
+	if taskErr40 == "" {
+		if gnomeEvalString(out40) == "D" {
+			if data, err := os.ReadFile(png); err == nil && len(data) > 0 {
+				os.Remove(png) //nolint:errcheck
+				return data, nil
+			}
+		}
+		if data := gnomeWaylandWaitFile(png, before, 3*time.Second); len(data) > 0 {
+			return data, nil
+		}
+	}
+
+	home, _ := os.UserHomeDir()
+	var reasons []string
+	if taskErr42 != "" {
+		reasons = append(reasons, "eval(42): "+summarizeCommandFailure(taskErr42, out42))
+	} else if st42 := gnomeEvalString(out42); strings.HasPrefix(st42, "OUTER|") {
+		reasons = append(reasons, "eval(42): JS exception: "+strings.TrimPrefix(st42, "OUTER|"))
+	} else {
+		reasons = append(reasons, "eval(42): JS status="+st42+", no file written")
+	}
+	if taskErr40 != "" {
+		reasons = append(reasons, "eval(40): "+summarizeCommandFailure(taskErr40, out40))
+	} else if st40 := gnomeEvalString(out40); strings.HasPrefix(st40, "OUTER|") {
+		reasons = append(reasons, "eval(40): JS exception: "+strings.TrimPrefix(st40, "OUTER|"))
+	} else {
+		reasons = append(reasons, "eval(40): JS status="+st40+", no file written")
+	}
+	reasons = append(reasons, "scanned "+home+"/Pictures/{Screenshots,}")
+	return nil, fmt.Errorf("GNOME Shell screenshot failed (%s); install scrot for XWayland fallback", strings.Join(reasons, "; "))
+}
+
+// gnomeEvalString extracts the JS return value from gdbus Eval output.
+// gdbus formats Shell.Eval results as: (boolean, 'value')
+func gnomeEvalString(out string) string {
+	start := strings.Index(out, "'")
+	end := strings.LastIndex(out, "'")
+	if start >= 0 && end > start {
+		return out[start+1 : end]
+	}
+	return ""
+}
+
+// gnomeWaylandWaitFile polls expectedPath for up to timeout. If the file does
+// not appear there, it also scans GNOME's default screenshot directories for any
+// PNG file created after after — covering the case where GNOME 42 saves to
+// "~/Pictures/Screenshot from YYYY-MM-DD HH-MM-SS.png" rather than our path.
+func gnomeWaylandWaitFile(expectedPath string, after time.Time, timeout time.Duration) []byte {
+	home, _ := os.UserHomeDir()
+	scanDirs := []string{
+		filepath.Join(home, "Pictures", "Screenshots"),
+		filepath.Join(home, "Pictures"),
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(250 * time.Millisecond)
+		if data, err := os.ReadFile(expectedPath); err == nil && len(data) > 0 {
+			os.Remove(expectedPath) //nolint:errcheck
+			return data
+		}
+		for _, dir := range scanDirs {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+					continue
+				}
+				info, err := e.Info()
+				if err != nil || !info.ModTime().After(after) {
+					continue
+				}
+				p := filepath.Join(dir, e.Name())
+				if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
+					os.Remove(p) //nolint:errcheck
+					return data
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func runReadOnlyCommandEnv(timeout time.Duration, env []string, name string, args ...string) (string, string) {
@@ -702,15 +911,82 @@ func summarizeCommandFailure(taskErr, output string) string {
 	return taskErr + ": " + output
 }
 
+// python3X11Screenshot captures the X11 root window via ctypes + libX11 and writes
+// a PNG using only Python 3 stdlib. No extra packages required — libX11.so.6 is
+// always present when DISPLAY/XWayland is available.
+const python3X11Screenshot = `import ctypes,struct,zlib,sys,os
+L=ctypes.CDLL('libX11.so.6')
+L.XOpenDisplay.restype=ctypes.c_void_p
+L.XDefaultScreen.restype=ctypes.c_int
+L.XRootWindow.restype=ctypes.c_ulong
+L.XDisplayWidth.restype=ctypes.c_int
+L.XDisplayHeight.restype=ctypes.c_int
+L.XGetImage.restype=ctypes.c_void_p
+L.XSync.restype=ctypes.c_int
+# Non-fatal error handler: prevents BadMatch/BadDrawable from aborting the process
+EH=ctypes.CFUNCTYPE(ctypes.c_int,ctypes.c_void_p,ctypes.c_void_p)
+L.XSetErrorHandler(EH(lambda d,e:0))
+class _I(ctypes.Structure):
+ _fields_=[('w',ctypes.c_int),('h',ctypes.c_int),('xo',ctypes.c_int),('fmt',ctypes.c_int),('data',ctypes.c_void_p),('bo',ctypes.c_int),('bu',ctypes.c_int),('bbo',ctypes.c_int),('bp',ctypes.c_int),('dep',ctypes.c_int),('bpl',ctypes.c_int),('bpp',ctypes.c_int),('rm',ctypes.c_ulong),('gm',ctypes.c_ulong),('bm',ctypes.c_ulong)]
+disp=os.environ.get('DISPLAY',':0').encode()
+dp=L.XOpenDisplay(disp)
+if not dp:sys.exit(1)
+sc=L.XDefaultScreen(ctypes.c_void_p(dp));rt=L.XRootWindow(ctypes.c_void_p(dp),sc)
+w=L.XDisplayWidth(ctypes.c_void_p(dp),sc);h=L.XDisplayHeight(ctypes.c_void_p(dp),sc)
+im=L.XGetImage(ctypes.c_void_p(dp),rt,0,0,w,h,0xFFFFFFFF,2)
+L.XSync(ctypes.c_void_p(dp),0)
+if not im:sys.exit(1)
+xi=ctypes.cast(im,ctypes.POINTER(_I)).contents;bpl=xi.bpl
+raw=bytearray(ctypes.string_at(xi.data,bpl*h))
+px=bytearray()
+for y in range(h):px+=raw[y*bpl:y*bpl+w*4]
+rgb=bytearray(w*h*3);rgb[0::3]=px[2::4];rgb[1::3]=px[1::4];rgb[2::3]=px[0::4]
+rows=bytearray()
+for y in range(h):rows.append(0);rows+=rgb[y*w*3:(y+1)*w*3]
+cz=zlib.compress(bytes(rows),6)
+def ck(t,b):return struct.pack('>I',len(b))+t+b+struct.pack('>I',zlib.crc32(t+b)&0xFFFFFFFF)
+with open(sys.argv[1],'wb') as f:f.write(b'\x89PNG\r\n\x1a\n'+ck(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+ck(b'IDAT',cz)+ck(b'IEND',b''))
+`
+
+// python3PortalScreenshot captures the full desktop via the XDG Desktop Portal
+// Screenshot interface using python3-gi (ships with the default Ubuntu GNOME
+// desktop). Works on GNOME 45+ Wayland where unsafe-mode and XGetImage are gone.
+// interactive=false takes a silent full-screen capture with no UI prompt.
+const python3PortalScreenshot = `import gi,sys,shutil
+gi.require_version('Gio','2.0')
+from gi.repository import Gio,GLib
+bus=Gio.bus_get_sync(Gio.BusType.SESSION,None)
+loop=GLib.MainLoop()
+r=[None]
+def cb(c,se,pa,i,si,ps):
+ if si=='Response':
+  rv,rs=ps.unpack()
+  if rv==0 and 'uri' in rs:r[0]=rs['uri']
+  loop.quit()
+snd=bus.get_unique_name().replace(':','').replace('.','_')
+tok='sable1'
+hdl='/org/freedesktop/portal/desktop/request/'+snd+'/'+tok
+bus.signal_subscribe(None,None,'Response',hdl,None,Gio.DBusSignalFlags.NONE,cb)
+pt=Gio.DBusProxy.new_sync(bus,Gio.DBusProxyFlags.NONE,None,'org.freedesktop.portal.Desktop','/org/freedesktop/portal/desktop','org.freedesktop.portal.Screenshot',None)
+pt.call_sync('Screenshot',GLib.Variant('(sa{sv})',('',{'handle_token':GLib.Variant('s',tok),'interactive':GLib.Variant('b',False)})),0,-1,None)
+GLib.timeout_add_seconds(15,loop.quit)
+loop.run()
+if r[0]:
+ s=r[0][7:]if r[0].startswith('file://')else r[0]
+ shutil.copy(s,sys.argv[1])
+ sys.exit(0)
+sys.exit(1)
+`
+
 func linuxScreenshotCandidates(base string) [][]string {
 	jpg := base + ".jpg"
 	png := base + ".png"
 	return [][]string{
-		{"gdbus", "call", "--session", "--dest", "org.gnome.Shell.Screenshot", "--object-path", "/org/gnome/Shell/Screenshot", "--method", "org.gnome.Shell.Screenshot.Screenshot", "false", "true", png},
 		{"gnome-screenshot", "-f", png},
-		{"scrot", jpg},
 		{"grim", png},
+		{"scrot", jpg},
 		{"maim", png},
+		{"python3", "-c", python3X11Screenshot, png},
 		{"import", "-window", "root", png},
 		{"xfce4-screenshooter", "-f", "-s", png},
 		{"mate-screenshot", "-f", png},
