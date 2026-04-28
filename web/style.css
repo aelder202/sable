@@ -251,6 +251,7 @@ kbd {
   border-color: var(--danger);
   background: var(--danger-bg);
   color: #ffd9d6;
+  white-space: nowrap;
 }
 
 .error {
@@ -1006,9 +1007,7 @@ kbd {
 }
 
 #session-rail,
-#file-browser-panel,
-#clear-confirm-panel,
-#kill-confirm-panel {
+#file-browser-panel {
   position: relative;
   width: min(1000px, calc(100vw - 48px));
   height: min(780px, calc(100vh - 48px));
@@ -1023,11 +1022,28 @@ kbd {
   box-shadow: var(--shadow);
 }
 
+#clear-confirm-panel,
 #kill-confirm-panel {
+  position: relative;
   width: min(480px, calc(100vw - 48px));
   height: auto;
   min-height: 0;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   resize: none;
+  box-shadow: var(--shadow);
+}
+
+#session-rail .rail-header,
+#file-browser-panel .rail-header {
+  cursor: grab;
+}
+
+#session-rail .rail-header:active,
+#file-browser-panel .rail-header:active {
+  cursor: grabbing;
 }
 
 .rail-header {
@@ -1414,6 +1430,7 @@ kbd {
     min-height: 0;
   }
 
+  #clear-confirm-panel,
   #kill-confirm-panel {
     width: calc(100vw - 20px);
   }

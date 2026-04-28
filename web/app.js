@@ -80,9 +80,9 @@ const TASK_TYPES = {
     inputMode: 'text',
   },
   snapshot: {
-    buttonLabel: 'Queue Snapshot',
-    help: 'Collect a bounded host snapshot report from the selected session.',
-    note: 'Snapshot returns identity, network, route, disk, and environment basics as a text artifact.',
+    buttonLabel: 'Queue Host Info',
+    help: 'Collect a host information report from the selected session.',
+    note: 'Host Info returns identity, network, route, disk, and environment basics as a text artifact.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
@@ -1056,7 +1056,7 @@ function handleTaskOutput(output, historical) {
       output.type === 'peas'
         ? 'PEAS output ready'
         : output.type === 'snapshot'
-          ? 'snapshot ready'
+          ? 'host info ready'
           : 'screenshot ready',
       output.type === 'screenshot' ? 'Save Screenshot' : 'Save Output',
       historical,
@@ -1101,6 +1101,41 @@ $('clear-confirm-btn').addEventListener('click', confirmClearOutput);
 $('kill-cancel-btn').addEventListener('click', closeKillConfirmModal);
 document.querySelector('[data-close-kill-confirm]').addEventListener('click', closeKillConfirmModal);
 $('kill-confirm-btn').addEventListener('click', confirmKillSession);
+initDraggableModals();
+
+function initDraggableModals() {
+  [$('session-rail'), $('file-browser-panel')].forEach(panel => {
+    if (!panel) return;
+    const header = panel.querySelector('.rail-header');
+    if (!header) return;
+
+    let dragging = false, ox = 0, oy = 0;
+
+    header.addEventListener('mousedown', e => {
+      if (e.target.closest('button, select, input')) return;
+      dragging = true;
+      if (!panel.classList.contains('panel-dragged')) {
+        const rect = panel.getBoundingClientRect();
+        panel.style.position = 'absolute';
+        panel.style.margin = '0';
+        panel.style.left = rect.left + 'px';
+        panel.style.top = rect.top + 'px';
+        panel.classList.add('panel-dragged');
+      }
+      ox = e.clientX - panel.getBoundingClientRect().left;
+      oy = e.clientY - panel.getBoundingClientRect().top;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      panel.style.left = (e.clientX - ox) + 'px';
+      panel.style.top = (e.clientY - oy) + 'px';
+    });
+
+    document.addEventListener('mouseup', () => { dragging = false; });
+  });
+}
 
 function initTaskTypeMenu() {
   if (!taskTypeSelect || !taskTypeButton || !taskTypeList) return;
