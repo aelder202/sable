@@ -252,7 +252,9 @@ The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `to
 
 `download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online. Use **Browse** in the Download task to open the modal file explorer with parent navigation, refresh, and file download actions.
 
-Type a partial path for live suggestions: click a directory to keep browsing, the `...` row to go up, or a file to fill the final path.
+![Download file browser modal](images/file_browser.png)
+
+You may also choose to instead type a partial path on the command line for live suggestions: click a directory to keep browsing, the `...` row to go up, or a file to fill the final path.
 
 The agent reads files up to 50 MB, base64-encodes them, and the browser auto-decodes and saves them. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action. Use HTTPS transport for large downloads.
 

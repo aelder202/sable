@@ -245,6 +245,7 @@ kbd {
 }
 
 #send-btn.danger-button,
+#clear-confirm-btn,
 #kill-confirm-btn,
 #cancel-task-btn {
   border-color: var(--danger);
@@ -358,6 +359,7 @@ kbd {
 #output-search-toggle,
 #session-details-close-btn,
 #file-browser-close-btn,
+#clear-cancel-btn,
 #kill-cancel-btn,
 .panel-item button,
 .panel-form button,
@@ -396,6 +398,8 @@ kbd {
 #output-shell,
 #session-rail,
 #file-browser-panel,
+#clear-confirm-panel,
+#clear-confirm-panel,
 #kill-confirm-panel {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1003,6 +1007,7 @@ kbd {
 
 #session-rail,
 #file-browser-panel,
+#clear-confirm-panel,
 #kill-confirm-panel {
   position: relative;
   width: min(1000px, calc(100vw - 48px));

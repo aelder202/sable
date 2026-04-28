@@ -23,6 +23,7 @@ let selectedTaskType = 'shell';
 let taskRequestInFlight = false;
 let killConfirmTimer = null;
 let armedKillAgentID = null;
+let pendingClearAgentID = '';
 let hasHydratedOutputs = false;
 let followOutput = true;
 let pendingPathCompletion = null;
@@ -301,6 +302,7 @@ function setLoggedOutState(message) {
   $('console-title').textContent = 'Select a session';
   closeSessionDetailsModal();
   closeFileBrowserModal();
+  closeClearConfirmModal();
   closeKillConfirmModal();
   $('output-resizer').hidden = true;
   $('session-count').textContent = '0 sessions';
@@ -319,6 +321,7 @@ function setLoggedOutState(message) {
   $('output-search').value = '';
   updateOutputSearchUI(false);
   clearPendingUpload();
+  closeClearConfirmModal();
   closeKillConfirmModal();
   setQueueBusy(false, '');
   updateOutputControls();
@@ -639,6 +642,7 @@ function clearActiveSession() {
   $('console-title').textContent = 'Select a session';
   closeSessionDetailsModal();
   closeFileBrowserModal();
+  closeClearConfirmModal();
   $('output-resizer').hidden = true;
   $('session-warning').hidden = true;
   $('session-warning').textContent = '';
@@ -832,6 +836,7 @@ function selectAgent(agent) {
   saveActiveTaskDraft();
   exitInteractiveMode(false);
   resetActivePathCompletion();
+  closeClearConfirmModal();
   activeAgentID = agent.id;
   activeAgent = agent;
   seenTaskIDs = new Set();
@@ -867,6 +872,7 @@ function updateSessionHeader() {
     $('session-details-btn').hidden = true;
     closeSessionDetailsModal();
     closeFileBrowserModal();
+    closeClearConfirmModal();
     closeKillConfirmModal();
     $('output-toolbar').hidden = true;
     $('output-resizer').hidden = true;
@@ -1089,6 +1095,9 @@ $('session-details-close-btn').addEventListener('click', closeSessionDetailsModa
 document.querySelector('[data-close-session-details]').addEventListener('click', closeSessionDetailsModal);
 $('file-browser-close-btn').addEventListener('click', closeFileBrowserModal);
 document.querySelector('[data-close-file-browser]').addEventListener('click', closeFileBrowserModal);
+$('clear-cancel-btn').addEventListener('click', closeClearConfirmModal);
+document.querySelector('[data-close-clear-confirm]').addEventListener('click', closeClearConfirmModal);
+$('clear-confirm-btn').addEventListener('click', confirmClearOutput);
 $('kill-cancel-btn').addEventListener('click', closeKillConfirmModal);
 document.querySelector('[data-close-kill-confirm]').addEventListener('click', closeKillConfirmModal);
 $('kill-confirm-btn').addEventListener('click', confirmKillSession);
@@ -1893,6 +1902,29 @@ function closeFileBrowserModal() {
   fileBrowserMode = 'browse';
 }
 
+function openClearConfirmModal() {
+  if (!activeAgentID || taskRequestInFlight) return;
+  pendingClearAgentID = activeAgentID;
+  const label = activeAgent && activeAgent.hostname ? activeAgent.hostname : ('Session ' + activeAgentID.slice(0, 8));
+  $('clear-confirm-copy').textContent = 'Clear output history for ' + label + '? This removes persisted output from the server for this session.';
+  $('clear-confirm-modal').hidden = false;
+  window.requestAnimationFrame(() => $('clear-cancel-btn').focus());
+}
+
+function closeClearConfirmModal() {
+  const modal = $('clear-confirm-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  pendingClearAgentID = '';
+}
+
+async function confirmClearOutput() {
+  if (!pendingClearAgentID || taskRequestInFlight) return;
+  const targetAgentID = pendingClearAgentID;
+  closeClearConfirmModal();
+  await clearOutputHistory(targetAgentID);
+}
+
 function openKillConfirmModal(agent) {
   if (!agent || !agent.id || taskRequestInFlight) return;
   pendingKillAgentID = agent.id;
@@ -2167,6 +2199,12 @@ document.addEventListener('keydown', e => {
 
   if (e.key !== 'Escape') return;
 
+  if (!$('clear-confirm-modal').hidden) {
+    e.preventDefault();
+    closeClearConfirmModal();
+    return;
+  }
+
   if (!$('kill-confirm-modal').hidden) {
     e.preventDefault();
     closeKillConfirmModal();
@@ -2251,10 +2289,11 @@ function navigateInteractiveHistory(direction) {
 
 $('save-output-btn').addEventListener('click', saveRenderedOutputArtifact);
 
-$('clear-btn').addEventListener('click', async () => {
-  if (!activeAgentID || taskRequestInFlight) return;
+$('clear-btn').addEventListener('click', openClearConfirmModal);
 
-  const agentID = activeAgentID;
+async function clearOutputHistory(agentID) {
+  if (!agentID || taskRequestInFlight) return;
+
   $('clear-btn').disabled = true;
   $('save-output-btn').disabled = true;
   outputsRequestID++;
@@ -2287,7 +2326,7 @@ $('clear-btn').addEventListener('click', async () => {
       $('save-output-btn').disabled = false;
     }
   }
-});
+}
 
 $('exit-interactive-btn').addEventListener('click', () => exitInteractiveMode(true));
 
