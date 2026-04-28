@@ -182,6 +182,22 @@ func TestRecordAndGetOutputs(t *testing.T) {
 	}
 }
 
+func TestClearOutputs(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t1", Output: "hello"})
+
+	if !s.ClearOutputs("a1") {
+		t.Fatal("expected ClearOutputs to find agent")
+	}
+	if outs := s.GetOutputs("a1"); len(outs) != 0 {
+		t.Fatalf("expected output history to be cleared, got %+v", outs)
+	}
+	if s.ClearOutputs("missing") {
+		t.Fatal("expected ClearOutputs to reject unknown agent")
+	}
+}
+
 func TestRecordOutputReassemblesChunks(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
