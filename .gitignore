@@ -51,6 +51,7 @@ Thumbs.db
 *~
 
 # AI assistant artifacts
+AGENTS.md
 .claude/
 .cursor/
 .aider*

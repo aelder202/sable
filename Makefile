@@ -49,8 +49,15 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: setup build build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
+.PHONY: wizard install setup build rebuild build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
 .PRECIOUS: register-tool$(EXE)
+
+## Interactive first-run and rebuild wizard. Pass flags with WIZARD_ARGS='--yes --server-url https://host:443 --agents both --windows-label win01'.
+wizard:
+	go run ./tools/wizard $(WIZARD_ARGS)
+
+## Friendly alias for the setup wizard.
+install: wizard
 
 ## First-time setup: generates config.env, server.crt, server.key.
 ## Usage: make setup SERVER_URL=https://<public-server-ip>:443 [LABEL=<label>] [PROFILE=fast|quiet|dns] [DNS_DOMAIN=example.com]
@@ -60,12 +67,15 @@ setup:
 ## Build the recommended bundle for this machine: host-native Sable server + a per-agent Linux binary.
 build:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make setup SERVER_URL=https://<public-server-ip>:443' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	go build -o $(SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
+
+## Rebuild after source or web UI changes. Same output as make build.
+rebuild: build
 
 ## Build the recommended bundle with the latest PEAS scripts embedded in the agent for offline targets.
 build-offline-peas: update-peas build
@@ -74,7 +84,7 @@ build-offline-peas: update-peas build
 ## Produces: $(WINDOWS_SERVER_BINARY) (Windows) + $(AGENT_LINUX_ARTIFACT)
 build-windows-server:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make setup SERVER_URL=https://<public-server-ip>:443' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(XWIN) go build -o $(WINDOWS_SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
@@ -94,7 +104,7 @@ build-server:
 
 build-agent-linux:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make setup SERVER_URL=https://<public-server-ip>:443' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
@@ -102,7 +112,7 @@ endif
 
 build-agent-windows:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make setup SERVER_URL=https://<public-server-ip>:443' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(MKDIR_BUILD)
 	$(XWIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_WINDOWS_ARTIFACT)" ./cmd/agent
