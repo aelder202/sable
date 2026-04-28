@@ -1904,7 +1904,7 @@ function renderFileBrowser(result) {
 function fileBrowserDownloadButton(entry) {
   const state = downloadStateForPath(entry.path);
   if (state && state.status === 'done') {
-    return fileBrowserButton('Downloaded', () => openArtifactsPanel(state.artifactKey));
+    return fileBrowserButton('See Download', () => openArtifactsPanel(state.artifactKey));
   }
   if (state && state.status === 'progress') {
     const button = fileBrowserButton('Download in progress', () => {});
@@ -1922,6 +1922,7 @@ function downloadStateForPath(path) {
 }
 
 function openArtifactsPanel(artifactKey) {
+  closeFileBrowserModal();
   activeSessionPanel = 'artifacts';
   openSessionDetailsModal();
   if (artifactKey) {
