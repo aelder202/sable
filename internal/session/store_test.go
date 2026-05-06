@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -273,5 +274,112 @@ func TestRecordOutputCapsHistory(t *testing.T) {
 	outs := s.GetOutputs("a1")
 	if len(outs) != 256 {
 		t.Fatalf("expected capped output history, got %d", len(outs))
+	}
+}
+
+func TestArtifactsAreStoredAsServerObjects(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+
+	saved, ok := s.AddArtifact("a1", session.Artifact{
+		ID:       "artifact-1",
+		Key:      "task:report.txt",
+		TaskID:   "task-1",
+		Label:    "report",
+		Filename: "report.txt",
+		MIME:     "text/plain",
+		Data:     "aGVsbG8=",
+	})
+	if !ok {
+		t.Fatal("expected AddArtifact to find agent")
+	}
+	if saved.Data != "" {
+		t.Fatal("artifact summary must omit data")
+	}
+
+	listed := s.ListArtifacts("a1")
+	if len(listed) != 1 || listed[0].Data != "" {
+		t.Fatalf("list should include one summary without data, got %#v", listed)
+	}
+
+	full, ok := s.GetArtifact("a1", "artifact-1")
+	if !ok {
+		t.Fatal("expected GetArtifact to find artifact")
+	}
+	if full.Data != "aGVsbG8=" || full.ArchiveFilename != "report.txt" {
+		t.Fatalf("artifact data/defaults not preserved: %#v", full)
+	}
+
+	dupe, ok := s.AddArtifact("a1", session.Artifact{
+		ID:       "artifact-2",
+		Key:      "task:report.txt",
+		Filename: "other.txt",
+		Data:     "b3RoZXI=",
+	})
+	if !ok || dupe.ID != "artifact-1" {
+		t.Fatalf("expected duplicate key to return original summary, got %#v", dupe)
+	}
+	if listed := s.ListArtifacts("a1"); len(listed) != 1 {
+		t.Fatalf("expected duplicate key to keep one artifact, got %d", len(listed))
+	}
+}
+
+func TestPersistentStoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sable-state.json")
+	s, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
+	s.UpdateInfoWithTransport("a1", "host", "linux", "amd64", "https")
+	if _, ok := s.UpdateMetadata("a1", "important", []string{"lab", "lab", "linux"}); !ok {
+		t.Fatal("expected metadata update to find agent")
+	}
+	if err := s.EnqueueTask("a1", &protocol.Task{ID: "task-1", Type: "shell", Payload: "id"}); err != nil {
+		t.Fatalf("EnqueueTask: %v", err)
+	}
+	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "done-1", Type: "shell", Output: "hello"})
+	if _, ok := s.AddArtifact("a1", session.Artifact{
+		ID:       "artifact-1",
+		Key:      "done-1:output.txt",
+		TaskID:   "done-1",
+		Filename: "output.txt",
+		Data:     "aGVsbG8=",
+	}); !ok {
+		t.Fatal("expected artifact save to find agent")
+	}
+
+	reloaded, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatalf("reload NewPersistentStore: %v", err)
+	}
+	agent, ok := reloaded.Get("a1")
+	if !ok {
+		t.Fatal("expected persisted agent after reload")
+	}
+	if agent.Hostname != "host" || agent.Transport != "https" || agent.Notes != "important" {
+		t.Fatalf("unexpected persisted agent: %+v", agent)
+	}
+	if len(agent.Tags) != 2 || agent.Tags[0] != "lab" || agent.Tags[1] != "linux" {
+		t.Fatalf("unexpected persisted tags: %#v", agent.Tags)
+	}
+	if len(agent.Queued) != 1 || agent.Queued[0].ID != "task-1" {
+		t.Fatalf("unexpected persisted queue: %#v", agent.Queued)
+	}
+	outputs := reloaded.GetOutputs("a1")
+	if len(outputs) != 1 || outputs[0].Output != "hello" {
+		t.Fatalf("unexpected persisted outputs: %#v", outputs)
+	}
+	secret, ok := reloaded.Secret("a1")
+	if !ok || string(secret) != "secret" {
+		t.Fatalf("unexpected persisted secret: %q", secret)
+	}
+	if len(reloaded.AuditLog()) == 0 {
+		t.Fatal("expected persisted audit events")
+	}
+	artifact, ok := reloaded.GetArtifact("a1", "artifact-1")
+	if !ok || artifact.Data != "aGVsbG8=" {
+		t.Fatalf("unexpected persisted artifact: %#v", artifact)
 	}
 }

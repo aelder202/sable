@@ -4,6 +4,9 @@ agents/
 server.crt
 server.key
 pw.txt
+sable-state.json
+sable-state.json.tmp-*
+.sable/
 
 # Compiled binaries (root-level build outputs)
 /sable-server
@@ -21,6 +24,8 @@ pw.txt
 /setup.exe
 /gensecret
 /gensecret.exe
+/sablectl
+/sablectl.exe
 /livecheckcodex
 /livecheckcodex.exe
 

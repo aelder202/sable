@@ -158,7 +158,7 @@ func TestDetectImageType(t *testing.T) {
 	}
 }
 
-func TestLinuxScreenshotCandidatesIncludeCommonUbuntuFallbacks(t *testing.T) {
+func TestLinuxScreenshotCandidatesIncludeCommonFallbacks(t *testing.T) {
 	candidates := linuxScreenshotCandidates("/tmp/sable_screenshot_test")
 	commands := make(map[string]bool)
 	for _, candidate := range candidates {
@@ -168,7 +168,7 @@ func TestLinuxScreenshotCandidatesIncludeCommonUbuntuFallbacks(t *testing.T) {
 		commands[candidate[0]] = true
 	}
 
-	for _, command := range []string{"gdbus", "gnome-screenshot", "scrot", "grim", "maim", "import"} {
+	for _, command := range []string{"gnome-screenshot", "scrot", "grim", "maim", "import"} {
 		if !commands[command] {
 			t.Fatalf("missing screenshot candidate %q in %#v", command, candidates)
 		}

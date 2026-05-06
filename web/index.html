@@ -89,6 +89,10 @@
           >
 
           <p id="agent-filter-empty" class="sidebar-empty" hidden></p>
+          <div id="bulk-session-bar" class="bulk-session-bar" hidden>
+            <span id="bulk-session-count">0 selected</span>
+            <button id="bulk-clear-btn" type="button">Clear</button>
+          </div>
           <ul id="agent-list" aria-live="polite"></ul>
         </aside>
 
@@ -123,6 +127,15 @@
                   <button id="output-search-toggle" type="button" aria-expanded="false" aria-controls="output-search-panel">
                     Search Output
                   </button>
+                  <label class="sr-only" for="output-type-filter">Output type</label>
+                  <select id="output-type-filter" aria-label="Output type">
+                    <option value="all">All output</option>
+                    <option value="operator">Operator</option>
+                    <option value="shell">Shell</option>
+                    <option value="artifact">Artifacts</option>
+                    <option value="error">Errors</option>
+                    <option value="progress">Progress</option>
+                  </select>
                   <div id="output-search-panel" hidden>
                     <label class="sr-only" for="output-search">Search output</label>
                     <input id="output-search" type="search" placeholder="Filter rendered output">
@@ -188,6 +201,7 @@
                       <div id="task-type-list" class="task-type-list" role="listbox" aria-label="Task action" hidden></div>
                     </div>
                     <button id="send-btn">Queue Task</button>
+                    <button id="bulk-send-btn" type="button" hidden>Queue Selected</button>
                     <button id="exit-interactive-btn" hidden>Exit</button>
                   </div>
                   <div class="command-line">
@@ -223,7 +237,7 @@
                 <div class="modal-controls">
                   <label class="sr-only" for="session-panel-filter">Detail filter</label>
                   <select id="session-panel-filter" aria-label="Detail filter">
-                    <option value="all">All</option>
+                    <option value="timeline">Timeline</option>
                     <option value="jobs">Jobs</option>
                     <option value="artifacts">Artifacts</option>
                     <option value="notes">Notes</option>
@@ -233,14 +247,18 @@
                 </div>
               </div>
               <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Session details">
-                <button class="session-tab active" type="button" role="tab" aria-selected="true" aria-controls="session-panels" data-panel="all">All</button>
+                <button class="session-tab active" type="button" role="tab" aria-selected="true" aria-controls="timeline-panel" data-panel="timeline">Timeline <span id="timeline-count">0</span></button>
                 <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-panel="jobs">Jobs <span id="jobs-count">0</span></button>
                 <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="artifacts-panel" data-panel="artifacts">Artifacts <span id="artifacts-count">0</span></button>
                 <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="notes-panel" data-panel="notes">Notes</button>
                 <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-panel="audit">Audit <span id="audit-count">0</span></button>
               </div>
               <div id="session-panels" class="session-panels">
-                <section id="jobs-panel" class="session-panel active" role="tabpanel">
+                <section id="timeline-panel" class="session-panel active" role="tabpanel">
+                  <div id="timeline-summary" class="timeline-summary" aria-label="Session summary"></div>
+                  <div id="timeline-list" class="timeline-list"></div>
+                </section>
+                <section id="jobs-panel" class="session-panel" role="tabpanel" hidden>
                   <h5>Jobs</h5>
                   <div id="jobs-list" class="panel-list"></div>
                 </section>

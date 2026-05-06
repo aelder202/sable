@@ -288,6 +288,72 @@ func TestUpdateAgentMetadata(t *testing.T) {
 	}
 }
 
+func TestAgentArtifactsAPIStoresAndReturnsDataByID(t *testing.T) {
+	router, _ := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]interface{}{
+		"key":      "task-1:report.txt",
+		"task_id":  "task-1",
+		"label":    "report",
+		"filename": "report.txt",
+		"mime":     "text/plain",
+		"data":     "aGVsbG8=",
+	})
+
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/artifacts", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating artifact, got %d: %s", w.Code, w.Body.String())
+	}
+	var created session.Artifact
+	json.NewDecoder(w.Body).Decode(&created) //nolint:errcheck
+	if created.ID == "" || created.Data != "" {
+		t.Fatalf("expected artifact summary with id and no data, got %#v", created)
+	}
+
+	w = doRequest(t, router, http.MethodGet, "/api/agents/agent-1/artifacts", nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 listing artifacts, got %d", w.Code)
+	}
+	var listed []session.Artifact
+	json.NewDecoder(w.Body).Decode(&listed) //nolint:errcheck
+	if len(listed) != 1 || listed[0].Data != "" {
+		t.Fatalf("expected one listed summary without data, got %#v", listed)
+	}
+
+	w = doRequest(t, router, http.MethodGet, "/api/agents/agent-1/artifacts/"+created.ID, nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 getting artifact, got %d", w.Code)
+	}
+	var full session.Artifact
+	json.NewDecoder(w.Body).Decode(&full) //nolint:errcheck
+	if full.Data != "aGVsbG8=" || full.Filename != "report.txt" {
+		t.Fatalf("expected full artifact data, got %#v", full)
+	}
+}
+
+func TestAgentArtifactsAPIRejectsInvalidBase64(t *testing.T) {
+	router, _ := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]string{
+		"filename": "bad.bin",
+		"data":     "not-base64",
+	})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/artifacts", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid artifact data, got %d", w.Code)
+	}
+}
+
 func TestQueueTaskRejectsSituationalPayload(t *testing.T) {
 	router, _ := setupAPI(t)
 	token := loginAndGetToken(t, router)
