@@ -139,13 +139,30 @@ The operator API binds to loopback only. Reach it on the server host directly, o
 ssh -L 8443:127.0.0.1:8443 user@sable-host
 ```
 
-### 4. Add Or Rebuild Agents
+### 4. Register The Main Agent
+
+The first agent identity is `main`. `sablectl install` builds it at `builds/main/agent-linux`, but it can only be registered after the server API is running.
+
+In a second terminal on the server host, run:
+
+```sh
+./sablectl agent register main --password-file ./pw.txt
+```
+
+If you want install to start the server and register generated identities in one pass, create the password file first and use:
+
+```sh
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --start
+```
+
+### 5. Add Or Rebuild Agents
 
 Create another local identity, then build it:
 
 ```sh
 ./sablectl agent add windows --label win01
 ./sablectl agent build win01
+./sablectl agent register win01 --password-file ./pw.txt
 ```
 
 After source changes, rebuild without remembering which target changed:
@@ -154,7 +171,7 @@ After source changes, rebuild without remembering which target changed:
 ./sablectl rebuild
 ```
 
-### 5. Deploy the agent
+### 6. Deploy the agent
 
 Linux:
 
@@ -315,29 +332,32 @@ The CLI is queue-oriented and does not live-stream output or auto-decode downloa
 
 ### Adding more agents
 
-`make wizard` creates the first identity in `config.env`; `make register PASSWORD=...` registers it. Every additional agent uses `make register NEW=1`, which writes a new env file under `agents/<label>.env`.
+`sablectl install` creates the first identity in `config.env` with label `main`. Register it after the server is running:
 
 ```sh
-make register NEW=1 PASSWORD=yourpassword LABEL=web01
-# [+] Registered new agent: web01 (id: 3b2f...)
-#     env file: agents/web01.env
-#     build linux:   make build-agent-linux   AGENT_ENV=agents/web01.env
-#     build windows: make build-agent-windows AGENT_ENV=agents/web01.env
+./sablectl agent register main --password-file ./pw.txt
+```
+
+Every additional agent gets its own env file under `agents/<label>.env`:
+
+```sh
+./sablectl agent add linux --label web01
+./sablectl agent build web01
+./sablectl agent register web01 --password-file ./pw.txt
 ```
 
 Labels must be lowercase with letters, digits, `-`, or `_`. `PC` and `VM` get rejected; use `pc` and `vm`.
 
-To build and ship a `NEW=1` agent:
+To ship that agent:
 
 ```sh
-make build-agent-linux AGENT_ENV=agents/web01.env
 scp builds/web01/agent-linux user@target:/tmp/agent
 ssh user@target "chmod +x /tmp/agent && /tmp/agent &"
 ```
 
 ### Manual registration
 
-The Makefile is the easy path. The CLI works too:
+`sablectl agent register` is the easy path. The interactive server CLI works too:
 
 ```sh
 ./sable-server --cli

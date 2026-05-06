@@ -131,6 +131,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  start               run the Sable server")
 	fmt.Fprintln(out, "  agent add <target>  create a local agent identity")
 	fmt.Fprintln(out, "  agent build <label> build a known agent")
+	fmt.Fprintln(out, "  agent register      register known local agent identities")
 	fmt.Fprintln(out, "  rebuild             rebuild server and known agents")
 	fmt.Fprintln(out, "  update              git pull, then rebuild")
 	fmt.Fprintln(out, "  remove              remove files tracked in .sable/install.json")
@@ -426,13 +427,15 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 
 func runAgent(args []string, runner commandRunner, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: sablectl agent <add|build> ...")
+		return errors.New("usage: sablectl agent <add|build|register> ...")
 	}
 	switch args[0] {
 	case "add":
 		return runAgentAdd(args[1:], stdout)
 	case "build":
 		return runAgentBuild(args[1:], runner, stdout, stderr)
+	case "register":
+		return runAgentRegister(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -512,6 +515,54 @@ func runAgentBuild(args []string, runner commandRunner, stdout, stderr io.Writer
 		return err
 	}
 	fmt.Fprintf(stdout, "built: %s\n", filepath.ToSlash(out))
+	return nil
+}
+
+func runAgentRegister(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("agent register", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	password := fs.String("password", "", "operator password")
+	passwordFile := fs.String("password-file", "", "operator password file")
+	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("usage: sablectl agent register [label|all] --password-file ./pw.txt")
+	}
+	selector := "all"
+	if fs.NArg() == 1 {
+		selector = fs.Arg(0)
+	}
+	resolvedPassword, err := readOperatorPassword(*passwordFile, *password)
+	if err != nil {
+		return err
+	}
+	m := loadManifestOrDefault()
+	envs, err := knownAgentEnvPaths(m, "")
+	if err != nil {
+		return err
+	}
+	if selector != "all" {
+		envPath, _, err := findAgentByLabel(selector)
+		if err != nil {
+			return err
+		}
+		envs = []string{envPath}
+	}
+	if len(envs) == 0 {
+		return errors.New("no local agent env files found")
+	}
+	if err := registerEnvFiles(*apiURL, resolvedPassword, envs); err != nil {
+		return err
+	}
+	for _, envPath := range envs {
+		agent, err := loadAgentConfig(envPath)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "registered: %s (%s)\n", agent.Label, agent.ID)
+	}
 	return nil
 }
 
@@ -884,6 +935,29 @@ func resolvePasswordFile(path, password string) (string, error) {
 		return "", fmt.Errorf("write password file: %w", err)
 	}
 	return password, nil
+}
+
+func readOperatorPassword(path, password string) (string, error) {
+	password = strings.TrimSpace(password)
+	if password != "" {
+		return password, nil
+	}
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read password file: %w", err)
+		}
+		password = strings.TrimSpace(string(data))
+		if password == "" {
+			return "", errors.New("password file is empty")
+		}
+		return password, nil
+	}
+	password = strings.TrimSpace(os.Getenv("SABLE_OPERATOR_PASSWORD"))
+	if password != "" {
+		return password, nil
+	}
+	return "", errors.New("supply --password-file, --password, or SABLE_OPERATOR_PASSWORD")
 }
 
 func buildConfigEnv(agent agentConfig) []byte {

@@ -103,3 +103,17 @@ func TestGoVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestReadOperatorPasswordFromFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("pw.txt", []byte("secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readOperatorPassword("pw.txt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "secret" {
+		t.Fatalf("password = %q, want secret", got)
+	}
+}
