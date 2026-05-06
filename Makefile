@@ -17,7 +17,7 @@ WINDOWS_SERVER_BINARY := sable-server.exe
 SABLECTL_BINARY := sablectl$(EXE)
 
 # Pick up generated values from the selected agent env file if it exists.
-# Run 'make setup SERVER_URL=https://<public-server-ip>:443' to create config.env.
+# config.env is created by 'sablectl install --url https://<host>:443'.
 AGENT_ENV ?= config.env
 -include $(AGENT_ENV)
 
@@ -50,66 +50,39 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: sablectl wizard install setup build rebuild build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
-.PRECIOUS: register-tool$(EXE)
+.PHONY: sablectl build build-windows-server build-server build-agent-linux build-agent-windows update-peas test test-integration gen-secret validate-openapi
 
 ## Build the unified sablectl installer/operator helper.
 sablectl:
 	go build -o $(SABLECTL_BINARY) ./cmd/sablectl
 
-## Interactive first-run and rebuild wizard. Pass flags with WIZARD_ARGS='--yes --server-url https://host:443 --agents both --windows-label win01'. Use --wipe-clean to remove existing builds, agents, and config.env before starting.
-wizard:
-	go run ./tools/wizard $(WIZARD_ARGS)
-
-## Build sablectl. Prefer './sablectl install --url https://host:443' for setup.
-install: sablectl
-
-## First-time setup: generates config.env, server.crt, server.key.
-## Usage: make setup SERVER_URL=https://<public-server-ip>:443 [LABEL=<label>] [PROFILE=fast|quiet|dns] [DNS_DOMAIN=example.com]
-setup:
-	go run ./tools/setup $(if $(LABEL),--label "$(LABEL)") $(if $(PROFILE),--profile "$(PROFILE)") $(if $(DNS_DOMAIN),--dns-domain "$(DNS_DOMAIN)")
-
 ## Build the recommended bundle for this machine: host-native Sable server + a per-agent Linux binary.
 build:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run './sablectl install --url https://<host>:443' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	go build -o $(SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
 
-## Rebuild after source or web UI changes. Same output as make build.
-rebuild: build
-
-## Build the recommended bundle with the latest PEAS scripts embedded in the agent for offline targets.
-build-offline-peas: update-peas build
-
 ## Cross-build a Windows Sable server bundle plus a per-agent Linux binary from a Linux/macOS build host.
 ## Produces: $(WINDOWS_SERVER_BINARY) (Windows) + $(AGENT_LINUX_ARTIFACT)
 build-windows-server:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run './sablectl install --url https://<host>:443' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(XWIN) go build -o $(WINDOWS_SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(WINDOWS_SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
 
-## Register the current agent or create/register a new one with NEW=1.
-## Usage: make register PASSWORD=yourpassword [NEW=1] [LABEL=<label>]
-register:
-	@go run ./tools/register $(if $(NEW),--new) $(if $(LABEL),--label "$(LABEL)") --server-url "$(SERVER_URL)" --cert-fp "$(CERT_FP_HEX)" --sleep-seconds "$(SLEEP_SECONDS)" --dns-domain "$(DNS_DOMAIN)" --output-dir "agents" "$(AGENT_ID)" "$(AGENT_SECRET_HEX)" "$(PASSWORD)"
-
-register-tool$(EXE): tools/register/main.go tools/register/main_test.go go.mod go.sum
-	go build -o register-tool$(EXE) ./tools/register
-
 build-server:
 	go build -o $(SERVER_BINARY) ./cmd/server
 
 build-agent-linux:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run './sablectl install --url https://<host>:443' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
@@ -117,15 +90,11 @@ endif
 
 build-agent-windows:
 ifeq ($(wildcard $(AGENT_ENV)),)
-	$(error $(AGENT_ENV) not found - run 'make wizard' first or pass AGENT_ENV=agents/<label>.env)
+	$(error $(AGENT_ENV) not found - run './sablectl install --url https://<host>:443' first or pass AGENT_ENV=agents/<label>.env)
 endif
 	$(MKDIR_BUILD)
 	$(XWIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_WINDOWS_ARTIFACT)" ./cmd/agent
 	@echo [+] Built: $(AGENT_WINDOWS_ARTIFACT)
-
-build-agent-linux-offline-peas: update-peas build-agent-linux
-
-build-agent-windows-offline-peas: update-peas build-agent-windows
 
 update-peas:
 	go run ./tools/updatepeas
@@ -138,3 +107,7 @@ test-integration:
 
 gen-secret:
 	@go run ./tools/gensecret
+
+## Lint docs/openapi.yaml using Redocly CLI. Requires Node.js (uses npx; nothing committed).
+validate-openapi:
+	npx --yes @redocly/cli@latest lint docs/openapi.yaml

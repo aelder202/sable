@@ -16,12 +16,6 @@ sable-state.json.tmp-*
 /agent
 /agent.exe
 /agent-*
-/register
-/register.exe
-/register-tool
-/register-tool.exe
-/setup
-/setup.exe
 /gensecret
 /gensecret.exe
 /sablectl
