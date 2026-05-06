@@ -12,6 +12,26 @@ Sable is a C2 written in Go. The server takes encrypted beacons from agents over
 
 ---
 
+## Interface Preview
+
+Password-gated operator console on loopback HTTPS:
+
+![Sable login screen](images/login.png)
+
+Active session view with command output, the Task Builder, and the full action menu:
+
+![Sable web console with active session](images/landing_page.png)
+
+Session details rail for jobs, artifacts, notes, and audit history:
+
+![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
+
+Remote file browser for selecting download paths:
+
+![Download file browser modal](images/file_browser.png)
+
+---
+
 ## Authorized Use
 
 Sable is intended for educational use, controlled labs, CTFs, owned systems, and engagements where you hold written authorization. Do not deploy it against systems you do not own or do not have explicit permission to test. The author accepts no responsibility for misuse.
@@ -167,11 +187,7 @@ The agent shows up in the console within one beacon interval.
 
 `https://127.0.0.1:8443` on the server host (or through the tunnel). Accept the self-signed cert and log in with the operator password.
 
-![Sable login screen](images/login.png)
-
 After login the console lists registered sessions, last-seen status, output, and the Task Builder.
-
-![Sable web console with active sessions](images/landing_page.png)
 
 ---
 
@@ -188,8 +204,6 @@ Use **Clear Output** to clear the selected session's output history on the serve
 The Task Builder keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
 
 Session metadata and saved results open from **Session Details**. Use the detail filter or tabs to show everything or focus on Jobs, Artifacts, Notes, or Audit.
-
-![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
 
 When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
 
@@ -251,8 +265,6 @@ The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `to
 ##### Download
 
 `download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online. Use **Browse** in the Download task to open the modal file explorer with parent navigation, refresh, and file download actions.
-
-![Download file browser modal](images/file_browser.png)
 
 You may also choose to instead type a partial path on the command line for live suggestions: click a directory to keep browsing, the `...` row to go up, or a file to fill the final path.
 
