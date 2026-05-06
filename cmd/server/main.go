@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,13 +18,12 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/aelder202/sable/internal/api"
 	"github.com/aelder202/sable/internal/cli"
 	"github.com/aelder202/sable/internal/listener"
 	"github.com/aelder202/sable/internal/nonce"
+	"github.com/aelder202/sable/internal/operatorpw"
 	"github.com/aelder202/sable/internal/session"
 	webui "github.com/aelder202/sable/web"
 	mdns "github.com/miekg/dns"
@@ -172,7 +170,7 @@ func loadOperatorPassword(passwordFile string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read password file: %w", err)
 		}
-		password := normalizePasswordInput(data)
+		password := operatorpw.Normalize(data)
 		if password == "" {
 			return "", errors.New("password file is empty")
 		}
@@ -185,7 +183,7 @@ func loadOperatorPassword(passwordFile string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read password from stdin: %w", err)
 		}
-		password := normalizePasswordInput(data)
+		password := operatorpw.Normalize(data)
 		if password == "" {
 			return "", errors.New("stdin password is empty")
 		}
@@ -252,51 +250,6 @@ func startDebugServer(addr string) {
 		log.Printf("[*] Debug endpoint on http://%s/debug/pprof/ (loopback only)", addr)
 		log.Fatal(http.ListenAndServe(addr, mux))
 	}()
-}
-
-func normalizePasswordInput(data []byte) string {
-	switch {
-	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
-		return strings.TrimSpace(string(data[3:]))
-	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
-		return strings.TrimSpace(decodeUTF16Bytes(data[2:], binary.LittleEndian))
-	case bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
-		return strings.TrimSpace(decodeUTF16Bytes(data[2:], binary.BigEndian))
-	case utf8.Valid(data):
-		return strings.TrimSpace(string(data))
-	case looksLikeUTF16(data, 1):
-		return strings.TrimSpace(decodeUTF16Bytes(data, binary.LittleEndian))
-	case looksLikeUTF16(data, 0):
-		return strings.TrimSpace(decodeUTF16Bytes(data, binary.BigEndian))
-	default:
-		return strings.TrimSpace(string(data))
-	}
-}
-
-func decodeUTF16Bytes(data []byte, order binary.ByteOrder) string {
-	if len(data)%2 != 0 {
-		data = data[:len(data)-1]
-	}
-	words := make([]uint16, 0, len(data)/2)
-	for i := 0; i+1 < len(data); i += 2 {
-		words = append(words, order.Uint16(data[i:i+2]))
-	}
-	return string(utf16.Decode(words))
-}
-
-func looksLikeUTF16(data []byte, nullByteIndex int) bool {
-	if len(data) < 4 || len(data)%2 != 0 {
-		return false
-	}
-	nulls := 0
-	pairs := 0
-	for i := nullByteIndex; i < len(data); i += 2 {
-		pairs++
-		if data[i] == 0 {
-			nulls++
-		}
-	}
-	return pairs > 0 && nulls*2 >= pairs
 }
 
 func requireLoopbackAPIURL(apiURL string) error {

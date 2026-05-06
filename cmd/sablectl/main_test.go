@@ -1,9 +1,12 @@
 package main
 
 import (
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -104,6 +107,211 @@ func TestGoVersionAtLeast(t *testing.T) {
 	}
 }
 
+func TestParseInterspersedAcceptsFlagsAfterPositionals(t *testing.T) {
+	cases := map[string][]string{
+		"flags before positional": {"--password-file", "pw.txt", "main"},
+		"flags after positional":  {"main", "--password-file", "pw.txt"},
+		"flag equals after":       {"main", "--password-file=pw.txt"},
+		"only positional":         {"main"},
+		"no args":                 {},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			pwFile := fs.String("password-file", "", "")
+			positional, err := parseInterspersed(fs, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantPositional := []string{}
+			wantPW := ""
+			if len(args) > 0 {
+				if args[0] == "main" || (len(args) >= 3 && args[2] == "main") {
+					wantPositional = []string{"main"}
+				}
+				for _, a := range args {
+					if strings.HasPrefix(a, "--password-file=") {
+						wantPW = strings.TrimPrefix(a, "--password-file=")
+					}
+				}
+				if wantPW == "" {
+					for i, a := range args {
+						if a == "--password-file" && i+1 < len(args) {
+							wantPW = args[i+1]
+						}
+					}
+				}
+			}
+			if len(positional) != len(wantPositional) {
+				t.Fatalf("positional = %v, want %v", positional, wantPositional)
+			}
+			for i := range positional {
+				if positional[i] != wantPositional[i] {
+					t.Fatalf("positional[%d] = %q, want %q", i, positional[i], wantPositional[i])
+				}
+			}
+			if *pwFile != wantPW {
+				t.Fatalf("--password-file = %q, want %q", *pwFile, wantPW)
+			}
+		})
+	}
+}
+
+func TestPasswordFileOrManifestPrefersExplicit(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("manifest-pw.txt", []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := manifest{PasswordFile: "manifest-pw.txt"}
+	if got := passwordFileOrManifest("override.txt", m); got != "override.txt" {
+		t.Fatalf("explicit override = %q, want override.txt", got)
+	}
+	if got := passwordFileOrManifest("", m); got != "manifest-pw.txt" {
+		t.Fatalf("manifest fallback = %q, want manifest-pw.txt", got)
+	}
+	missing := manifest{PasswordFile: "does-not-exist.txt"}
+	if got := passwordFileOrManifest("", missing); got != "" {
+		t.Fatalf("missing manifest path = %q, want empty", got)
+	}
+}
+
+func TestNextStepsAfterInstallIncludesRegistration(t *testing.T) {
+	t.Run("install only", func(t *testing.T) {
+		got := nextStepsAfterInstall(installConfig{PasswordFile: "pw.txt"}, false)
+		want := []string{"sablectl start --password-file pw.txt", "sablectl agent register --password-file pw.txt"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("next = %v, want %v", got, want)
+		}
+	})
+	t.Run("started but not registered", func(t *testing.T) {
+		got := nextStepsAfterInstall(installConfig{Start: true, PasswordFile: "pw.txt"}, false)
+		want := []string{"sablectl agent register --password-file pw.txt"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("next = %v, want %v", got, want)
+		}
+	})
+	t.Run("started and registered", func(t *testing.T) {
+		got := nextStepsAfterInstall(installConfig{Start: true, PasswordFile: "pw.txt"}, true)
+		want := []string{"transfer built agents to authorized targets"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("next = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestRunResetWipesInstallArtifactsIdempotently(t *testing.T) {
+	t.Chdir(t.TempDir())
+	mustWrite := func(path, content string) {
+		t.Helper()
+		if dir := filepath.Dir(path); dir != "." {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustWrite("config.env", "x")
+	mustWrite("server.crt", "x")
+	mustWrite("server.key", "x")
+	mustWrite("sable-state.json", "{}")
+	mustWrite(filepath.FromSlash("agents/win01.env"), "x")
+	mustWrite(filepath.FromSlash("builds/main/agent-linux"), "x")
+	mustWrite("pw.txt", "secret")
+	mustWrite(serverBinary(runtime.GOOS), "x")
+	mustWrite(filepath.FromSlash(".sable/server.log"), "log")
+
+	m := manifest{
+		Config:       "config.env",
+		Cert:         "server.crt",
+		Key:          "server.key",
+		State:        "sable-state.json",
+		PasswordFile: "pw.txt",
+		Agents:       []string{"agents/win01.env", "config.env"},
+		Builds:       []string{"builds/main/agent-linux", serverBinary(runtime.GOOS)},
+		Logs:         []string{".sable/server.log"},
+	}
+	if err := saveManifest(m); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runReset(nil, &out); err != nil {
+		t.Fatalf("first reset: %v", err)
+	}
+	for _, path := range []string{
+		"config.env", "server.crt", "server.key", "sable-state.json",
+		"pw.txt", serverBinary(runtime.GOOS),
+		filepath.FromSlash("agents/win01.env"),
+		filepath.FromSlash("builds/main/agent-linux"),
+		filepath.FromSlash(".sable/install.json"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists after reset (err=%v)", path, err)
+		}
+	}
+
+	out.Reset()
+	if err := runReset(nil, &out); err != nil {
+		t.Fatalf("second reset: %v", err)
+	}
+	if !strings.Contains(out.String(), "nothing to remove") {
+		t.Fatalf("expected idempotent no-op, got: %q", out.String())
+	}
+}
+
+func TestWipePathsContinuesPastFailures(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("a.txt", []byte("a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("b.txt", []byte("b"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// "../escape" is rejected by removeTrackedPath's workspace guard, simulating
+	// a per-path failure without needing OS-specific file locks.
+	removed, failed := wipePaths([]string{"a.txt", "../escape", "b.txt"})
+
+	wantRemoved := []string{"a.txt", "b.txt"}
+	if !reflect.DeepEqual(removed, wantRemoved) {
+		t.Fatalf("removed = %v, want %v", removed, wantRemoved)
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0].Path, "escape") {
+		t.Fatalf("failed = %#v, want one entry mentioning escape", failed)
+	}
+	if _, err := os.Stat("a.txt"); !os.IsNotExist(err) {
+		t.Fatalf("a.txt should be removed despite later failure")
+	}
+	if _, err := os.Stat("b.txt"); !os.IsNotExist(err) {
+		t.Fatalf("b.txt should be removed after recovery")
+	}
+}
+
+func TestRunResetKeepStatePreservesStateFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("config.env", []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("sable-state.json", []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runReset([]string{"--keep-state"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("config.env"); !os.IsNotExist(err) {
+		t.Fatalf("config.env should be removed")
+	}
+	if _, err := os.Stat("sable-state.json"); err != nil {
+		t.Fatalf("sable-state.json should be preserved: %v", err)
+	}
+}
+
 func TestReadOperatorPasswordFromFile(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile("pw.txt", []byte("secret\n"), 0600); err != nil {
@@ -115,5 +323,20 @@ func TestReadOperatorPasswordFromFile(t *testing.T) {
 	}
 	if got != "secret" {
 		t.Fatalf("password = %q, want secret", got)
+	}
+}
+
+func TestReadOperatorPasswordHandlesUTF16BOMFromPowerShell(t *testing.T) {
+	t.Chdir(t.TempDir())
+	utf16LE := []byte{0xFF, 0xFE, 's', 0, 'e', 0, 'c', 0, 'r', 0, 'e', 0, 't', 0, '\r', 0, '\n', 0}
+	if err := os.WriteFile("pw.txt", utf16LE, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readOperatorPassword("pw.txt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "secret" {
+		t.Fatalf("password = %q, want secret (UTF-16 LE BOM should be stripped)", got)
 	}
 }

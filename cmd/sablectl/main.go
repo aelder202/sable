@@ -24,6 +24,7 @@ import (
 
 	"github.com/aelder202/sable/internal/agentlabel"
 	"github.com/aelder202/sable/internal/listener"
+	"github.com/aelder202/sable/internal/operatorpw"
 	"github.com/google/uuid"
 )
 
@@ -113,6 +114,8 @@ func run(args []string, runner commandRunner, stdout, stderr io.Writer) error {
 		return runUpdate(args[1:], runner, stdout, stderr)
 	case "remove":
 		return runRemove(args[1:], stdout)
+	case "reset":
+		return runReset(args[1:], stdout)
 	case "doctor":
 		return runDoctor(args[1:], runner, stdout)
 	case "help", "-h", "--help":
@@ -135,6 +138,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  rebuild             rebuild server and known agents")
 	fmt.Fprintln(out, "  update              git pull, then rebuild")
 	fmt.Fprintln(out, "  remove              remove files tracked in .sable/install.json")
+	fmt.Fprintln(out, "  reset               wipe install state and built artifacts for a clean reinstall")
 	fmt.Fprintln(out, "  doctor              check local install health")
 }
 
@@ -409,16 +413,17 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	if _, err := os.Stat(binary); err != nil {
 		return fmt.Errorf("%s not found; run sablectl rebuild --server-only", binary)
 	}
+	resolvedFile := passwordFileOrManifest(*passwordFile, loadManifestOrDefault())
 	args = []string{"--state-file", *stateFile}
 	env := []string{}
-	if *passwordFile != "" {
-		args = append(args, "--password-file", *passwordFile)
-	} else if strings.TrimSpace(*password) != "" {
+	switch {
+	case resolvedFile != "":
+		args = append(args, "--password-file", resolvedFile)
+	case strings.TrimSpace(*password) != "":
 		env = append(env, "SABLE_OPERATOR_PASSWORD="+strings.TrimSpace(*password))
-	} else {
+	case strings.TrimSpace(os.Getenv("SABLE_OPERATOR_PASSWORD")) != "":
 		env = append(env, "SABLE_OPERATOR_PASSWORD="+strings.TrimSpace(os.Getenv("SABLE_OPERATOR_PASSWORD")))
-	}
-	if len(env) > 0 && strings.TrimPrefix(env[0], "SABLE_OPERATOR_PASSWORD=") == "" {
+	default:
 		return errors.New("supply --password-file, --password, or SABLE_OPERATOR_PASSWORD")
 	}
 	fmt.Fprintf(stdout, "starting %s\n", binary)
@@ -445,13 +450,14 @@ func runAgentAdd(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("agent add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	label := fs.String("label", "", "agent label")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(positional) != 1 {
 		return errors.New("usage: sablectl agent add <linux|windows> --label <name>")
 	}
-	target := strings.ToLower(fs.Arg(0))
+	target := strings.ToLower(positional[0])
 	if target != "linux" && target != "windows" {
 		return fmt.Errorf("invalid agent target %q", target)
 	}
@@ -479,13 +485,14 @@ func runAgentBuild(args []string, runner commandRunner, stdout, stderr io.Writer
 	fs.SetOutput(io.Discard)
 	targetFlag := fs.String("target", "", "override target: linux or windows")
 	offlinePEAS := fs.Bool("offline-peas", false, "update PEAS cache before building")
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(positional) != 1 {
 		return errors.New("usage: sablectl agent build <label>")
 	}
-	envPath, agent, err := findAgentByLabel(fs.Arg(0))
+	envPath, agent, err := findAgentByLabel(positional[0])
 	if err != nil {
 		return err
 	}
@@ -524,21 +531,22 @@ func runAgentRegister(args []string, stdout io.Writer) error {
 	password := fs.String("password", "", "operator password")
 	passwordFile := fs.String("password-file", "", "operator password file")
 	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() > 1 {
-		return errors.New("usage: sablectl agent register [label|all] --password-file ./pw.txt")
-	}
-	selector := "all"
-	if fs.NArg() == 1 {
-		selector = fs.Arg(0)
-	}
-	resolvedPassword, err := readOperatorPassword(*passwordFile, *password)
+	positional, err := parseInterspersed(fs, args)
 	if err != nil {
 		return err
 	}
+	if len(positional) > 1 {
+		return errors.New("usage: sablectl agent register [label|all] --password-file ./pw.txt")
+	}
+	selector := "all"
+	if len(positional) == 1 {
+		selector = positional[0]
+	}
 	m := loadManifestOrDefault()
+	resolvedPassword, err := readOperatorPassword(passwordFileOrManifest(*passwordFile, m), *password)
+	if err != nil {
+		return err
+	}
 	envs, err := knownAgentEnvPaths(m, "")
 	if err != nil {
 		return err
@@ -690,6 +698,101 @@ func runRemove(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "removed: %s\n", path)
 	}
 	return nil
+}
+
+func runReset(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	keepState := fs.Bool("keep-state", false, "preserve the server state file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	targets := defaultResetTargets(runtime.GOOS, *keepState)
+	if m, err := loadManifest(); err == nil {
+		targets = append(targets, m.Config, m.Cert, m.Key, m.PasswordFile)
+		if !*keepState {
+			targets = append(targets, m.State)
+		}
+		targets = append(targets, m.Agents...)
+		targets = append(targets, m.Builds...)
+		targets = append(targets, m.Logs...)
+	}
+	targets = append(targets, manifestPath)
+
+	removed, failed := wipePaths(cleanList(targets))
+	pruneEmptyDir(".sable")
+	pruneEmptyDir("agents")
+	pruneEmptyDir("builds")
+	for _, path := range removed {
+		fmt.Fprintf(stdout, "removed: %s\n", path)
+	}
+	for _, f := range failed {
+		fmt.Fprintf(stdout, "skipped: %s (%s)\n", f.Path, f.Reason)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("could not remove %d path(s); stop running processes (sable-server, agents) and rerun reset", len(failed))
+	}
+	if len(removed) == 0 {
+		fmt.Fprintln(stdout, "nothing to remove")
+		return nil
+	}
+	fmt.Fprintln(stdout, "next: sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt")
+	return nil
+}
+
+func defaultResetTargets(goos string, keepState bool) []string {
+	targets := []string{
+		"config.env",
+		"server.crt",
+		"server.key",
+		"agents",
+		"builds",
+		serverBinary(goos),
+	}
+	if !keepState {
+		targets = append(targets, defaultStatePath)
+	}
+	return targets
+}
+
+type wipeFailure struct {
+	Path   string
+	Reason string
+}
+
+// wipePaths removes each path best-effort and reports both successes and
+// failures. Continuing past errors matters on Windows where a running
+// sable-server.exe can't be deleted: we still want to clear config.env, certs,
+// and state so the operator only has to deal with the live process.
+func wipePaths(paths []string) ([]string, []wipeFailure) {
+	removed := []string{}
+	failed := []wipeFailure{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		slash := filepath.ToSlash(path)
+		existed := pathExists(path)
+		if err := removeTrackedPath(path); err != nil {
+			failed = append(failed, wipeFailure{Path: slash, Reason: err.Error()})
+			continue
+		}
+		if existed {
+			removed = append(removed, slash)
+		}
+	}
+	sort.Strings(removed)
+	sort.Slice(failed, func(i, j int) bool { return failed[i].Path < failed[j].Path })
+	return removed, failed
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func runDoctor(args []string, runner commandRunner, stdout io.Writer) error {
@@ -914,13 +1017,50 @@ func waitForAPI(apiURL string, timeout time.Duration) {
 	}
 }
 
+// parseInterspersed parses flags that may appear before, between, or after
+// positional arguments. The standard flag package stops at the first non-flag
+// token, which forces every subcommand caller to put flags before positionals.
+// This loop pulls one positional at a time and resumes flag parsing on what is
+// left, so "agent register main --password-file ./pw.txt" works.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	remaining := args
+	for {
+		if err := fs.Parse(remaining); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return positional, nil
+		}
+		positional = append(positional, fs.Arg(0))
+		remaining = fs.Args()[1:]
+	}
+}
+
+// passwordFileOrManifest returns the explicit --password-file path when
+// provided, otherwise the path recorded in the install manifest. This lets
+// `start` and `agent register` reuse the password file from `install` without
+// the operator retyping it on every invocation.
+func passwordFileOrManifest(explicit string, m manifest) string {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit
+	}
+	if strings.TrimSpace(m.PasswordFile) == "" {
+		return ""
+	}
+	if _, err := os.Stat(m.PasswordFile); err != nil {
+		return ""
+	}
+	return m.PasswordFile
+}
+
 func resolvePasswordFile(path, password string) (string, error) {
 	password = strings.TrimSpace(password)
 	if path == "" {
 		return password, nil
 	}
 	if data, err := os.ReadFile(path); err == nil {
-		return strings.TrimSpace(string(data)), nil
+		return operatorpw.Normalize(data), nil
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read password file: %w", err)
 	}
@@ -947,7 +1087,7 @@ func readOperatorPassword(path, password string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read password file: %w", err)
 		}
-		password = strings.TrimSpace(string(data))
+		password = operatorpw.Normalize(data)
 		if password == "" {
 			return "", errors.New("password file is empty")
 		}
@@ -1251,18 +1391,25 @@ func printInstallSummary(out io.Writer, m manifest, changed []string, registered
 			fmt.Fprintf(out, "  %s\n", filepath.ToSlash(path))
 		}
 	}
-	next := "sablectl start"
-	if cfg.PasswordFile != "" {
-		next += " --password-file " + filepath.ToSlash(cfg.PasswordFile)
+	for _, line := range nextStepsAfterInstall(cfg, registered) {
+		fmt.Fprintf(out, "next: %s\n", line)
+	}
+}
+
+func nextStepsAfterInstall(cfg installConfig, registered bool) []string {
+	if cfg.Start && registered {
+		return []string{"transfer built agents to authorized targets"}
 	}
 	if cfg.Start {
-		if registered {
-			next = "transfer built agents to authorized targets"
-		} else if cfg.PasswordFile != "" {
-			next = "sablectl doctor"
-		}
+		return []string{"sablectl agent register --password-file " + filepath.ToSlash(cfg.PasswordFile)}
 	}
-	fmt.Fprintf(out, "next: %s\n", next)
+	startCmd := "sablectl start"
+	registerCmd := "sablectl agent register"
+	if cfg.PasswordFile != "" {
+		startCmd += " --password-file " + filepath.ToSlash(cfg.PasswordFile)
+		registerCmd += " --password-file " + filepath.ToSlash(cfg.PasswordFile)
+	}
+	return []string{startCmd, registerCmd}
 }
 
 func printChanged(out io.Writer, changed []string) {

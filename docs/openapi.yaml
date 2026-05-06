@@ -1,0 +1,703 @@
+openapi: 3.0.3
+info:
+  title: Sable Operator API
+  version: 1.0.0
+  description: |
+    Loopback-only operator API for the Sable C2 server. Bound to
+    `127.0.0.1:8443` by default. All endpoints except `POST /api/auth/login`
+    require a Bearer JWT obtained from `/api/auth/login`.
+
+    **Error responses are plain text** (`text/plain; charset=utf-8`), not JSON.
+    Each error response below documents the canonical message body emitted by
+    the server.
+
+    The TLS certificate is self-signed and pinned by SHA-256 fingerprint when
+    operators connect through `sablectl`. Browsers will need to accept the
+    certificate manually.
+  license:
+    name: GPL-3.0
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: https://127.0.0.1:8443
+    description: Operator API on the Sable server (loopback)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Operator authentication.
+  - name: Agents
+    description: Registered agent sessions and metadata.
+  - name: Tasks
+    description: Queue, list, and clear tasks for an agent.
+  - name: Artifacts
+    description: Operator-saved artifacts associated with an agent session.
+  - name: Audit
+    description: Operator and session audit events.
+  - name: Terminal
+    description: Real-time task output stream (Server-Sent Events).
+
+paths:
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Exchange operator password for a JWT
+      description: |
+        Returns a signed HS256 JWT valid for 1 hour. Rate-limited to 5
+        attempts per 60 seconds per remote IP; rate-limited responses
+        include a `Retry-After` header.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              password: correct-horse-battery-staple
+      responses:
+        '200':
+          description: Authentication succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429':
+          description: Too many login attempts from this IP.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until another attempt is allowed.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "too many requests\n"
+
+  /api/audit:
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: Recent operator and session audit events
+      responses:
+        '200':
+          description: Up to 512 most recent events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents:
+    get:
+      tags: [Agents]
+      operationId: listAgents
+      summary: List registered agents
+      description: |
+        Returns the full agent list. Each entry omits `outputs` (use
+        `GET /api/agents/{id}` to fetch task output history) and never
+        includes the agent's pre-shared secret.
+      responses:
+        '200':
+          description: Agent list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Agent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+    post:
+      tags: [Agents]
+      operationId: registerAgent
+      summary: Pre-register an agent session
+      description: |
+        Creates the server-side session record so an implant built with the
+        same `id` and `secret_hex` can begin beaconing. Idempotent: re-registering
+        an existing ID preserves notes, tags, queued tasks, outputs, and artifacts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterAgentRequest' }
+      responses:
+        '201':
+          description: Agent registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                required: [id]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /api/agents/{id}:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    get:
+      tags: [Agents]
+      operationId: getAgent
+      summary: Get a single agent including task output history
+      responses:
+        '200':
+          description: Agent record. Includes `outputs` and `queued`; artifacts list omits `data`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/metadata:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    put:
+      tags: [Agents]
+      operationId: updateAgentMetadata
+      summary: Update operator notes and tags for a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMetadataRequest' }
+      responses:
+        '200':
+          description: Updated agent record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agent' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /api/agents/{id}/task:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    post:
+      tags: [Tasks]
+      operationId: queueTask
+      summary: Queue a task for the agent
+      description: |
+        Enqueues a task. The agent picks it up on its next beacon. Per-type
+        payload constraints:
+
+        | Type | Payload |
+        |------|---------|
+        | `shell` | Required. Command line, no null bytes. Max ~48 KB. |
+        | `download`, `complete`, `ls` | Required. Remote path, no null/CR/LF, max 4096 bytes. |
+        | `pathbrowse` | `start` or `stop`. |
+        | `interactive` | `start` or `stop`. |
+        | `upload` | `<remote-path>:<base64-data>`. Max payload ~67 MB; raw file max 50 MB. Cannot be queued for an agent currently using the DNS transport when payload exceeds 8 KB. |
+        | `sleep` | Integer seconds, 1–86400. |
+        | `cancel` | Task ID to cancel, max 64 chars. |
+        | `kill`, `ps`, `screenshot`, `persistence`, `peas`, `snapshot` | Must be empty. |
+
+        Per-agent queue is capped at 64 pending tasks (`429` once full).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskRequest' }
+            examples:
+              shell:
+                value: { type: shell, payload: id }
+              sleep:
+                value: { type: sleep, payload: "60" }
+              download:
+                value: { type: download, payload: /etc/passwd }
+              upload:
+                summary: Upload a file (base64-encoded after the colon)
+                value: { type: upload, payload: "/tmp/agent:dGVzdAo=" }
+              ps:
+                value: { type: ps, payload: "" }
+      responses:
+        '200':
+          description: Task queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string, format: uuid }
+                required: [task_id]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429':
+          description: Queue full (max 64 pending tasks per agent).
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "task queue full\n"
+
+  /api/agents/{id}/queued:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    get:
+      tags: [Tasks]
+      operationId: listQueuedTasks
+      summary: List queued tasks not yet delivered to the agent
+      responses:
+        '200':
+          description: Pending task summaries in queue order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TaskSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    get:
+      tags: [Tasks]
+      operationId: listTaskOutputs
+      summary: Get task output history
+      responses:
+        '200':
+          description: Up to 256 most recent task outputs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TaskOutput' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+    delete:
+      tags: [Tasks]
+      operationId: clearTaskOutputs
+      summary: Clear task output history for the agent
+      responses:
+        '204':
+          description: History cleared.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/tasks/{taskID}:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+      - $ref: '#/components/parameters/TaskIdParam'
+    delete:
+      tags: [Tasks]
+      operationId: deleteQueuedTask
+      summary: Remove a queued task before delivery
+      responses:
+        '204':
+          description: Task removed from queue.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      summary: List server-side artifact summaries
+      description: Response items omit `data`; fetch a single artifact to retrieve its base64 contents.
+      responses:
+        '200':
+          description: Artifact summaries (no `data`).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Artifact' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+    post:
+      tags: [Artifacts]
+      operationId: saveArtifact
+      summary: Save an operator artifact
+      description: |
+        Maximum body size is ~75 MB. If `key` is supplied and matches an
+        existing artifact for this agent, the existing record is returned
+        (idempotent save).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Artifact' }
+      responses:
+        '201':
+          description: Artifact saved (response omits `data`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Artifact' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /api/agents/{id}/artifacts/{artifactID}:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+      - $ref: '#/components/parameters/ArtifactIdParam'
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Fetch a single artifact including base64 data
+      responses:
+        '200':
+          description: Full artifact including `data`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Artifact' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/terminal/stream:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    get:
+      tags: [Terminal]
+      operationId: streamTerminal
+      summary: Subscribe to task output via Server-Sent Events
+      description: |
+        Long-lived SSE stream of task outputs. The connection has no server
+        write deadline (unlike other endpoints, which apply a 10-second write
+        timeout).
+
+        Wire format:
+
+        - Each output event is framed as `data: <json>\n\n`, where `<json>`
+          conforms to the `TaskOutput` schema.
+        - Comment lines `: keepalive\n\n` are sent every 15 seconds.
+        - On connect, the server flushes the existing output history before
+          waiting for new events.
+
+        Response headers set: `Content-Type: text/event-stream`,
+        `Cache-Control: no-cache`, `X-Accel-Buffering: no`.
+      responses:
+        '200':
+          description: SSE stream open. Closes when the client disconnects.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/TaskOutput'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500':
+          description: Streaming not supported by the underlying writer.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "streaming unsupported\n"
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HS256 JWT issued by `/api/auth/login`. Issuer `sable-operator`,
+        audience `sable-web`, subject `operator`, 1-hour TTL.
+
+  parameters:
+    AgentIdParam:
+      name: id
+      in: path
+      required: true
+      description: Agent identifier.
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9-]{1,64}$'
+        minLength: 1
+        maxLength: 64
+        example: main
+    ArtifactIdParam:
+      name: artifactID
+      in: path
+      required: true
+      description: Artifact identifier.
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9-]{1,64}$'
+        minLength: 1
+        maxLength: 64
+    TaskIdParam:
+      name: taskID
+      in: path
+      required: true
+      description: Queued task identifier (UUID assigned at enqueue time).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+
+  schemas:
+
+    LoginRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          description: Operator password. Request body capped at 4096 bytes.
+          example: correct-horse-battery-staple
+
+    LoginResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: Bearer JWT (HS256). Valid for 1 hour.
+
+    RegisterAgentRequest:
+      type: object
+      required: [id, secret_hex]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9-]{1,64}$'
+          minLength: 1
+          maxLength: 64
+          example: main
+        secret_hex:
+          type: string
+          description: 32-byte agent secret encoded as 64 lowercase hex characters.
+          pattern: '^[0-9a-fA-F]{64}$'
+          minLength: 64
+          maxLength: 64
+
+    UpdateMetadataRequest:
+      type: object
+      properties:
+        notes:
+          type: string
+          maxLength: 4096
+        tags:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+
+    Agent:
+      type: object
+      required: [id]
+      description: |
+        Agent session record. The pre-shared secret is never serialized.
+        `outputs` is populated only by `GET /api/agents/{id}` and the
+        metadata-update response — list responses omit it. `artifacts` here
+        always omits `data`.
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9-]{1,64}$'
+        hostname: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        transport:
+          type: string
+          enum: [https, dns]
+          description: Transport used on the most recent check-in. Empty until first beacon.
+        last_seen:
+          type: string
+          format: date-time
+        notes: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        queued:
+          type: array
+          items: { $ref: '#/components/schemas/TaskSummary' }
+        outputs:
+          type: array
+          items: { $ref: '#/components/schemas/TaskOutput' }
+        artifacts:
+          type: array
+          items: { $ref: '#/components/schemas/Artifact' }
+
+    TaskRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum:
+            - shell
+            - upload
+            - download
+            - sleep
+            - kill
+            - interactive
+            - complete
+            - pathbrowse
+            - ps
+            - screenshot
+            - persistence
+            - peas
+            - snapshot
+            - cancel
+            - ls
+        payload:
+          type: string
+          description: |
+            Per-type rules and limits are listed on the operation. Standard
+            payloads are capped at ~48 KB; `upload` payloads are capped at
+            ~67 MB (raw file max 50 MB).
+
+    TaskSummary:
+      type: object
+      required: [id, type, queued_at]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        payload:
+          type: string
+          description: |
+            Summary payload. For `upload` tasks the base64 portion is replaced
+            with the literal string `<base64>` so it can be displayed safely.
+        queued_at:
+          type: string
+          format: date-time
+
+    TaskOutput:
+      type: object
+      required: [task_id, type, output, timestamp]
+      properties:
+        task_id: { type: string }
+        type: { type: string }
+        output: { type: string }
+        error: { type: string }
+        timestamp:
+          type: string
+          format: date-time
+
+    Artifact:
+      type: object
+      required: [filename]
+      description: |
+        Artifact record. The same shape is used for both list and detail
+        responses; `data` is only populated when fetching a single artifact
+        by ID. On save (`POST`), supply `filename` plus base64 `data`; the
+        response omits `data`.
+      properties:
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9-]{1,64}$'
+          description: Server-assigned UUID if omitted on create.
+        key:
+          type: string
+          maxLength: 256
+          description: Optional dedup key. If a saved artifact already exists with this key, that artifact is returned unchanged.
+        task_id: { type: string }
+        type: { type: string }
+        label:
+          type: string
+          maxLength: 128
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 240
+        archive_filename:
+          type: string
+          maxLength: 240
+        mime:
+          type: string
+          maxLength: 128
+        data:
+          type: string
+          format: byte
+          description: Base64-encoded artifact contents. Omitted from list and create responses; present on single-artifact GET.
+        compress: { type: boolean }
+        created_at:
+          type: string
+          format: date-time
+
+    AuditEvent:
+      type: object
+      required: [timestamp, action]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        agent_id:
+          type: string
+          description: Empty for events that aren't tied to a specific agent.
+        action:
+          type: string
+          example: queue_task
+        detail:
+          type: string
+
+  responses:
+
+    BadRequest:
+      description: Malformed request, validation failure, or invalid task type.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "bad request\n"
+
+    Unauthorized:
+      description: Missing or invalid Bearer token.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "unauthorized\n"
+
+    NotFound:
+      description: Agent, task, or artifact does not exist.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "404 page not found\n"
+
+    MethodNotAllowed:
+      description: Method not supported on this path.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "method not allowed\n"
+
+    RequestEntityTooLarge:
+      description: Request body exceeded the per-endpoint byte cap.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "request body too large\n"
+
+    UnsupportedMediaType:
+      description: Body Content-Type is not `application/json`.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "content type must be application/json\n"
