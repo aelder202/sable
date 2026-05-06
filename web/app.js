@@ -19,6 +19,7 @@ let outputsRequestID = 0;
 let agentsPollTimer = null;
 let authExpiryTimer = null;
 let allAgents = [];
+let selectedAgentIDs = new Set();
 let selectedTaskType = 'shell';
 let taskRequestInFlight = false;
 let killConfirmTimer = null;
@@ -34,13 +35,16 @@ let deferredPathCompletionOutputs = new Map();
 let deferredPathBrowseOutputs = new Map();
 let artifactLibrary = [];
 let auditLog = [];
-let activeSessionPanel = 'all';
+let activeSessionPanel = 'timeline';
 let fileBrowserPath = '';
 let fileBrowserResult = null;
 let fileBrowserMode = 'browse';
 let pendingKillAgentID = '';
 let outputSearchExpanded = false;
+let outputTypeFilter = 'all';
 let downloadTasks = new Map();
+let outputRowSeq = 0;
+let taskTypeSearchInput = null;
 
 const MAX_LOGIN_BODY_BYTES = 4096;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -53,6 +57,15 @@ const PATH_COMPLETION_DEBOUNCE_MS = 150;
 const PATH_BROWSE_RENEW_MS = 60 * 1000;
 const PATH_BROWSE_FAST_WINDOW_MS = 2 * 60 * 1000;
 const PENDING_TASK_ID = '__pending__';
+
+const TASK_GROUPS = [
+  { label: 'Command', types: ['shell', 'interactive'] },
+  { label: 'Situational', types: ['ps', 'snapshot', 'persistence', 'screenshot', 'peas'] },
+  { label: 'Files', types: ['download', 'upload'] },
+  { label: 'Session', types: ['sleep', 'kill'] },
+];
+
+const BULK_TASK_TYPES = new Set(['shell', 'ps', 'screenshot', 'snapshot', 'persistence', 'peas', 'sleep']);
 
 const TASK_TYPES = {
   shell: {
@@ -158,6 +171,7 @@ const outputShellEl = $('output-shell');
 const outputResizerEl = $('output-resizer');
 const outputEmptyTitle = $('output-empty').querySelector('h3');
 const outputEmptyText = $('output-empty').querySelector('p');
+const outputTypeFilterEl = $('output-type-filter');
 
 
 async function apiFetch(path, opts = {}) {
@@ -253,6 +267,7 @@ function setLoggedOutState(message) {
   activeAgentID = null;
   activeAgent = null;
   allAgents = [];
+  selectedAgentIDs = new Set();
   seenTaskIDs = new Set();
   currentOutputs = [];
   outputsRequestID++;
@@ -274,10 +289,11 @@ function setLoggedOutState(message) {
   deferredPathBrowseOutputs = new Map();
   artifactLibrary = [];
   auditLog = [];
-  activeSessionPanel = 'all';
+  activeSessionPanel = 'timeline';
   fileBrowserPath = '';
   fileBrowserResult = null;
   outputSearchExpanded = false;
+  outputTypeFilter = 'all';
   clearPathCompletionTimer();
   hidePathSuggestions();
   hideFileBrowser();
@@ -313,13 +329,17 @@ function setLoggedOutState(message) {
   $('meta-state').className = 'meta-chip meta-state-chip';
   $('session-warning').hidden = true;
   $('session-warning').textContent = '';
+  $('timeline-summary').textContent = '';
+  $('timeline-list').textContent = '';
   $('jobs-list').textContent = '';
   $('artifact-list').textContent = '';
   $('audit-list').textContent = '';
   $('tag-input').value = '';
   $('notes-input').value = '';
   $('output-search').value = '';
+  if (outputTypeFilterEl) outputTypeFilterEl.value = 'all';
   updateOutputSearchUI(false);
+  updateBulkSelectionUI();
   clearPendingUpload();
   closeClearConfirmModal();
   closeKillConfirmModal();
@@ -509,6 +529,7 @@ function setQueueBusy(isBusy, message) {
   $('cancel-task-btn').disabled = isBusy;
   $('clear-btn').disabled = isBusy;
   $('save-output-btn').disabled = isBusy;
+  updateBulkTaskButton();
 
   if (interactiveMode) {
     $('task-input').disabled = isBusy || !interactiveReady;
@@ -543,12 +564,14 @@ async function loadAgents() {
 
     const agents = await resp.json();
     allAgents = Array.isArray(agents) ? agents.slice() : [];
+    pruneSelectedAgents();
 
     updateAgentStats(allAgents);
     updateRefreshMeta(allAgents.length);
     warmOnlinePathBrowsers(allAgents);
     syncActiveAgent();
     renderAgentList();
+    updateBulkSelectionUI();
     renderSessionPanels();
     loadAudit();
   } catch (_) {
@@ -618,6 +641,12 @@ function syncActiveAgent() {
   updateSessionHeader();
 }
 
+function pruneSelectedAgents() {
+  if (!selectedAgentIDs.size) return;
+  const available = new Set(allAgents.map(agent => agent.id));
+  selectedAgentIDs = new Set(Array.from(selectedAgentIDs).filter(id => available.has(id)));
+}
+
 function clearActiveSession() {
   saveActiveTaskDraft();
   exitInteractiveMode(false);
@@ -648,7 +677,7 @@ function clearActiveSession() {
   $('session-warning').textContent = '';
   artifactLibrary = [];
   hideFileBrowser();
-  activeSessionPanel = 'all';
+  activeSessionPanel = 'timeline';
   updateSessionPanelTabs();
   renderSessionPanels();
   clearPendingUpload();
@@ -700,6 +729,7 @@ function buildAgentItem(agent) {
 
   const card = document.createElement('article');
   card.className = 'agent-card';
+  card.classList.toggle('selected', selectedAgentIDs.has(agent.id));
   card.title = agent.id;
   card.tabIndex = taskRequestInFlight ? -1 : 0;
   card.setAttribute('role', 'button');
@@ -748,6 +778,26 @@ function buildAgentItem(agent) {
   const actions = document.createElement('div');
   actions.className = 'agent-actions';
 
+  const selectLabel = document.createElement('label');
+  selectLabel.className = 'agent-select-control';
+  const selectBox = document.createElement('input');
+  selectBox.type = 'checkbox';
+  selectBox.checked = selectedAgentIDs.has(agent.id);
+  selectBox.disabled = taskRequestInFlight;
+  selectBox.setAttribute('aria-label', 'Select ' + (agent.hostname || agent.id.slice(0, 8)) + ' for bulk task queueing');
+  selectBox.addEventListener('click', e => {
+    e.stopPropagation();
+  });
+  selectBox.addEventListener('change', e => {
+    toggleBulkSession(agent.id, e.target.checked);
+  });
+  selectLabel.addEventListener('click', e => {
+    e.stopPropagation();
+  });
+  selectLabel.appendChild(selectBox);
+  selectLabel.appendChild(document.createTextNode('Select'));
+  actions.appendChild(selectLabel);
+
   const killButton = document.createElement('button');
   killButton.type = 'button';
   killButton.className = 'agent-kill-btn';
@@ -766,6 +816,44 @@ function buildAgentItem(agent) {
   li.appendChild(card);
 
   return li;
+}
+
+function toggleBulkSession(agentID, selected) {
+  if (!agentID || taskRequestInFlight) return;
+  if (selected) selectedAgentIDs.add(agentID);
+  else selectedAgentIDs.delete(agentID);
+  renderAgentList();
+  updateBulkSelectionUI();
+}
+
+function selectedAgents() {
+  const selected = new Set(selectedAgentIDs);
+  return allAgents.filter(agent => selected.has(agent.id));
+}
+
+function updateBulkSelectionUI() {
+  const bar = $('bulk-session-bar');
+  const count = $('bulk-session-count');
+  if (!bar || !count) return;
+
+  const total = selectedAgentIDs.size;
+  bar.hidden = total === 0;
+  count.textContent = total === 1 ? '1 selected' : total + ' selected';
+  updateBulkTaskButton();
+}
+
+function updateBulkTaskButton() {
+  const button = $('bulk-send-btn');
+  if (!button) return;
+
+  const total = selectedAgentIDs.size;
+  const bulkAllowed = BULK_TASK_TYPES.has(selectedTaskType);
+  button.hidden = interactiveMode || total === 0;
+  button.textContent = total <= 1 ? 'Queue Selected' : 'Queue ' + total + ' Sessions';
+  button.disabled = taskRequestInFlight || total === 0 || !bulkAllowed;
+  button.title = bulkAllowed
+    ? 'Queue this task for every selected session'
+    : 'This action can only be queued for one session at a time';
 }
 
 function formatAgentPlatform(agent) {
@@ -842,11 +930,14 @@ function selectAgent(agent) {
   seenTaskIDs = new Set();
   currentOutputs = [];
   outputsRequestID++;
+  artifactLibrary = [];
   clearKillConfirmation();
   hasHydratedOutputs = false;
   followOutput = true;
   $('output').textContent = '';
   $('output-search').value = '';
+  outputTypeFilter = 'all';
+  if (outputTypeFilterEl) outputTypeFilterEl.value = 'all';
   updateOutputSearchUI(false);
   clearPendingUpload();
   stopSSEStream();
@@ -856,6 +947,7 @@ function selectAgent(agent) {
   updateOutputControls();
   updateOutputEmptyState();
   startSSEStream(agent.id, false);
+  loadArtifacts(agent.id);
   ensurePathBrowserForAgent(agent);
   loadOutputs();
   restoreActiveTaskDraft();
@@ -909,12 +1001,10 @@ function applyOutputSearch() {
   const input = $('output-search');
   const query = input ? input.value.trim().toLowerCase() : '';
   Array.from($('output').children).forEach(child => {
-    if (!query) {
-      child.hidden = false;
-      return;
-    }
+    const matchesType = outputTypeFilter === 'all' || child.dataset.outputType === outputTypeFilter;
     const haystack = child.dataset.searchText || child.textContent.toLowerCase();
-    child.hidden = !haystack.includes(query);
+    const matchesQuery = !query || haystack.includes(query);
+    child.hidden = !(matchesType && matchesQuery);
   });
 }
 
@@ -982,6 +1072,56 @@ async function loadOutputs() {
   updateOutputEmptyState();
 }
 
+async function loadArtifacts(agentID) {
+  if (!agentID || !token) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + agentID + '/artifacts');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (agentID !== activeAgentID) return;
+    mergeServerArtifacts(Array.isArray(data) ? data.map(hydrateServerArtifact).filter(Boolean) : []);
+    renderSessionPanels();
+  } catch (_) {
+    // Artifacts are supplemental; keep the locally discovered list on transient failures.
+  }
+}
+
+function mergeServerArtifacts(serverArtifacts) {
+  const existing = new Map(artifactLibrary.map(item => [item.key, item]));
+  const seen = new Set();
+  const merged = serverArtifacts.map(item => {
+    seen.add(item.key);
+    const local = existing.get(item.key);
+    return local
+      ? { ...item, base64Value: local.base64Value || item.base64Value }
+      : item;
+  });
+  artifactLibrary.forEach(item => {
+    if (!seen.has(item.key)) merged.push(item);
+  });
+  artifactLibrary = merged.slice(0, 64);
+}
+
+function hydrateServerArtifact(item) {
+  if (!item || !item.filename) return null;
+  const createdAt = item.created_at || new Date().toISOString();
+  return {
+    key: item.key || item.id,
+    serverID: item.id,
+    taskID: item.task_id || '',
+    type: item.type || '',
+    label: item.label || 'artifact',
+    filename: item.filename,
+    archiveFilename: item.archive_filename || item.filename,
+    mime: item.mime || 'application/octet-stream',
+    base64Value: item.data || '',
+    compress: Boolean(item.compress),
+    timestamp: createdAt ? new Date(createdAt).toLocaleTimeString() : '',
+    createdAt,
+    serverSynced: true,
+  };
+}
+
 function handleTaskOutput(output, historical) {
   if (!output || !output.task_id || seenTaskIDs.has(output.task_id)) return;
 
@@ -1043,7 +1183,7 @@ function handleTaskOutput(output, historical) {
       return;
     }
 
-    appendDownloadResult(output.task_id, short, ts, payload, historical);
+    appendDownloadResult(output.task_id, short, ts, payload, historical, output.timestamp);
     renderSessionPanels();
     return;
   }
@@ -1060,6 +1200,7 @@ function handleTaskOutput(output, historical) {
           : 'screenshot ready',
       output.type === 'screenshot' ? 'Save Screenshot' : 'Save Output',
       historical,
+      output.timestamp,
     );
     renderSessionPanels();
     return;
@@ -1090,6 +1231,12 @@ if (sessionPanelFilter) {
   sessionPanelFilter.addEventListener('change', () => setSessionPanel(sessionPanelFilter.value));
 }
 $('output-search-toggle').addEventListener('click', () => updateOutputSearchUI(!outputSearchExpanded));
+if (outputTypeFilterEl) {
+  outputTypeFilterEl.addEventListener('change', () => {
+    outputTypeFilter = outputTypeFilterEl.value || 'all';
+    applyOutputSearch();
+  });
+}
 $('session-details-btn').addEventListener('click', openSessionDetailsModal);
 $('session-details-close-btn').addEventListener('click', closeSessionDetailsModal);
 document.querySelector('[data-close-session-details]').addEventListener('click', closeSessionDetailsModal);
@@ -1141,24 +1288,80 @@ function initTaskTypeMenu() {
   if (!taskTypeSelect || !taskTypeButton || !taskTypeList) return;
 
   taskTypeList.textContent = '';
-  Array.from(taskTypeSelect.options).forEach(option => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'task-type-option';
-    item.role = 'option';
-    item.dataset.value = option.value;
-    item.textContent = option.textContent;
-    item.addEventListener('click', () => {
-      setTaskType(option.value);
+  const searchWrap = document.createElement('div');
+  searchWrap.className = 'task-type-search-wrap';
+  taskTypeSearchInput = document.createElement('input');
+  taskTypeSearchInput.type = 'search';
+  taskTypeSearchInput.className = 'task-type-search';
+  taskTypeSearchInput.placeholder = 'Filter actions';
+  taskTypeSearchInput.setAttribute('aria-label', 'Filter task actions');
+  taskTypeSearchInput.addEventListener('input', () => filterTaskTypeOptions(taskTypeSearchInput.value));
+  taskTypeSearchInput.addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      firstVisibleTaskTypeOption()?.focus();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
       closeTaskTypeMenu();
       taskTypeButton.focus();
+    }
+  });
+  searchWrap.appendChild(taskTypeSearchInput);
+  taskTypeList.appendChild(searchWrap);
+
+  const optionByValue = new Map(Array.from(taskTypeSelect.options).map(option => [option.value, option]));
+  TASK_GROUPS.forEach(group => {
+    const groupLabel = document.createElement('div');
+    groupLabel.className = 'task-type-group-label';
+    groupLabel.dataset.groupLabel = group.label;
+    groupLabel.textContent = group.label;
+    taskTypeList.appendChild(groupLabel);
+
+    group.types.forEach(type => {
+      const option = optionByValue.get(type);
+      if (!option) return;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'task-type-option';
+      item.role = 'option';
+      item.dataset.value = option.value;
+      item.dataset.group = group.label;
+      item.dataset.searchText = [
+        option.textContent,
+        group.label,
+        TASK_TYPES[option.value].help,
+        TASK_TYPES[option.value].note,
+      ].join(' ').toLowerCase();
+
+      const title = document.createElement('span');
+      title.className = 'task-type-option-title';
+      title.textContent = option.textContent;
+      const detail = document.createElement('span');
+      detail.className = 'task-type-option-detail';
+      detail.textContent = TASK_TYPES[option.value].help;
+      const meta = document.createElement('span');
+      meta.className = 'task-type-option-meta';
+      meta.textContent = TASK_TYPES[option.value].requiresPayload ? 'Input required' : 'One click';
+      item.appendChild(title);
+      item.appendChild(detail);
+      item.appendChild(meta);
+
+      item.addEventListener('click', () => {
+        setTaskType(option.value);
+        closeTaskTypeMenu();
+        taskTypeButton.focus();
+      });
+      taskTypeList.appendChild(item);
     });
-    taskTypeList.appendChild(item);
   });
 
   taskTypeButton.addEventListener('click', () => {
     if (taskTypeButton.disabled) return;
-    setTaskTypeMenuOpen(taskTypeList.hidden);
+    const willOpen = taskTypeList.hidden;
+    setTaskTypeMenuOpen(willOpen);
+    if (willOpen) window.requestAnimationFrame(() => taskTypeSearchInput?.focus());
   });
   taskTypeButton.addEventListener('keydown', event => {
     if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
@@ -1187,7 +1390,19 @@ function initTaskTypeMenu() {
     }
     if (event.key === 'ArrowUp') {
       event.preventDefault();
-      (options[index - 1] || options[options.length - 1])?.focus();
+      const previous = options[index - 1];
+      if (previous) previous.focus();
+      else taskTypeSearchInput?.focus();
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      options[0]?.focus();
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      options[options.length - 1]?.focus();
     }
   });
   document.addEventListener('click', event => {
@@ -1202,6 +1417,9 @@ function setTaskTypeMenuOpen(isOpen) {
   if (isOpen && taskTypeButton.disabled) return;
   taskTypeButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
   taskTypeList.hidden = !isOpen;
+  if (isOpen) {
+    filterTaskTypeOptions('');
+  }
 }
 
 function closeTaskTypeMenu() {
@@ -1209,7 +1427,31 @@ function closeTaskTypeMenu() {
 }
 
 function taskTypeOptions() {
+  return Array.from(taskTypeList ? taskTypeList.querySelectorAll('.task-type-option:not([hidden])') : []);
+}
+
+function allTaskTypeOptions() {
   return Array.from(taskTypeList ? taskTypeList.querySelectorAll('.task-type-option') : []);
+}
+
+function firstVisibleTaskTypeOption() {
+  return taskTypeOptions()[0] || null;
+}
+
+function filterTaskTypeOptions(value) {
+  const query = String(value || '').trim().toLowerCase();
+  if (taskTypeSearchInput && taskTypeSearchInput.value !== value) taskTypeSearchInput.value = value;
+
+  const visibleGroups = new Set();
+  allTaskTypeOptions().forEach(item => {
+    const matches = !query || (item.dataset.searchText || '').includes(query);
+    item.hidden = !matches;
+    if (matches && item.dataset.group) visibleGroups.add(item.dataset.group);
+  });
+
+  Array.from(taskTypeList.querySelectorAll('.task-type-group-label')).forEach(label => {
+    label.hidden = !visibleGroups.has(label.dataset.groupLabel);
+  });
 }
 
 function focusTaskTypeOption(value) {
@@ -1272,6 +1514,7 @@ function applyTaskTypeUI() {
     closeTaskTypeMenu();
     document.querySelector('.command-line').hidden = false;
     hidePathSuggestions();
+    updateBulkTaskButton();
     return;
   }
 
@@ -1317,6 +1560,7 @@ function applyTaskTypeUI() {
       ? 'Browse remote files and download directly'
       : 'Browse remote directories to choose a destination';
   updateUploadFilenameLabel();
+  updateBulkTaskButton();
 
   if (!config.requiresPayload) {
     $('task-input').value = '';
@@ -1415,6 +1659,12 @@ $('task-input').addEventListener('input', () => {
 });
 
 $('send-btn').addEventListener('click', sendTask);
+$('bulk-send-btn').addEventListener('click', sendBulkTask);
+$('bulk-clear-btn').addEventListener('click', () => {
+  selectedAgentIDs.clear();
+  renderAgentList();
+  updateBulkSelectionUI();
+});
 $('cancel-task-btn').addEventListener('click', () => {
   const taskID = $('cancel-task-select').value;
   if (taskID) queueCancelTask(taskID);
@@ -2429,6 +2679,55 @@ async function sendTask() {
   }
 }
 
+async function sendBulkTask() {
+  const targets = selectedAgents();
+  if (!targets.length || taskRequestInFlight || interactiveMode) return;
+  if (!BULK_TASK_TYPES.has(selectedTaskType)) {
+    setTaskStatus('This action must be queued one session at a time.', 'status-warn');
+    updateBulkTaskButton();
+    return;
+  }
+
+  const task = buildTaskFromComposer();
+  if (!task) return;
+
+  clearKillConfirmation();
+  hidePathSuggestions();
+  const restoreFocus = shouldPersistCommandFocus() && TASK_TYPES[selectedTaskType].requiresPayload;
+  setQueueBusy(true, 'Queueing ' + task.type + ' for ' + targets.length + ' sessions...');
+
+  let queued = 0;
+  let failed = 0;
+  const queuedIDs = [];
+  try {
+    for (const agent of targets) {
+      const data = await submitTask(agent.id, task);
+      if (data) {
+        queued++;
+        queuedIDs.push(agent.hostname || agent.id.slice(0, 8));
+      } else {
+        failed++;
+      }
+    }
+    if (queued > 0) {
+      recordTaskHistory(task.type, task.payload);
+      $('task-input').value = '';
+      clearActiveTaskDraft(task.type);
+      clearTaskInputError();
+      appendOutput('[>] bulk ' + task.type + ' queued for ' + queued + ' session' + (queued === 1 ? '' : 's') + ': ' + queuedIDs.join(', '), '', activeAgentID, 'operator');
+    }
+    if (failed > 0) {
+      appendOutput('[-] bulk ' + task.type + ' failed for ' + failed + ' session' + (failed === 1 ? '' : 's'), '', activeAgentID, 'error');
+    }
+    refreshActiveAgent();
+  } catch (err) {
+    appendOutput('[-] bulk queue error: ' + err.message, '', activeAgentID, 'error');
+  } finally {
+    setQueueBusy(false, '');
+    restoreCommandFocusIfNeeded(restoreFocus, false);
+  }
+}
+
 async function submitTask(agentID, task) {
   const resp = await apiFetch('/api/agents/' + agentID + '/task', {
     method: 'POST',
@@ -2969,6 +3268,7 @@ function saveRenderedOutputArtifact() {
     archiveFilename: filename,
     mime: 'text/plain;charset=utf-8',
     label: 'saved output',
+    createdAt: now.toISOString(),
   });
   renderSessionPanels();
   if (artifact) openArtifactsPanel(artifact.key);
@@ -2978,10 +3278,9 @@ function renderedOutputText() {
   return Array.from($('output').children)
     .map(child => {
       if (child.classList.contains('output-download')) {
-        const label = child.querySelector('span');
-        return label ? label.textContent : child.textContent;
+        return outputRowText(child);
       }
-      return child.textContent;
+      return outputRowText(child);
     })
     .map(text => String(text || '').trimEnd())
     .filter(Boolean)
@@ -3015,13 +3314,21 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-function appendOutput(text, cssClass, targetAgentID) {
+function appendOutput(text, cssClass, targetAgentID, outputType) {
   if (targetAgentID && targetAgentID !== activeAgentID) return;
 
   const shouldScroll = followOutput || isOutputNearBottom();
   const line = document.createElement('div');
+  line.className = 'output-line';
   if (cssClass) line.classList.add(cssClass);
-  line.textContent = text;
+  line.dataset.outputType = outputType || inferOutputType(text, cssClass);
+  line.dataset.rowID = String(++outputRowSeq);
+
+  const body = document.createElement('div');
+  body.className = 'output-line-text';
+  body.textContent = text;
+  line.appendChild(body);
+  appendOutputActions(line);
   line.dataset.searchText = text.toLowerCase();
   $('output').appendChild(line);
   applyOutputSearch();
@@ -3030,7 +3337,58 @@ function appendOutput(text, cssClass, targetAgentID) {
   updateOutputEmptyState();
 }
 
-function appendDownloadResult(taskID, short, ts, base64Value, historical) {
+function inferOutputType(text, cssClass) {
+  const value = String(text || '').trim().toLowerCase();
+  if (cssClass === 'interactive-out') return 'shell';
+  if (value.startsWith('[-]') || value.startsWith('[err')) return 'error';
+  if (value.startsWith('[>]')) return 'operator';
+  if (value.startsWith('[download]') || value.includes('progress')) return 'progress';
+  return 'shell';
+}
+
+function appendOutputActions(row) {
+  const actions = document.createElement('div');
+  actions.className = 'output-row-actions';
+
+  const pinButton = document.createElement('button');
+  pinButton.type = 'button';
+  pinButton.className = 'output-action-btn';
+  pinButton.textContent = 'Pin';
+  pinButton.addEventListener('click', () => {
+    const pinned = !row.classList.contains('pinned');
+    row.classList.toggle('pinned', pinned);
+    pinButton.textContent = pinned ? 'Unpin' : 'Pin';
+  });
+
+  const copyButton = document.createElement('button');
+  copyButton.type = 'button';
+  copyButton.className = 'output-action-btn';
+  copyButton.textContent = 'Copy';
+  copyButton.addEventListener('click', async () => {
+    const text = outputRowText(row);
+    try {
+      await navigator.clipboard.writeText(text);
+      copyButton.textContent = 'Copied';
+      window.setTimeout(() => { copyButton.textContent = 'Copy'; }, 1200);
+    } catch (_) {
+      appendOutput('[-] copy failed', '', activeAgentID, 'error');
+    }
+  });
+
+  actions.appendChild(pinButton);
+  actions.appendChild(copyButton);
+  row.appendChild(actions);
+}
+
+function outputRowText(row) {
+  const text = row.querySelector('.output-line-text');
+  if (text) return text.textContent || '';
+  const downloadText = row.querySelector('.output-download-text');
+  if (downloadText) return downloadText.textContent || '';
+  return row.textContent || '';
+}
+
+function appendDownloadResult(taskID, short, ts, base64Value, historical, createdAt) {
   const state = downloadTasks.get(taskID);
   const sourceName = state && state.filename ? state.filename : 'download.bin';
   const artifact = appendFileResult({
@@ -3042,8 +3400,10 @@ function appendDownloadResult(taskID, short, ts, base64Value, historical) {
     mime: 'application/zip',
     buttonLabel: 'Save Compressed',
     label: 'download ready',
+    type: 'download',
     historical,
     compress: true,
+    createdAt,
   });
   if (state) {
     state.status = 'done';
@@ -3052,7 +3412,7 @@ function appendDownloadResult(taskID, short, ts, base64Value, historical) {
   }
 }
 
-function appendArtifactResult(short, ts, payload, label, buttonLabel, historical) {
+function appendArtifactResult(short, ts, payload, label, buttonLabel, historical, createdAt) {
   let result;
   try {
     result = JSON.parse(payload);
@@ -3074,7 +3434,9 @@ function appendArtifactResult(short, ts, payload, label, buttonLabel, historical
     mime: result.mime || 'application/octet-stream',
     buttonLabel,
     label,
+    type: label,
     historical,
+    createdAt,
   });
 }
 
@@ -3083,9 +3445,11 @@ function appendFileResult(options) {
   const shouldScroll = followOutput || isOutputNearBottom();
   const wrap = document.createElement('div');
   wrap.className = 'output-download';
+  wrap.dataset.outputType = 'artifact';
   wrap.dataset.searchText = (options.label + ' ' + options.filename).toLowerCase();
 
   const text = document.createElement('span');
+  text.className = 'output-download-text';
   text.textContent = options.historical
     ? label + ' from session history. Click to save it locally.'
     : label + '. Click to save it locally.';
@@ -3104,6 +3468,7 @@ function appendFileResult(options) {
 
   wrap.appendChild(text);
   wrap.appendChild(button);
+  appendOutputActions(wrap);
   $('output').appendChild(wrap);
   const artifact = rememberArtifact(options);
   applyOutputSearch();
@@ -3114,13 +3479,18 @@ function appendFileResult(options) {
 }
 
 function rememberArtifact(options) {
-  if (!options || !options.filename || !options.base64Value) return;
-  const key = options.short + ':' + (options.archiveFilename || options.filename);
+  if (!options || !options.filename) return;
+  const key = options.key || (options.short + ':' + (options.archiveFilename || options.filename));
   const existing = artifactLibrary.find(item => item.key === key);
-  if (existing) return existing;
+  if (existing) {
+    if (!existing.base64Value && options.base64Value) existing.base64Value = options.base64Value;
+    return existing;
+  }
   const artifact = {
     key,
+    serverID: options.serverID || '',
     taskID: options.short,
+    type: options.type || '',
     label: options.label,
     filename: options.filename,
     archiveFilename: options.archiveFilename || options.filename,
@@ -3128,17 +3498,50 @@ function rememberArtifact(options) {
     base64Value: options.base64Value,
     compress: Boolean(options.compress),
     timestamp: options.ts,
+    createdAt: options.createdAt || new Date().toISOString(),
+    serverSynced: Boolean(options.serverSynced),
   };
   artifactLibrary.unshift(artifact);
   if (artifactLibrary.length > 64) artifactLibrary.pop();
   renderArtifactList();
+  if (!artifact.serverSynced && artifact.base64Value) persistArtifact(artifact);
   return artifact;
+}
+
+async function persistArtifact(artifact) {
+  if (!activeAgentID || !artifact || !artifact.base64Value) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + activeAgentID + '/artifacts', {
+      method: 'POST',
+      body: JSON.stringify({
+        key: artifact.key,
+        task_id: artifact.taskID,
+        type: artifact.type,
+        label: artifact.label,
+        filename: artifact.filename,
+        archive_filename: artifact.archiveFilename,
+        mime: artifact.mime,
+        data: artifact.base64Value,
+        compress: artifact.compress,
+        created_at: artifact.createdAt,
+      }),
+    });
+    if (!resp.ok) return;
+    const saved = await resp.json();
+    artifact.serverID = saved.id || artifact.serverID;
+    artifact.serverSynced = true;
+    renderArtifactList();
+    renderSessionPanels();
+  } catch (_) {
+    // Keep the local artifact available even if persistence is temporarily unavailable.
+  }
 }
 
 function renderSessionPanels() {
   updateSessionPanelTabs();
   updateSessionPanelCounts();
   updateCancellationControls();
+  renderTimelinePanel();
   renderJobsList();
   renderArtifactList();
   renderAuditList();
@@ -3199,14 +3602,12 @@ function closeSessionDetailsModal() {
 }
 
 function setSessionPanel(panel) {
-  if (panel !== 'all' && (!panel || !$(panel + '-panel'))) return;
+  if (!panel || !$(panel + '-panel')) return;
   activeSessionPanel = panel;
   updateSessionPanelTabs();
 }
 
 function updateSessionPanelTabs() {
-  const showAll = activeSessionPanel === 'all';
-
   sessionPanelTabs.forEach(button => {
     const isActive = button.dataset.panel === activeSessionPanel;
     button.classList.toggle('active', isActive);
@@ -3214,13 +3615,10 @@ function updateSessionPanelTabs() {
   });
   if (sessionPanelFilter) sessionPanelFilter.value = activeSessionPanel;
 
-  const panels = $('session-panels');
-  if (panels) panels.classList.toggle('show-all', showAll);
-
-  ['jobs', 'artifacts', 'notes', 'audit'].forEach(panel => {
+  ['timeline', 'jobs', 'artifacts', 'notes', 'audit'].forEach(panel => {
     const el = $(panel + '-panel');
     if (!el) return;
-    const isActive = showAll || panel === activeSessionPanel;
+    const isActive = panel === activeSessionPanel;
     el.hidden = !isActive;
     el.classList.toggle('active', isActive);
   });
@@ -3230,9 +3628,206 @@ function updateSessionPanelCounts() {
   const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued.length : 0;
   const running = runningPEASJobs().length;
   const recent = currentOutputs.length;
+  $('timeline-count').textContent = String(sessionTimelineEntries().length);
   $('jobs-count').textContent = String(queued + running + recent);
   $('artifacts-count').textContent = String(artifactLibrary.length);
-  $('audit-count').textContent = String(auditLog.length);
+  $('audit-count').textContent = String(sessionAuditEvents().length);
+}
+
+function renderTimelinePanel() {
+  renderTimelineSummary();
+
+  const list = $('timeline-list');
+  if (!list) return;
+  list.textContent = '';
+  if (!activeAgentID) return;
+
+  const entries = sessionTimelineEntries()
+    .sort((a, b) => b.sort - a.sort)
+    .slice(0, 80);
+  if (!entries.length) {
+    list.appendChild(panelText('No timeline events for this session.'));
+    return;
+  }
+  entries.forEach(entry => list.appendChild(timelineItem(entry)));
+}
+
+function renderTimelineSummary() {
+  const summary = $('timeline-summary');
+  if (!summary) return;
+  summary.textContent = '';
+  if (!activeAgentID) return;
+
+  const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued.length : 0;
+  const running = runningPEASJobs().length;
+  const state = activeAgent ? getAgentState(activeAgent) : 'offline';
+  const stats = [
+    { label: 'State', value: getAgentStateLabel(state), tone: 'state-' + state },
+    { label: 'Queued', value: String(queued) },
+    { label: 'Running', value: String(running), tone: running ? 'state-stale' : '' },
+    { label: 'Artifacts', value: String(artifactLibrary.length) },
+  ];
+
+  stats.forEach(stat => {
+    const item = document.createElement('article');
+    item.className = 'timeline-stat';
+    const label = document.createElement('span');
+    label.textContent = stat.label;
+    const value = document.createElement('strong');
+    value.textContent = stat.value;
+    if (stat.tone) value.classList.add(stat.tone);
+    item.appendChild(label);
+    item.appendChild(value);
+    summary.appendChild(item);
+  });
+}
+
+function sessionTimelineEntries() {
+  if (!activeAgentID) return [];
+  const entries = [];
+  const now = Date.now();
+  const shortID = activeAgentID.slice(0, 8);
+  const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued : [];
+
+  runningPEASJobs().forEach((job, index) => {
+    entries.push({
+      tone: 'running',
+      label: 'RUNNING',
+      title: 'PEAS background task running',
+      detail: job.id.slice(0, 8) + ' can be cancelled from Task Builder.',
+      time: 'now',
+      sort: now + 1000 - index,
+    });
+  });
+
+  queued.forEach((job, index) => {
+    const queuedAt = timelineDate(job.queued_at);
+    entries.push({
+      tone: 'queued',
+      label: 'QUEUED',
+      title: (job.type || 'task') + ' waiting for delivery',
+      detail: job.id.slice(0, 8) + timelinePayloadDetail(job.payload),
+      time: timelineTimeLabel(queuedAt, 'queued'),
+      sort: timelineSortValue(queuedAt, now - 1000 - index),
+    });
+  });
+
+  currentOutputs.forEach((output, index) => {
+    if (!output || !output.task_id) return;
+    const timestamp = timelineDate(output.timestamp);
+    const failed = Boolean(output.error);
+    const progress = String(output.type || '').endsWith('_progress');
+    entries.push({
+      tone: failed ? 'failed' : progress ? 'progress' : 'done',
+      label: failed ? 'FAILED' : progress ? 'PROGRESS' : 'DONE',
+      title: timelineTaskTitle(output),
+      detail: output.task_id.slice(0, 8) + timelineOutputDetail(output),
+      time: timelineTimeLabel(timestamp, ''),
+      sort: timelineSortValue(timestamp, now - 5000 - index),
+    });
+  });
+
+  artifactLibrary.forEach((artifact, index) => {
+    if (!artifact || artifact.taskID !== shortID) return;
+    const createdAt = timelineDate(artifact.createdAt);
+    entries.push({
+      tone: 'artifact',
+      label: 'ARTIFACT',
+      title: artifact.label || 'artifact ready',
+      detail: artifact.filename || artifact.archiveFilename || 'saveable result',
+      time: artifact.timestamp || timelineTimeLabel(createdAt, ''),
+      sort: timelineSortValue(createdAt, now - 10000 - index),
+    });
+  });
+
+  sessionAuditEvents().forEach((event, index) => {
+    const timestamp = timelineDate(event.timestamp);
+    entries.push({
+      tone: 'audit',
+      label: 'AUDIT',
+      title: timelineAuditTitle(event.action),
+      detail: event.detail || '',
+      time: timelineTimeLabel(timestamp, ''),
+      sort: timelineSortValue(timestamp, now - 20000 - index),
+    });
+  });
+
+  return entries;
+}
+
+function timelineItem(entry) {
+  const item = document.createElement('article');
+  item.className = 'timeline-item timeline-' + (entry.tone || 'event');
+
+  const rail = document.createElement('div');
+  rail.className = 'timeline-marker';
+
+  const body = document.createElement('div');
+  body.className = 'timeline-body';
+
+  const head = document.createElement('div');
+  head.className = 'timeline-head';
+  const label = document.createElement('span');
+  label.className = 'timeline-label';
+  label.textContent = entry.label || 'EVENT';
+  const time = document.createElement('time');
+  time.textContent = entry.time || '';
+  head.appendChild(label);
+  head.appendChild(time);
+
+  const title = document.createElement('strong');
+  title.textContent = entry.title || 'Session event';
+  body.appendChild(head);
+  body.appendChild(title);
+  if (entry.detail) {
+    const detail = document.createElement('p');
+    detail.textContent = entry.detail;
+    body.appendChild(detail);
+  }
+
+  item.appendChild(rail);
+  item.appendChild(body);
+  return item;
+}
+
+function timelineDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function timelineSortValue(date, fallback) {
+  return date ? date.getTime() : fallback;
+}
+
+function timelineTimeLabel(date, fallback) {
+  return date ? date.toLocaleTimeString() : fallback;
+}
+
+function timelinePayloadDetail(payload) {
+  const text = String(payload || '').trim();
+  if (!text) return '';
+  return ' - ' + (text.length > 90 ? text.slice(0, 87) + '...' : text);
+}
+
+function timelineOutputDetail(output) {
+  if (output.error) return ' - ' + output.error;
+  const text = String(output.output || '').trim().replace(/\s+/g, ' ');
+  if (!text) return '';
+  return ' - ' + (text.length > 110 ? text.slice(0, 107) + '...' : text);
+}
+
+function timelineTaskTitle(output) {
+  const type = String(output.type || 'task');
+  if (type === 'peas_progress') return 'PEAS progress update';
+  if (type === 'download_progress') return 'Download progress update';
+  if (type === 'snapshot') return 'Host info artifact ready';
+  if (type === 'screenshot') return 'Screenshot artifact ready';
+  return type + ' result received';
+}
+
+function timelineAuditTitle(action) {
+  return String(action || 'audit event').replace(/_/g, ' ');
 }
 
 function renderJobsList() {
@@ -3297,7 +3892,7 @@ function renderArtifactList() {
   artifactLibrary.forEach(item => {
     const row = panelItem(item.label || 'artifact', item.filename);
     row.dataset.artifactKey = item.key || '';
-    row.appendChild(panelHint(item.archiveFilename || item.filename));
+    row.appendChild(panelHint((item.serverSynced ? 'Server artifact' : 'Local artifact') + ' - ' + (item.archiveFilename || item.filename)));
     row.appendChild(panelButton('Save', () => saveArtifact(item)));
     list.appendChild(row);
   });
@@ -3307,7 +3902,7 @@ function renderAuditList() {
   const list = $('audit-list');
   if (!list) return;
   list.textContent = '';
-  const rows = auditLog.slice(-20).reverse();
+  const rows = sessionAuditEvents().slice(-20).reverse();
   if (!rows.length) {
     list.appendChild(panelText('No audit events loaded.'));
     return;
@@ -3316,6 +3911,11 @@ function renderAuditList() {
     const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
     list.appendChild(panelItem(time + ' ' + event.action, event.detail || event.agent_id || ''));
   });
+}
+
+function sessionAuditEvents() {
+  if (!activeAgentID) return [];
+  return auditLog.filter(event => event && event.agent_id === activeAgentID);
 }
 
 function panelText(text) {
@@ -3353,11 +3953,35 @@ function panelHint(text) {
 }
 
 async function saveArtifact(item) {
+  if (!item) return;
+  if (!item.base64Value && item.serverID) {
+    await hydrateArtifactData(item);
+  }
+  if (!item.base64Value) {
+    appendOutput('[-] artifact data is not available for ' + (item.filename || 'artifact'), '', activeAgentID, 'error');
+    return;
+  }
   if (item && item.compress) {
     await triggerCompressedDownload(item.base64Value, item.filename, item.archiveFilename || item.filename + '.zip');
     return;
   }
   triggerDownload(item.base64Value, item.archiveFilename || item.filename, item.mime);
+}
+
+async function hydrateArtifactData(item) {
+  if (!activeAgentID || !item || !item.serverID) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + activeAgentID + '/artifacts/' + encodeURIComponent(item.serverID));
+    if (!resp.ok) return;
+    const data = await resp.json();
+    item.base64Value = data.data || item.base64Value || '';
+    item.mime = data.mime || item.mime;
+    item.compress = Boolean(data.compress);
+    item.archiveFilename = data.archive_filename || item.archiveFilename;
+    item.filename = data.filename || item.filename;
+  } catch (_) {
+    // Save will show a user-visible failure if the data is still unavailable.
+  }
 }
 
 async function triggerCompressedDownload(base64Value, innerFilename, archiveFilename) {

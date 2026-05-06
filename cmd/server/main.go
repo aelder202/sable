@@ -37,6 +37,7 @@ func main() {
 	passwordFile := flag.String("password-file", "", "read operator password from file")
 	dnsDomain := flag.String("dns-domain", defaultDNSDomain(), "enable DNS fallback listener for this authoritative domain")
 	debugAddr := flag.String("debug-addr", "", "optional loopback debug/pprof address, for example 127.0.0.1:6060")
+	stateFile := flag.String("state-file", defaultStateFile(), "operator state JSON file; use 'none' or 'off' to disable persistence")
 	flag.Parse()
 
 	password, err := loadOperatorPassword(*passwordFile)
@@ -64,7 +65,14 @@ func main() {
 	fmt.Printf("[*] TLS cert fingerprint (SHA-256): %s\n", fingerprint)
 	fmt.Printf("[*] Build agents with: make build-agent-linux CERT_FP_HEX=%s\n", fingerprint)
 
-	store := session.NewStore()
+	statePath := normalizeStateFile(*stateFile)
+	store, err := session.NewPersistentStore(statePath)
+	if err != nil {
+		log.Fatalf("state error: %v", err)
+	}
+	if statePath != "" {
+		log.Printf("[*] Operator state persistence: %s", statePath)
+	}
 	nc := nonce.NewCache(5 * time.Minute)
 
 	agentTLSCfg := listener.NewTLSConfig(cert)
@@ -192,6 +200,23 @@ func defaultDNSDomain() string {
 		return domain
 	}
 	return strings.TrimSpace(os.Getenv("DNS_DOMAIN"))
+}
+
+func defaultStateFile() string {
+	if path := strings.TrimSpace(os.Getenv("SABLE_STATE_FILE")); path != "" {
+		return path
+	}
+	return "sable-state.json"
+}
+
+func normalizeStateFile(path string) string {
+	path = strings.TrimSpace(path)
+	switch strings.ToLower(path) {
+	case "", "none", "off", "disabled":
+		return ""
+	default:
+		return path
+	}
 }
 
 func normalizeDNSDomain(domain string) string {

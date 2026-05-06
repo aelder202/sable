@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -25,6 +27,7 @@ type Config struct {
 const (
 	maxRegisterBodyBytes   = 1024
 	maxTaskBodyBytes       = maxUploadTaskPayloadBytes + 1024
+	maxArtifactBodyBytes   = 75 * 1024 * 1024
 	maxDNSTaskPayloadBytes = 8 * 1024
 )
 
@@ -144,6 +147,14 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 			getQueuedTasksHandler(store, agentID)(w, r)
 		case "metadata":
 			updateAgentMetadataHandler(store, agentID)(w, r)
+		case "artifacts":
+			if len(parts) == 2 {
+				artifactsHandler(store, agentID)(w, r)
+			} else if len(parts) == 3 {
+				getArtifactHandler(store, agentID, parts[2])(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
 		case "terminal":
 			if len(parts) > 2 && parts[2] == "stream" {
 				terminalStreamHandler(store, agentID)(w, r)
@@ -299,4 +310,80 @@ func updateAgentMetadataHandler(store *session.Store, agentID string) http.Handl
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agent) //nolint:errcheck
 	}
+}
+
+func artifactsHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(store.ListArtifacts(agentID)) //nolint:errcheck
+		case http.MethodPost:
+			createArtifactHandler(store, agentID, w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func createArtifactHandler(store *session.Store, agentID string, w http.ResponseWriter, r *http.Request) {
+	var req session.Artifact
+	if !decodeJSONBody(w, r, &req, maxArtifactBodyBytes) {
+		return
+	}
+	if req.ID == "" {
+		req.ID = uuid.New().String()
+	}
+	if !agentIDRe.MatchString(req.ID) {
+		http.Error(w, "artifact id must be 1-64 alphanumeric or hyphen characters", http.StatusBadRequest)
+		return
+	}
+	if err := validateArtifact(req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	artifact, ok := store.AddArtifact(agentID, req)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(artifact) //nolint:errcheck
+}
+
+func getArtifactHandler(store *session.Store, agentID, artifactID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !agentIDRe.MatchString(artifactID) {
+			http.NotFound(w, r)
+			return
+		}
+		artifact, ok := store.GetArtifact(agentID, artifactID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(artifact) //nolint:errcheck
+	}
+}
+
+func validateArtifact(artifact session.Artifact) error {
+	if strings.TrimSpace(artifact.Filename) == "" || len(artifact.Filename) > 240 {
+		return errors.New("artifact filename required")
+	}
+	if len(artifact.ArchiveFilename) > 240 || len(artifact.MIME) > 128 || len(artifact.Label) > 128 || len(artifact.Key) > 256 {
+		return errors.New("artifact metadata too large")
+	}
+	if artifact.Data == "" {
+		return errors.New("artifact data required")
+	}
+	if _, err := base64.StdEncoding.DecodeString(artifact.Data); err != nil {
+		return errors.New("artifact data must be valid base64")
+	}
+	return nil
 }

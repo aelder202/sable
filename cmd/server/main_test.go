@@ -116,6 +116,28 @@ func TestDefaultDNSDomainUsesLegacyEnvFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultStateFile(t *testing.T) {
+	t.Setenv("SABLE_STATE_FILE", "")
+	if got := defaultStateFile(); got != "sable-state.json" {
+		t.Fatalf("defaultStateFile() = %q", got)
+	}
+	t.Setenv("SABLE_STATE_FILE", "custom-state.json")
+	if got := defaultStateFile(); got != "custom-state.json" {
+		t.Fatalf("defaultStateFile() env = %q", got)
+	}
+}
+
+func TestNormalizeStateFile(t *testing.T) {
+	for _, value := range []string{"", "none", "off", "disabled", " OFF "} {
+		if got := normalizeStateFile(value); got != "" {
+			t.Fatalf("normalizeStateFile(%q) = %q, want empty", value, got)
+		}
+	}
+	if got := normalizeStateFile("state.json"); got != "state.json" {
+		t.Fatalf("normalizeStateFile() = %q", got)
+	}
+}
+
 func TestNormalizeDNSDomain(t *testing.T) {
 	tests := map[string]string{
 		"":                    "",

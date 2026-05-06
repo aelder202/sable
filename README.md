@@ -84,40 +84,24 @@ cd sable
 
 Modules pull on the first build. Run `go mod download` if you want to pre-warm the cache.
 
-### 2. Run the setup wizard
+### 2. Install
 
-The wizard creates the first agent identity, generates the server certificate, and builds the selected artifacts.
-
-```sh
-make wizard
-```
-
-It prompts for the agent listener URL, initial label, profile, and build outputs. `SERVER_URL` is the address agents will beacon to, not the operator UI.
-
-```text
-Sable setup wizard
-Agent listener URL [https://127.0.0.1:443]: https://<your-server-ip>:443
-Initial agent label [main]:
-Agent profile [default, fast, quiet, dns] [default]:
-Build server binary now [y/n] [y]:
-Build agent artifacts [linux, windows, both, none] [linux]:
-```
-
-When you choose `both`, the wizard creates a separate Windows identity under `agents/<label>.env` instead of baking the same agent ID into two binaries. Reusing one ID for Linux and Windows would make the session appear to switch platforms when both agents check in. After the wizard finishes, start the server, then run the printed `make register ...` commands for each generated identity.
-
-For non-interactive setup:
+Build the unified helper, then let it create the local config, TLS certificate, server binary, selected agent binaries, and `.sable/install.json` manifest.
 
 ```sh
-make wizard WIZARD_ARGS="--yes --server-url https://<your-server-ip>:443 --agents both --windows-label win01"
+make sablectl
+./sablectl install --url https://<your-server-ip>:443
 ```
 
-`make install` is an alias for `make wizard`. If `config.env` already exists, the wizard reuses it and offers to rebuild artifacts. Use that after modifying server, agent, or web UI source.
+To build both Linux and Windows agents with separate identities:
 
-The wizard writes `config.env` (agent ID, shared secret, server URL, label) and `server.crt` / `server.key`, then builds the server (`sable-server` or `.exe`) and selected agents under `builds/<label>/`.
+```sh
+./sablectl install --url https://<your-server-ip>:443 --agents both --windows-label win01
+```
 
-`config.env`, `server.crt`, and `server.key` are gitignored. Keep them off shared storage.
+`SERVER_URL` is the address agents beacon to, not the operator UI. `sablectl install` writes `config.env`, `server.crt`, `server.key`, `.sable/install.json`, and builds artifacts under `builds/<label>/`. These files are gitignored and include secrets.
 
-### 3. Start the server
+### 3. Start
 
 Keep the server binary, `server.crt`, and `server.key` in the same directory. Use a password file to keep the operator password out of shell history.
 
@@ -126,17 +110,19 @@ Keep the server binary, `server.crt`, and `server.key` in the same directory. Us
 ```sh
 printf '%s' 'yourpassword' > ./pw.txt
 chmod 600 ./pw.txt
-./sable-server --password-file ./pw.txt
+./sablectl start --password-file ./pw.txt
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
 Set-Content -Encoding ascii -NoNewline .\pw.txt "yourpassword"
-.\sable-server.exe --password-file .\pw.txt
+.\sablectl.exe start --password-file .\pw.txt
 ```
 
 `SABLE_OPERATOR_PASSWORD` and stdin both work too.
+
+By default the server persists operator state to `sable-state.json` in the working directory. That file lets registered agents, queued tasks, output history, notes, tags, and audit events survive a restart. It contains agent secrets, so treat it like `config.env`. Move it with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, or disable persistence with `--state-file none`.
 
 The server prints its TLS fingerprint and listener status:
 
@@ -153,16 +139,20 @@ The operator API binds to loopback only. Reach it on the server host directly, o
 ssh -L 8443:127.0.0.1:8443 user@sable-host
 ```
 
-### 4. Register the first agent
+### 4. Add Or Rebuild Agents
 
-With the server running:
+Create another local identity, then build it:
 
 ```sh
-make register PASSWORD=yourpassword
-# [+] Agent registered: f47ac10b-58cc-4372-a567-0e02b2c3d479
+./sablectl agent add windows --label win01
+./sablectl agent build win01
 ```
 
-`make register` reads from `config.env` and POSTs to `https://127.0.0.1:8443`, so run it on the server host. Through an SSH tunnel or a different loopback port, use the CLI with `--api` or hit the REST API directly.
+After source changes, rebuild without remembering which target changed:
+
+```sh
+./sablectl rebuild
+```
 
 ### 5. Deploy the agent
 
@@ -197,13 +187,15 @@ After login the console lists registered sessions, last-seen status, output, and
 
 Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow; past 10 minutes goes red. Hover for the exact last-seen timestamp. Press `/` to focus the filter.
 
-The main console is split into Output and Task Builder. Output shows queued task echoes, task results, progress messages, errors, and saveable artifact rows. Expand **Search Output** to filter rendered output rows only. **Jump To Latest** resumes the live tail after scrolling up.
+The main console is split into Output and Task Builder. Output shows queued task echoes, task results, progress messages, errors, and saveable artifact rows. Use the output type filter to focus on shell output, operator events, artifacts, errors, or progress. Expand **Search Output** to filter rendered output rows only. Output rows can be pinned or copied without leaving the console. **Jump To Latest** resumes the live tail after scrolling up.
 
-Use **Clear Output** to clear the selected session's output history on the server. Cleared output stays cleared after switching sessions or reloading the page. Use **Save Output** to snapshot the currently rendered output as a `.txt` artifact under **Session Details -> Artifacts**.
+Use **Clear Output** to clear the selected session's output history on the server. Cleared output stays cleared after switching sessions or reloading the page. Use **Save Output** to snapshot the currently rendered output as a `.txt` artifact under **Session Details -> Artifacts**. Saved output, screenshots, downloads, PEAS, and snapshot results are stored as server-side artifacts so they remain available after a browser refresh.
 
-The Task Builder keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
+The Task Builder groups actions by command, situational awareness, file handling, and session control. It keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
 
-Session metadata and saved results open from **Session Details**. Use the detail filter or tabs to show everything or focus on Jobs, Artifacts, Notes, or Audit.
+Select sessions in the left sidebar to queue supported tasks across multiple sessions at once. Bulk queueing is available for Shell, Processes, Screenshot, Snapshot, Persistence, PEAS, and Sleep; file transfer, Interactive, and Kill remain single-session actions.
+
+Session metadata and saved results open from **Session Details**. The default Timeline view combines queued jobs, running work, completed results, artifacts, and audit events for the selected session. Use the detail filter or tabs to focus on Jobs, Artifacts, Notes, or Audit.
 
 When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
 
@@ -462,6 +454,9 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `GET` | `/api/agents/:id/queued` | List queued tasks that have not yet been delivered to the agent. |
 | `DELETE` | `/api/agents/:id/tasks/:taskID` | Remove a queued task before delivery. |
 | `PUT` | `/api/agents/:id/metadata` | Update operator notes and tags for a session. |
+| `GET` | `/api/agents/:id/artifacts` | List server-side artifact summaries without embedded data. |
+| `POST` | `/api/agents/:id/artifacts` | Save an operator artifact. Body includes `filename`, base64 `data`, and optional `key`, `task_id`, `label`, `mime`, `archive_filename`, and `compress`. |
+| `GET` | `/api/agents/:id/artifacts/:artifactID` | Return a full artifact including base64 `data` for download or restore. |
 | `GET` | `/api/agents/:id/tasks` | Output history. |
 | `DELETE` | `/api/agents/:id/tasks` | Clear output history for the selected session. |
 | `GET` | `/api/agents/:id/terminal/stream` | SSE stream of task output. Used by the web UI for real-time interactive output and path completion. Write deadline is disabled here; everywhere else it is 10s. |
@@ -487,6 +482,8 @@ Everything except `/api/auth/login` requires `Authorization: Bearer <jwt>`.
 | `DNS_DOMAIN` | server + agent builds | DNS fallback domain. Enables `:53` on the server unless `--dns-domain` / `SABLE_DNS_DOMAIN` is used. |
 | `SABLE_DNS_DOMAIN` | server | Preferred env var for DNS fallback. |
 | `--dns-domain` | server | Flag form. |
+| `SABLE_STATE_FILE` | server | Optional path for persisted operator state. Defaults to `sable-state.json`; set to `none`, `off`, or `disabled` to keep state in memory only. |
+| `--state-file` | server | Flag form for persisted operator state. |
 | `--debug-addr` | server | Loopback-only pprof endpoint, e.g. `127.0.0.1:6060`. For diagnosing stalls. |
 | `WIZARD_ARGS` | `make wizard`, `make install` | Optional flags forwarded to the setup wizard, such as `--yes --server-url ... --agents both`. |
 | `NEW` | `make register` | `NEW=1` mints another identity. |
@@ -519,8 +516,9 @@ Use a password file or env var. Avoid pasting the password into commands that en
 
 | Target | Output | Purpose |
 |--------|--------|---------|
-| `make wizard` | config + selected builds | Guided first-run and rebuild flow. Pass flags with `WIZARD_ARGS`. |
-| `make install` | config + selected builds | Alias for `make wizard`. |
+| `make sablectl` | `sablectl` / `sablectl.exe` | Build the unified install/start/rebuild/remove/doctor helper. |
+| `make install` | `sablectl` / `sablectl.exe` | Compatibility alias that builds `sablectl`; run `sablectl install --url ...` for setup. |
+| `make wizard` | config + selected builds | Legacy guided first-run and rebuild flow. Pass flags with `WIZARD_ARGS`. |
 | `make setup` | `config.env`, `server.crt`, `server.key` | One-time init. Pass `SERVER_URL`, optional `LABEL`, `PROFILE`, and `DNS_DOMAIN`. |
 | `make build` | server + Linux agent | Default build for the current host. |
 | `make rebuild` | server + Linux agent | Alias for `make build` after source changes. |
@@ -538,6 +536,15 @@ Use a password file or env var. Avoid pasting the password into commands that en
 | `make test-integration` | — | Integration tests (`integration` build tag). |
 
 The server binary lands at the repo root. Agent binaries land in `builds/<label>/`. Pass `AGENT_ENV=agents/<label>.env` to target a non-default identity.
+
+Prefer `sablectl` for new installs:
+
+```sh
+sablectl install --url https://10.0.0.5:443
+sablectl start --password-file ./pw.txt
+sablectl update
+sablectl remove --keep-state
+```
 
 ---
 
@@ -579,6 +586,7 @@ web/            - browser UI (HTML/CSS/JS), embedded into the server binary
 agents/         - per-agent env files for additional identities (gitignored)
 builds/         - per-agent build artifacts keyed by label (gitignored)
 config.env      - generated by `make wizard` or `make setup` (gitignored - secrets)
+sable-state.json - persisted server state: agents, queues, output, notes, audit (gitignored - secrets)
 server.crt      - generated by `make wizard` or `make setup` (gitignored)
 server.key      - generated by `make wizard` or `make setup` (gitignored)
 ```
@@ -596,8 +604,8 @@ server.key      - generated by `make wizard` or `make setup` (gitignored)
 - Agent IDs are restricted to alphanumeric + hyphen at registration. No path traversal, no injection through the ID field.
 - Task queues capped at 64 entries per agent; output history capped at 256.
 - The SSE stream endpoint disables its write deadline for long-lived connections; a 15s keepalive comment keeps proxies from timing the stream out. Other endpoints enforce the 10s write deadline.
-- `config.env`, `server.crt`, `server.key`, `agents/*.env`, password files, and built agent binaries are sensitive. Do not commit them.
-- On Unix-like systems: `chmod 600 config.env server.key pw.txt` and `chmod 700 agents`.
+- `config.env`, `sable-state.json`, `server.crt`, `server.key`, `agents/*.env`, password files, and built agent binaries are sensitive. Do not commit them.
+- On Unix-like systems: `chmod 600 config.env sable-state.json server.key pw.txt` and `chmod 700 agents`.
 - Agents are stripped (`-s -w`), but ldflags string literals (server URL, agent ID, cert fingerprint) remain readable in `.rodata` via `strings`. Treat built agents as sensitive artifacts.
 
 ---

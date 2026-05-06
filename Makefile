@@ -14,6 +14,7 @@ endif
 MODULE := github.com/aelder202/sable
 SERVER_BINARY := sable-server$(EXE)
 WINDOWS_SERVER_BINARY := sable-server.exe
+SABLECTL_BINARY := sablectl$(EXE)
 
 # Pick up generated values from the selected agent env file if it exists.
 # Run 'make setup SERVER_URL=https://<public-server-ip>:443' to create config.env.
@@ -49,15 +50,19 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: wizard install setup build rebuild build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
+.PHONY: sablectl wizard install setup build rebuild build-offline-peas build-windows-server register build-server build-agent-linux build-agent-windows build-agent-linux-offline-peas build-agent-windows-offline-peas update-peas test test-integration gen-secret
 .PRECIOUS: register-tool$(EXE)
+
+## Build the unified sablectl installer/operator helper.
+sablectl:
+	go build -o $(SABLECTL_BINARY) ./cmd/sablectl
 
 ## Interactive first-run and rebuild wizard. Pass flags with WIZARD_ARGS='--yes --server-url https://host:443 --agents both --windows-label win01'. Use --wipe-clean to remove existing builds, agents, and config.env before starting.
 wizard:
 	go run ./tools/wizard $(WIZARD_ARGS)
 
-## Friendly alias for the setup wizard.
-install: wizard
+## Build sablectl. Prefer './sablectl install --url https://host:443' for setup.
+install: sablectl
 
 ## First-time setup: generates config.env, server.crt, server.key.
 ## Usage: make setup SERVER_URL=https://<public-server-ip>:443 [LABEL=<label>] [PROFILE=fast|quiet|dns] [DNS_DOMAIN=example.com]
@@ -133,4 +138,3 @@ test-integration:
 
 gen-secret:
 	@go run ./tools/gensecret
-
