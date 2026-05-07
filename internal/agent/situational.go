@@ -509,7 +509,6 @@ func parentDirectory(path string) string {
 	return parent
 }
 
-
 func detectImageType(data []byte) (string, string) {
 	if len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
 		return "image/jpeg", ".jpg"
