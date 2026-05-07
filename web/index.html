@@ -77,16 +77,19 @@
             </article>
           </div>
 
-          <label class="sr-only" for="agent-filter">Filter sessions</label>
-          <input
-            type="search"
-            id="agent-filter"
-            placeholder="Filter hostname, OS, or ID"
-            autocomplete="off"
-            spellcheck="false"
-            autocapitalize="off"
-            autocorrect="off"
-          >
+          <div class="session-filter-row">
+            <label class="sr-only" for="agent-filter">Filter sessions</label>
+            <input
+              type="search"
+              id="agent-filter"
+              placeholder="Filter hostname, OS, or ID"
+              autocomplete="off"
+              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+            >
+            <button id="bulk-select-mode-btn" type="button" aria-pressed="false">Select</button>
+          </div>
 
           <p id="agent-filter-empty" class="sidebar-empty" hidden></p>
           <div id="bulk-session-bar" class="bulk-session-bar" hidden>
@@ -136,6 +139,20 @@
                     <option value="error">Errors</option>
                     <option value="progress">Progress</option>
                   </select>
+                  <div id="output-type-menu" class="output-type-menu">
+                    <button
+                      id="output-type-button"
+                      class="output-type-button"
+                      type="button"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-controls="output-type-list"
+                    >
+                      <span class="output-type-prefix">Showing</span>
+                      <span id="output-type-button-label">All output</span>
+                    </button>
+                    <div id="output-type-list" class="output-type-list" role="listbox" hidden></div>
+                  </div>
                   <div id="output-search-panel" hidden>
                     <label class="sr-only" for="output-search">Search output</label>
                     <input id="output-search" type="search" placeholder="Filter rendered output">
@@ -347,6 +364,12 @@
   </div>
 
   <input type="file" id="upload-file-input">
+  <script src="/api.js"></script>
+  <script src="/sessions.js"></script>
+  <script src="/tasks.js"></script>
+  <script src="/artifacts.js"></script>
+  <script src="/modals.js"></script>
+  <script src="/output.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

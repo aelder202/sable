@@ -104,9 +104,11 @@ type pathCompletionResult struct {
 // A 60-second deadline prevents runaway processes from blocking the beacon loop.
 // Output is capped at maxShellOutputBytes to bound memory use.
 func runShell(cmd string) (string, string) {
+	originalCmd := cmd
 	var shell, flag string
 	if runtime.GOOS == "windows" {
 		shell, flag = "cmd", "/C"
+		cmd = normalizeWindowsShellCommand(cmd)
 	} else {
 		shell, flag = "/bin/sh", "-c"
 	}
@@ -116,10 +118,70 @@ func runShell(cmd string) (string, string) {
 	if len(out) > maxShellOutputBytes {
 		out = out[:maxShellOutputBytes]
 	}
+	output := string(out)
 	if err != nil {
-		return string(out), err.Error()
+		return output, shellCommandError(originalCmd, output, err.Error())
 	}
-	return string(out), ""
+	return output, ""
+}
+
+func normalizeWindowsShellCommand(cmd string) string {
+	trimmed := strings.TrimSpace(cmd)
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return cmd
+	}
+
+	switch strings.ToLower(fields[0]) {
+	case "pwd":
+		if len(fields) == 1 {
+			return "cd"
+		}
+	case "ls":
+		if len(fields) == 1 {
+			return "dir"
+		}
+		if !strings.HasPrefix(fields[1], "-") {
+			return "dir " + strings.TrimSpace(trimmed[len(fields[0]):])
+		}
+	}
+
+	return cmd
+}
+
+func shellCommandError(cmd, output, fallback string) string {
+	if shellCommandNotRecognized(output, fallback) {
+		name := shellCommandName(cmd)
+		if name != "" {
+			return "command was not recognized by the OS: " + name
+		}
+		return "command was not recognized by the OS"
+	}
+	return fallback
+}
+
+func shellCommandNotRecognized(output, fallback string) bool {
+	value := strings.ToLower(output)
+	errText := strings.ToLower(fallback)
+	if strings.Contains(value, "is not recognized as an internal or external command") ||
+		strings.Contains(value, "the term ") && strings.Contains(value, " is not recognized") {
+		return true
+	}
+	if strings.Contains(value, ": command not found") {
+		return true
+	}
+	if strings.Contains(value, ": not found") && (strings.Contains(errText, "exit status 127") || fallback == "") {
+		return true
+	}
+	return false
+}
+
+func shellCommandName(cmd string) string {
+	fields := strings.Fields(strings.TrimSpace(cmd))
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], `"'`)
 }
 
 func startDownloadTask(taskID, path string) *protocol.TaskResult {
