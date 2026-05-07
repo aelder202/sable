@@ -25,6 +25,7 @@ import (
 	"github.com/aelder202/sable/internal/agentlabel"
 	"github.com/aelder202/sable/internal/listener"
 	"github.com/aelder202/sable/internal/operatorpw"
+	"github.com/aelder202/sable/internal/securefile"
 	"github.com/google/uuid"
 )
 
@@ -330,7 +331,7 @@ func ensurePrimaryConfig(cfg installConfig) (agentConfig, bool, error) {
 		DNSDomain:    dnsDomain,
 		Target:       primaryTarget(cfg.Agents),
 	}
-	if err := os.WriteFile("config.env", buildConfigEnv(agent), 0600); err != nil {
+	if err := securefile.WriteFile("config.env", buildConfigEnv(agent)); err != nil {
 		return agentConfig{}, false, fmt.Errorf("write config.env: %w", err)
 	}
 	return agent, true, nil
@@ -391,7 +392,7 @@ func ensureAdditionalAgent(primary agentConfig, label, target string) (agentConf
 	if err := os.MkdirAll(filepath.Dir(envPath), 0700); err != nil {
 		return agentConfig{}, "", fmt.Errorf("create agents directory: %w", err)
 	}
-	if err := os.WriteFile(envPath, buildConfigEnv(agent), 0600); err != nil {
+	if err := securefile.WriteFile(envPath, buildConfigEnv(agent)); err != nil {
 		return agentConfig{}, "", fmt.Errorf("write %s: %w", envPath, err)
 	}
 	return agent, envPath, nil
@@ -799,6 +800,7 @@ func runDoctor(args []string, runner commandRunner, stdout io.Writer) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	fixPermissions := fs.Bool("fix-permissions", false, "tighten ACLs/modes on existing sensitive local files")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -812,6 +814,7 @@ func runDoctor(args []string, runner commandRunner, stdout io.Writer) error {
 		checkFiles(),
 		checkCertConfigMatch(),
 		checkStateWritable(),
+		checkSensitivePermissions(*fixPermissions),
 		checkServerFresh(),
 		checkAgentEnvs(),
 		checkServerAgents(*apiURL),
@@ -859,6 +862,9 @@ func buildAgent(runner commandRunner, agent agentConfig, target string, stdout, 
 	args := []string{"build", "-ldflags", agentLDFlags(agent), "-o", out, "./cmd/agent"}
 	if err := runner.Run("go", args, env, stdout, stderr); err != nil {
 		return "", fmt.Errorf("build %s agent %s: %w", target, agent.Label, err)
+	}
+	if err := securefile.Restrict(out); err != nil {
+		return "", fmt.Errorf("restrict %s agent %s: %w", target, agent.Label, err)
 	}
 	return out, nil
 }
@@ -1071,7 +1077,7 @@ func resolvePasswordFile(path, password string) (string, error) {
 		}
 		password = generated
 	}
-	if err := os.WriteFile(path, []byte(password+"\n"), 0600); err != nil {
+	if err := securefile.WriteFile(path, []byte(password+"\n")); err != nil {
 		return "", fmt.Errorf("write password file: %w", err)
 	}
 	return password, nil
@@ -1211,7 +1217,7 @@ func saveManifest(m manifest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(manifestPath, append(data, '\n'), 0600)
+	return securefile.WriteFile(manifestPath, append(data, '\n'))
 }
 
 func addAgentPath(m *manifest, path, target string) {
@@ -1663,8 +1669,58 @@ func checkStateWritable() doctorCheck {
 	if err != nil {
 		return doctorCheck{Name: "state", Err: err.Error()}
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		return doctorCheck{Name: "state", Err: err.Error()}
+	}
+	if err := securefile.Restrict(path); err != nil {
+		return doctorCheck{Name: "state", Err: err.Error()}
+	}
 	return doctorCheck{Name: "state", Message: filepath.ToSlash(path) + " writable"}
+}
+
+func checkSensitivePermissions(fix bool) doctorCheck {
+	m := loadManifestOrDefault()
+	warnings := []string{}
+	errorsSeen := []string{}
+	for _, path := range sensitiveLocalPaths(m) {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
+		}
+		if fix {
+			if err := securefile.Restrict(path); err != nil {
+				errorsSeen = append(errorsSeen, filepath.ToSlash(path)+": "+err.Error())
+				continue
+			}
+		}
+		warning, err := securefile.PermissionWarning(path)
+		if err != nil {
+			errorsSeen = append(errorsSeen, filepath.ToSlash(path)+": "+err.Error())
+			continue
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+	if len(errorsSeen) > 0 {
+		return doctorCheck{Name: "permissions", Message: strings.Join(errorsSeen, "; "), Warn: true}
+	}
+	if len(warnings) > 0 {
+		return doctorCheck{Name: "permissions", Message: strings.Join(warnings, "; "), Warn: true}
+	}
+	if fix {
+		return doctorCheck{Name: "permissions", Message: "sensitive files hardened"}
+	}
+	return doctorCheck{Name: "permissions", Message: "sensitive files are owner/admin scoped"}
+}
+
+func sensitiveLocalPaths(m manifest) []string {
+	paths := []string{m.Config, m.State, m.Cert, m.Key, m.PasswordFile, manifestPath}
+	paths = append(paths, m.Agents...)
+	paths = append(paths, m.Builds...)
+	return cleanList(paths)
 }
 
 func checkServerFresh() doctorCheck {

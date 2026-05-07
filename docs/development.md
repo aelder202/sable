@@ -23,7 +23,7 @@ sablectl rebuild --server-only # just the server
 sablectl rebuild --agent main  # just one agent label
 ```
 
-For source-level dev work, the Makefile also provides direct `go build` targets:
+For source-level dev work, the Makefile also provides direct `go build` targets. Agent-producing Make targets run the same local permission hardening on built agent binaries after compilation.
 
 ```sh
 make build         # server + Linux agent for the current config.env
@@ -100,6 +100,12 @@ The server reads, in order:
 4. stdin
 
 Use a password file or env var. Avoid pasting the password into commands that end up in shell history. Files written by PowerShell's default `Set-Content` are UTF-16 LE with a BOM; the server handles that and so does `sablectl` (since version 3.x), but if you author the file with another tool, prefer plain ASCII / UTF-8.
+
+## Local Secret Files
+
+Sable is meant to run locally, so generated state stays easy to inspect and recover. The tradeoff is that `config.env`, `agents/*.env`, `pw.txt`, `server.key`, built agents, and `sable-state.json` are sensitive local files. `sable-state.json` is plaintext and can include agent secrets, queued tasks, task output, artifacts, notes, tags, and audit history.
+
+Generated sensitive files are restricted when Sable writes them: Unix-like systems get owner-only modes, and Windows gets a protected ACL for the current user, Administrators, and SYSTEM. Run `sablectl doctor` after install, after moving files, or after changing workspace permissions; it warns when those files inherit broad permissions or grant access to unexpected principals. Run `sablectl doctor --fix-permissions` to harden existing generated files in place.
 
 ## Build Targets
 

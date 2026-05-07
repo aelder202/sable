@@ -14,6 +14,8 @@ import (
 	"math/big"
 	"os"
 	"time"
+
+	"github.com/aelder202/sable/internal/securefile"
 )
 
 // GenerateSelfSignedCert generates an ECDSA P-256 TLS certificate valid for 1 year.
@@ -48,10 +50,10 @@ func LoadOrCreateCert(certPath, keyPath string) (tls.Certificate, string, error)
 	if err != nil {
 		return tls.Certificate{}, "", err
 	}
-	if err := os.WriteFile(certPath, certPEM, 0600); err != nil {
+	if err := securefile.WriteFile(certPath, certPEM); err != nil {
 		return tls.Certificate{}, "", err
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := securefile.WriteFile(keyPath, keyPEM); err != nil {
 		return tls.Certificate{}, "", err
 	}
 	return cert, fp, nil
