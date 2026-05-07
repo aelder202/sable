@@ -124,6 +124,7 @@ func (s *shellSession) run(command string) (string, bool) {
 
 	var payload string
 	if runtime.GOOS == "windows" {
+		command = normalizeWindowsShellCommand(command)
 		payload = command + "\r\necho " + marker + "\r\n"
 	} else {
 		payload = command + "\necho " + marker + "\n"
@@ -217,6 +218,9 @@ func (p *persistentShell) exec(command string) (string, string) {
 			return output, "shell restarted (timed out or terminated)"
 		}
 		return "", "shell timed out or terminated"
+	}
+	if taskErr := shellCommandError(command, output, ""); taskErr != "" {
+		return output, taskErr
 	}
 	return output, ""
 }

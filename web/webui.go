@@ -2,5 +2,5 @@ package webui
 
 import "embed"
 
-//go:embed index.html app.js style.css
+//go:embed index.html *.js style.css
 var FS embed.FS

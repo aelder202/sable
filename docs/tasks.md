@@ -4,7 +4,7 @@
 
 | Action | Input | Result |
 |--------|-------|--------|
-| **Shell** | Command string | Runs one bounded shell command (`/bin/sh -c` or `cmd /C`). Output cap 512 KB, timeout 60 seconds. Use Interactive for shell state that must persist across commands. |
+| **Shell** | Command string | Runs one bounded shell command (`/bin/sh -c` or `cmd /C`). On Windows, bare `pwd` and `ls` are accepted as conveniences for `cd` and `dir`. Output cap 512 KB, timeout 60 seconds. Use Interactive for shell state that must persist across commands. |
 | **Processes** | None | Returns a read-only process listing. |
 | **Screenshot** | None | Captures one operator-initiated screenshot. The agent downscales/compresses it and returns a saveable artifact row. |
 | **Snapshot** | None | Collects a bounded host snapshot report covering identity, network, route, disk, and environment basics. Returns a text artifact. |
@@ -67,7 +67,7 @@ Queueing `kill` requires a second confirmation click. There is no undo.
 
 | Command | Syntax | Notes |
 |---------|--------|-------|
-| `shell` | `shell <command>` | One-shot in normal mode (`/bin/sh -c` or `cmd /C`). In interactive mode, writes to the persistent shell. 512 KB output cap, 60s timeout. |
+| `shell` | `shell <command>` | One-shot in normal mode (`/bin/sh -c` or `cmd /C`). On Windows, bare `pwd` and `ls` are accepted as conveniences for `cd` and `dir`. In interactive mode, writes to the persistent shell. 512 KB output cap, 60s timeout. |
 | `ps` | `ps` | Read-only process listing. Output cap 48 KB. |
 | `screenshot` | `screenshot` | One operator-initiated bounded screenshot. Returns a chunked image result, not a stream. |
 | `persistence` | `persistence` | Read-only listing of common persistence locations for the agent OS. Output cap 48 KB. |

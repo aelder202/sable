@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -94,6 +95,106 @@ func TestListDirectoryReturnsStructuredEntries(t *testing.T) {
 	}
 	if result.Entries[1].IsDir || result.Entries[1].Name != "file.txt" || result.Entries[1].Size != 5 {
 		t.Fatalf("unexpected file entry: %#v", result.Entries[1])
+	}
+}
+
+func TestNormalizeWindowsShellCommandAddsCommonAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "pwd", in: "pwd", want: "cd"},
+		{name: "pwd spaced", in: "  pwd  ", want: "cd"},
+		{name: "ls", in: "ls", want: "dir"},
+		{name: "ls path", in: `ls C:\Windows`, want: `dir C:\Windows`},
+		{name: "ls flag untouched", in: "ls -la", want: "ls -la"},
+		{name: "other untouched", in: "whoami", want: "whoami"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeWindowsShellCommand(tt.in); got != tt.want {
+				t.Fatalf("normalizeWindowsShellCommand(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunShellWindowsCommonAliases(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows cmd alias regression")
+	}
+
+	for _, command := range []string{"pwd", "ls"} {
+		t.Run(command, func(t *testing.T) {
+			output, taskErr := runShell(command)
+			if taskErr != "" {
+				t.Fatalf("runShell(%q) error: %s\noutput:\n%s", command, taskErr, output)
+			}
+			if strings.TrimSpace(output) == "" {
+				t.Fatalf("runShell(%q) returned empty output", command)
+			}
+		})
+	}
+}
+
+func TestShellCommandErrorRecognizesUnknownCommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		cmd      string
+		output   string
+		fallback string
+		want     string
+	}{
+		{
+			name:     "windows cmd",
+			cmd:      "definitelymissing",
+			output:   "'definitelymissing' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
+			fallback: "exit status 1",
+			want:     "command was not recognized by the OS: definitelymissing",
+		},
+		{
+			name:     "posix sh",
+			cmd:      "definitelymissing --flag",
+			output:   "/bin/sh: 1: definitelymissing: not found\n",
+			fallback: "exit status 127",
+			want:     "command was not recognized by the OS: definitelymissing",
+		},
+		{
+			name:     "posix interactive",
+			cmd:      "definitelymissing",
+			output:   "/bin/sh: definitelymissing: command not found\n",
+			fallback: "",
+			want:     "command was not recognized by the OS: definitelymissing",
+		},
+		{
+			name:     "ordinary failure",
+			cmd:      "false",
+			output:   "",
+			fallback: "exit status 1",
+			want:     "exit status 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellCommandError(tt.cmd, tt.output, tt.fallback); got != tt.want {
+				t.Fatalf("shellCommandError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunShellUnknownCommandReturnsRecognizedError(t *testing.T) {
+	command := "sable-command-definitely-not-recognized-zzzz"
+	output, taskErr := runShell(command)
+	want := "command was not recognized by the OS: " + command
+	if taskErr != want {
+		t.Fatalf("runShell(%q) error = %q, want %q\noutput:\n%s", command, taskErr, want, output)
+	}
+	if strings.TrimSpace(output) == "" {
+		t.Fatalf("runShell(%q) returned empty output", command)
 	}
 }
 
