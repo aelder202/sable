@@ -42,6 +42,7 @@ AGENT_WINDOWS_ARTIFACT := $(AGENT_BUILD_DIR)/agent.exe
 
 # -s -w strips symbol table and DWARF info from agent binaries.
 STRIP   := -s -w
+RESTRICT := go run ./tools/restrictfile
 LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.AgentID=$(AGENT_ID)' \
            -X '$(MODULE)/internal/agent.SecretHex=$(AGENT_SECRET_HEX)' \
@@ -64,6 +65,7 @@ endif
 	go build -o $(SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
+	$(RESTRICT) "$(AGENT_LINUX_ARTIFACT)"
 	@echo [+] Built: $(SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
 
 ## Cross-build a Windows Sable server bundle plus a per-agent Linux binary from a Linux/macOS build host.
@@ -75,6 +77,7 @@ endif
 	$(XWIN) go build -o $(WINDOWS_SERVER_BINARY) ./cmd/server
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
+	$(RESTRICT) "$(AGENT_LINUX_ARTIFACT)"
 	@echo [+] Built: $(WINDOWS_SERVER_BINARY) and $(AGENT_LINUX_ARTIFACT)
 
 build-server:
@@ -86,6 +89,7 @@ ifeq ($(wildcard $(AGENT_ENV)),)
 endif
 	$(MKDIR_BUILD)
 	$(XLIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_LINUX_ARTIFACT)" ./cmd/agent
+	$(RESTRICT) "$(AGENT_LINUX_ARTIFACT)"
 	@echo [+] Built: $(AGENT_LINUX_ARTIFACT)
 
 build-agent-windows:
@@ -94,6 +98,7 @@ ifeq ($(wildcard $(AGENT_ENV)),)
 endif
 	$(MKDIR_BUILD)
 	$(XWIN) go build -ldflags "$(LDFLAGS)" -o "$(AGENT_WINDOWS_ARTIFACT)" ./cmd/agent
+	$(RESTRICT) "$(AGENT_WINDOWS_ARTIFACT)"
 	@echo [+] Built: $(AGENT_WINDOWS_ARTIFACT)
 
 update-peas:

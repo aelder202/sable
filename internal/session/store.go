@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aelder202/sable/internal/protocol"
+	"github.com/aelder202/sable/internal/securefile"
 )
 
 // TaskOutput records the result of a completed task for the audit trail.
@@ -838,7 +839,7 @@ func writeStateFile(path string, state persistedStoreState) error {
 			return retryErr
 		}
 	}
-	return nil
+	return securefile.Restrict(path)
 }
 
 func cloneBytes(values []byte) []byte {

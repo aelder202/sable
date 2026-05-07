@@ -11,6 +11,21 @@ import (
 	"testing"
 )
 
+type testRunner struct {
+	run func(name string, args []string, env []string, stdout, stderr io.Writer) error
+}
+
+func (r testRunner) Run(name string, args []string, env []string, stdout, stderr io.Writer) error {
+	if r.run != nil {
+		return r.run(name, args, env, stdout, stderr)
+	}
+	return nil
+}
+
+func (testRunner) Start(name string, args []string, env []string, stdout, stderr io.Writer) (*os.Process, error) {
+	return nil, os.ErrInvalid
+}
+
 func TestManifestAgentPathsAreDedupedAndTargetsTracked(t *testing.T) {
 	m := manifest{}
 	addAgentPath(&m, filepath.FromSlash("agents/web01.env"), "windows")
@@ -309,6 +324,79 @@ func TestRunResetKeepStatePreservesStateFile(t *testing.T) {
 	}
 	if _, err := os.Stat("sable-state.json"); err != nil {
 		t.Fatalf("sable-state.json should be preserved: %v", err)
+	}
+}
+
+func TestSensitiveLocalPathsIncludesSecretBearingArtifacts(t *testing.T) {
+	m := manifest{
+		Config:       "config.env",
+		State:        "sable-state.json",
+		Cert:         "server.crt",
+		Key:          "server.key",
+		PasswordFile: "pw.txt",
+		Agents:       []string{"agents/win01.env"},
+		Builds:       []string{"builds/win01/agent.exe"},
+	}
+	got := sensitiveLocalPaths(m)
+	want := []string{
+		".sable/install.json",
+		"agents/win01.env",
+		"builds/win01/agent.exe",
+		"config.env",
+		"pw.txt",
+		"sable-state.json",
+		"server.crt",
+		"server.key",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sensitive paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildAgentRestrictsOutputArtifact(t *testing.T) {
+	t.Chdir(t.TempDir())
+	agent := agentConfig{
+		ID:           "12345678-1234-1234-1234-123456789abc",
+		SecretHex:    strings.Repeat("a", 64),
+		CertFPHex:    strings.Repeat("b", 64),
+		ServerURL:    "https://127.0.0.1:443",
+		Label:        "main",
+		SleepSeconds: "30",
+	}
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		if name != "go" {
+			t.Fatalf("runner name = %q, want go", name)
+		}
+		out := agentOutputPath(agent.Label, "linux")
+		if err := os.MkdirAll(filepath.Dir(out), 0700); err != nil {
+			return err
+		}
+		return os.WriteFile(out, []byte("agent"), 0644)
+	}}
+
+	out, err := buildAgent(runner, agent, "linux", io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("buildAgent: %v", err)
+	}
+	if filepath.ToSlash(out) != "builds/main/agent-linux" {
+		t.Fatalf("out = %q", out)
+	}
+	if check := checkSensitivePermissions(false); check.Warn || check.Err != "" {
+		t.Fatalf("permissions after buildAgent = %+v", check)
+	}
+}
+
+func TestCheckSensitivePermissionsCanHardenExistingFiles(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("config.env", []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	check := checkSensitivePermissions(true)
+	if check.Err != "" || check.Warn {
+		t.Fatalf("check = %+v, want successful hardening", check)
+	}
+	if !strings.Contains(check.Message, "hardened") {
+		t.Fatalf("message = %q, want hardened", check.Message)
 	}
 }
 
