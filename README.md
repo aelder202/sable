@@ -22,6 +22,10 @@ Active session view with command output, the Task Builder, and the full action m
 
 ![Sable web console with active session](images/landing_page.png)
 
+Bulk tasking across selected sessions:
+
+![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.png)
+
 Session details rail for jobs, artifacts, notes, and audit history:
 
 ![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
