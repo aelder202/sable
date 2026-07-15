@@ -408,6 +408,68 @@ $('save-metadata-btn').addEventListener('click', async () => {
   }
 });
 
+$('save-artifact-retention-btn').addEventListener('click', async () => {
+	if (!activeAgentID) return;
+	const maxItems = Number.parseInt($('artifact-retention-input').value, 10);
+	if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 256) {
+		appendOutput('[-] artifact retention must be between 1 and 256', '', activeAgentID, 'error');
+		return;
+	}
+	try {
+		const resp = await apiFetch('/api/agents/' + activeAgentID + '/artifacts/retention', {
+			method: 'PUT', body: JSON.stringify({ max_items: maxItems }),
+		});
+		if (!resp.ok) throw new Error('request failed (' + resp.status + ')');
+		activeAgent.artifact_retention = maxItems;
+		artifactLibrary = artifactLibrary.slice(0, maxItems);
+		appendOutput('[>] artifact retention set to ' + maxItems, '', activeAgentID, 'operator');
+		renderSessionPanels();
+	} catch (err) {
+		appendOutput('[-] artifact retention error: ' + err.message, '', activeAgentID, 'error');
+	}
+});
+
+$('rekey-agent-btn').addEventListener('click', async () => {
+	if (!activeAgentID || !window.confirm('Rotate this agent secret? The current agent will stop authenticating until rebuilt with the new secret.')) return;
+	try {
+		const resp = await apiFetch('/api/agents/' + activeAgentID + '/rekey', { method: 'POST' });
+		if (!resp.ok) throw new Error('request failed (' + resp.status + ')');
+		const data = await resp.json();
+		$('rekey-secret-output').textContent = data.secret_hex || '';
+		$('rekey-secret-output').hidden = false;
+		$('copy-rekey-secret-btn').hidden = false;
+		appendOutput('[>] agent secret rotated; copy it now', '', activeAgentID, 'operator');
+	} catch (err) {
+		appendOutput('[-] rotate secret error: ' + err.message, '', activeAgentID, 'error');
+	}
+});
+
+$('copy-rekey-secret-btn').addEventListener('click', async () => {
+	const secret = $('rekey-secret-output').textContent || '';
+	if (!secret) return;
+	try {
+		await navigator.clipboard.writeText(secret);
+		$('copy-rekey-secret-btn').textContent = 'Copied';
+		window.setTimeout(() => { $('copy-rekey-secret-btn').textContent = 'Copy New Secret'; }, 1200);
+	} catch (_) {
+		appendOutput('[-] copy secret failed', '', activeAgentID, 'error');
+	}
+});
+
+$('revoke-agent-btn').addEventListener('click', async () => {
+	if (!activeAgentID || !window.confirm('Revoke this agent and permanently delete its server-side state?')) return;
+	const agentID = activeAgentID;
+	try {
+		const resp = await apiFetch('/api/agents/' + agentID, { method: 'DELETE' });
+		if (!resp.ok) throw new Error('request failed (' + resp.status + ')');
+		closeSessionDetailsModal();
+		clearActiveSession();
+		await loadAgents();
+	} catch (err) {
+		appendOutput('[-] revoke agent error: ' + err.message, '', agentID, 'error');
+	}
+});
+
 $('output-search').addEventListener('input', applyOutputSearch);
 
 $('task-input').addEventListener('keydown', e => {

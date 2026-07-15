@@ -268,6 +268,7 @@ function handleTaskOutput(output, historical) {
 
   if ((output.type === 'screenshot' || output.type === 'peas' || output.type === 'snapshot') && output.output) {
     appendArtifactResult(
+	  output.task_id,
       short,
       ts,
       output.output.trim(),
@@ -297,9 +298,7 @@ function handleTaskOutput(output, historical) {
 async function loadAudit() {
   if (!token) return;
   try {
-    const resp = await apiFetch('/api/audit');
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await apiFetchAll('/api/audit');
     auditLog = Array.isArray(data) ? data : [];
     renderAuditList();
   } catch (_) {
@@ -605,7 +604,6 @@ function sessionTimelineEntries() {
   if (!activeAgentID) return [];
   const entries = [];
   const now = Date.now();
-  const shortID = activeAgentID.slice(0, 8);
   const queued = activeAgent && Array.isArray(activeAgent.queued) ? activeAgent.queued : [];
 
   runningPEASJobs().forEach((job, index) => {
@@ -621,11 +619,13 @@ function sessionTimelineEntries() {
 
   queued.forEach((job, index) => {
     const queuedAt = timelineDate(job.queued_at);
+	const inFlight = job.status === 'in_flight';
+	const attempts = Number(job.delivery_attempts || 0);
     entries.push({
       tone: 'queued',
-      label: 'QUEUED',
-      title: (job.type || 'task') + ' waiting for delivery',
-      detail: job.id.slice(0, 8) + timelinePayloadDetail(job.payload),
+	  label: SableLogic.deliveryLabel(job),
+	  title: (job.type || 'task') + (inFlight ? ' awaiting acknowledgment' : ' waiting for delivery'),
+	  detail: job.id.slice(0, 8) + (attempts ? ' - attempt ' + attempts : '') + timelinePayloadDetail(job.payload),
       time: timelineTimeLabel(queuedAt, 'queued'),
       sort: timelineSortValue(queuedAt, now - 1000 - index),
     });
@@ -647,7 +647,7 @@ function sessionTimelineEntries() {
   });
 
   artifactLibrary.forEach((artifact, index) => {
-    if (!artifact || artifact.taskID !== shortID) return;
+	if (!artifact) return;
     const createdAt = timelineDate(artifact.createdAt);
     entries.push({
       tone: 'artifact',
@@ -769,7 +769,10 @@ function renderJobsList() {
   });
 
   queued.forEach(job => {
-    const row = panelItem('QUEUED', job.id.slice(0, 8) + ' ' + job.type);
+	const status = SableLogic.deliveryLabel(job);
+	const row = panelItem(status, job.id.slice(0, 8) + ' ' + job.type);
+	const attempts = Number(job.delivery_attempts || 0);
+	row.appendChild(panelHint(attempts > 0 ? attempts + ' delivery attempt' + (attempts === 1 ? '' : 's') : 'Waiting for first delivery'));
     const button = panelButton('Remove', () => deleteQueuedTask(job.id));
     row.appendChild(button);
     list.appendChild(row);

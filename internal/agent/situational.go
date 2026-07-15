@@ -433,18 +433,58 @@ func envCommand() []string {
 	return []string{"env"}
 }
 
-func listDirectory(path string) (string, string) {
-	input := strings.TrimSpace(path)
-	if input == "" {
-		input = "."
+func listDirectory(payload string) (string, string) {
+	request := directoryRequest{Path: strings.TrimSpace(payload), Limit: defaultDirectoryPage}
+	if strings.HasPrefix(request.Path, "{") {
+		if err := json.Unmarshal([]byte(request.Path), &request); err != nil {
+			return "", "invalid directory request"
+		}
 	}
-	absPath, err := filepath.Abs(input)
+	request.Path = strings.TrimSpace(request.Path)
+	if request.Path == "" {
+		request.Path = "."
+	}
+	if request.Offset < 0 || request.Offset > maxDirectoryOffset {
+		return "", "invalid directory offset"
+	}
+	if request.Limit <= 0 {
+		request.Limit = defaultDirectoryPage
+	}
+	if request.Limit > maxDirectoryPage {
+		request.Limit = maxDirectoryPage
+	}
+
+	absPath, err := filepath.Abs(request.Path)
 	if err != nil {
 		return "", err.Error()
 	}
-	entries, err := os.ReadDir(absPath)
+	handle, err := os.Open(absPath)
 	if err != nil {
 		return "", err.Error()
+	}
+	defer handle.Close() //nolint:errcheck
+	remaining := request.Offset
+	for remaining > 0 {
+		batch := 256
+		if remaining < batch {
+			batch = remaining
+		}
+		skipped, skipErr := handle.ReadDir(batch)
+		remaining -= len(skipped)
+		if skipErr == io.EOF {
+			break
+		}
+		if skipErr != nil {
+			return "", skipErr.Error()
+		}
+	}
+	entries, err := handle.ReadDir(request.Limit + 1)
+	if err != nil && err != io.EOF {
+		return "", err.Error()
+	}
+	more := len(entries) > request.Limit
+	if more {
+		entries = entries[:request.Limit]
 	}
 
 	result := fileBrowserResult{
@@ -452,6 +492,9 @@ func listDirectory(path string) (string, string) {
 		Parent:    parentDirectory(absPath),
 		Separator: string(os.PathSeparator),
 		Entries:   make([]fileBrowserEntry, 0, len(entries)),
+		Offset:    request.Offset,
+		Limit:     request.Limit,
+		More:      more,
 	}
 	for _, entry := range entries {
 		info, err := entry.Info()
@@ -490,6 +533,15 @@ type fileBrowserResult struct {
 	Parent    string             `json:"parent,omitempty"`
 	Separator string             `json:"separator"`
 	Entries   []fileBrowserEntry `json:"entries"`
+	Offset    int                `json:"offset,omitempty"`
+	Limit     int                `json:"limit,omitempty"`
+	More      bool               `json:"more,omitempty"`
+}
+
+type directoryRequest struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
 }
 
 type fileBrowserEntry struct {

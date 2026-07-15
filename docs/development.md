@@ -79,6 +79,8 @@ Pull the values from `config.env` or `agents/<label>.env`.
 | `--dns-domain` | server | Flag form. |
 | `SABLE_STATE_FILE` | server | Optional path for persisted operator state. Defaults to `sable-state.json`; set to `none`, `off`, or `disabled` to keep state in memory only. |
 | `--state-file` | server | Flag form for persisted operator state. |
+| `SABLE_STATE_KEY_FILE` | server | Optional file with a 32-byte raw or 64-character hex key for AES-256-GCM state/artifact encryption. |
+| `--state-key-file` | server / `sablectl` | Flag form. `sablectl install` creates the key when the requested file is missing and records custom state/key paths in its manifest. |
 | `--debug-addr` | server | Loopback-only pprof endpoint, e.g. `127.0.0.1:6060`. For diagnosing stalls. |
 
 ## Agent Profiles
@@ -103,7 +105,7 @@ Use a password file or env var. Avoid pasting the password into commands that en
 
 ## Local Secret Files
 
-Sable is meant to run locally, so generated state stays easy to inspect and recover. The tradeoff is that `config.env`, `agents/*.env`, `pw.txt`, `server.key`, built agents, and `sable-state.json` are sensitive local files. `sable-state.json` is plaintext and can include agent secrets, queued tasks, task output, artifacts, notes, tags, and audit history.
+Sable is meant to run locally, so state is plaintext by default. The tradeoff is that `config.env`, `agents/*.env`, `pw.txt`, `server.key`, built agents, `sable-state.json`, and `sable-state.json.artifacts/` are sensitive local files. Enable optional encryption during install with `sablectl install --state-key-file .sable/state.key ...`; keep that key in a separate backup because encrypted state cannot be recovered without it.
 
 Generated sensitive files are restricted when Sable writes them: Unix-like systems get owner-only modes, and Windows gets a protected ACL for the current user, Administrators, and SYSTEM. Run `sablectl doctor` after install, after moving files, or after changing workspace permissions; it warns when those files inherit broad permissions or grant access to unexpected principals. Run `sablectl doctor --fix-permissions` to harden existing generated files in place.
 
@@ -144,6 +146,7 @@ sablectl reset                        # wipe everything install created and star
 ```sh
 make test
 make test-integration
+node --test web/logic.test.cjs
 ```
 
 The integration suite is gated behind the `integration` build tag and skipped by `go test ./...`.

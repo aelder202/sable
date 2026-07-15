@@ -127,7 +127,7 @@ Set-Content -Encoding ascii -NoNewline .\pw.txt "yourpassword"
 
 `SABLE_OPERATOR_PASSWORD` and stdin both work too.
 
-By default the server persists operator state to `sable-state.json` in the working directory. That plaintext local file lets registered agents, queued tasks, output history, notes, tags, artifacts, and audit events survive a restart. It contains agent secrets and task output, so treat it like `config.env`. Sable tightens generated sensitive-file permissions; `sablectl doctor` warns about broad local ACLs/modes, and `sablectl doctor --fix-permissions` hardens existing generated files. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, or disable persistence with `--state-file none`.
+By default the server persists operator metadata to `sable-state.json` and large artifact bodies to `sable-state.json.artifacts/`. Registered agents, reliable queued/in-flight tasks, output history, notes, tags, artifacts, and audit events survive a restart. These files contain secrets and task output, so treat them like `config.env`. Sable tightens generated sensitive-file permissions; `sablectl doctor` warns about broad local ACLs/modes, certificate expiry, and invalid state keys. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, or disable persistence with `--state-file none`. Optional AES-256-GCM encryption is enabled with `--state-key-file <path>` / `SABLE_STATE_KEY_FILE`; `sablectl install --state-key-file .sable/state.key ...` creates and records a suitable key.
 
 The server prints its TLS fingerprint and listener status:
 

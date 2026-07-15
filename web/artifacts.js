@@ -3,9 +3,7 @@
 async function loadArtifacts(agentID) {
   if (!agentID || !token) return;
   try {
-    const resp = await apiFetch('/api/agents/' + agentID + '/artifacts');
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await apiFetchAll('/api/agents/' + agentID + '/artifacts');
     if (agentID !== activeAgentID) return;
     mergeServerArtifacts(Array.isArray(data) ? data.map(hydrateServerArtifact).filter(Boolean) : []);
     renderSessionPanels();
@@ -27,7 +25,8 @@ function mergeServerArtifacts(serverArtifacts) {
   artifactLibrary.forEach(item => {
     if (!seen.has(item.key)) merged.push(item);
   });
-  artifactLibrary = merged.slice(0, 64);
+	const retention = activeAgent && activeAgent.artifact_retention ? activeAgent.artifact_retention : 256;
+	artifactLibrary = merged.slice(0, retention);
 }
 
 function hydrateServerArtifact(item) {
@@ -54,6 +53,7 @@ function appendDownloadResult(taskID, short, ts, base64Value, historical, create
   const state = downloadTasks.get(taskID);
   const sourceName = state && state.filename ? state.filename : 'download.bin';
   const artifact = appendFileResult({
+	 taskID,
     short,
     ts,
     base64Value,
@@ -74,7 +74,7 @@ function appendDownloadResult(taskID, short, ts, base64Value, historical, create
   }
 }
 
-function appendArtifactResult(short, ts, payload, label, buttonLabel, historical, createdAt) {
+function appendArtifactResult(taskID, short, ts, payload, label, buttonLabel, historical, createdAt) {
   let result;
   try {
     result = JSON.parse(payload);
@@ -89,6 +89,7 @@ function appendArtifactResult(short, ts, payload, label, buttonLabel, historical
   }
 
   appendFileResult({
+	 taskID,
     short,
     ts,
     base64Value: result.data,
@@ -151,7 +152,7 @@ function rememberArtifact(options) {
   const artifact = {
     key,
     serverID: options.serverID || '',
-    taskID: options.short,
+    taskID: options.taskID || options.short,
     type: options.type || '',
     label: options.label,
     filename: options.filename,
@@ -164,7 +165,8 @@ function rememberArtifact(options) {
     serverSynced: Boolean(options.serverSynced),
   };
   artifactLibrary.unshift(artifact);
-  if (artifactLibrary.length > 64) artifactLibrary.pop();
+	const retention = activeAgent && activeAgent.artifact_retention ? activeAgent.artifact_retention : 256;
+	if (artifactLibrary.length > retention) artifactLibrary.length = retention;
   renderArtifactList();
   if (!artifact.serverSynced && artifact.base64Value) persistArtifact(artifact);
   return artifact;
@@ -212,8 +214,25 @@ function renderArtifactList() {
     row.dataset.artifactKey = item.key || '';
     row.appendChild(panelHint((item.serverSynced ? 'Server artifact' : 'Local artifact') + ' - ' + (item.archiveFilename || item.filename)));
     row.appendChild(panelButton('Save', () => saveArtifact(item)));
+	 if (item.serverID) row.appendChild(panelButton('Delete', () => deleteArtifact(item)));
     list.appendChild(row);
   });
+}
+
+async function deleteArtifact(item) {
+  if (!activeAgentID || !item || !item.serverID) return;
+  if (!window.confirm('Delete retained artifact ' + item.filename + '?')) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + activeAgentID + '/artifacts/' + encodeURIComponent(item.serverID), { method: 'DELETE' });
+    if (!resp.ok) {
+      appendOutput('[-] delete artifact failed (' + resp.status + ')', '', activeAgentID, 'error');
+      return;
+    }
+    artifactLibrary = artifactLibrary.filter(candidate => candidate !== item);
+    renderSessionPanels();
+  } catch (err) {
+    appendOutput('[-] delete artifact error: ' + err.message, '', activeAgentID, 'error');
+  }
 }
 
 async function saveArtifact(item) {

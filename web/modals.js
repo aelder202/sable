@@ -43,6 +43,7 @@ function handleFileBrowserOutput(output) {
   }
   if (!result || !Array.isArray(result.entries) || typeof result.path !== 'string') return false;
 
+	result = SableLogic.mergeDirectoryPage(fileBrowserResult, result);
   fileBrowserResult = result;
   fileBrowserPath = result.path;
   if (!$('file-browser-modal').hidden) {
@@ -260,6 +261,16 @@ function renderFileBrowser(result) {
     row.appendChild(actionCell);
     table.appendChild(row);
   });
+
+	if (result.more) {
+	  let more;
+	  more = fileBrowserButton('Load More', () => {
+		more.disabled = true;
+		queueFileBrowserPath(result.path, result.next_offset || result.entries.length);
+	  });
+	  more.className = 'file-browser-load-more';
+	  panel.appendChild(more);
+	}
 }
 
 function fileBrowserDownloadButton(entry) {
@@ -329,17 +340,18 @@ function fileBrowserButton(label, onClick) {
   return button;
 }
 
-async function queueFileBrowserPath(path) {
+async function queueFileBrowserPath(path, offset = 0) {
   if (!activeAgentID || taskRequestInFlight) return;
   fileBrowserPath = path;
   clearTaskInputError();
   hidePathSuggestions();
-  renderFileBrowserLoading(path);
+	if (!offset) renderFileBrowserLoading(path);
 
   const targetAgentID = activeAgentID;
   setQueueBusy(true, 'Browsing directory...');
   try {
-    const data = await submitTask(targetAgentID, { type: 'ls', payload: path });
+	const payload = JSON.stringify({ path, offset, limit: 250 });
+	const data = await submitTask(targetAgentID, { type: 'ls', payload });
     if (!data) renderFileBrowserError('Browse request failed.');
   } catch (err) {
     renderFileBrowserError(err.message);

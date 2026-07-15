@@ -51,7 +51,7 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: sablectl build build-windows-server build-server build-agent-linux build-agent-windows update-peas test test-integration gen-secret validate-openapi
+.PHONY: sablectl build build-windows-server build-server build-agent-linux build-agent-windows update-peas test test-web test-integration gen-secret validate-openapi
 
 ## Build the unified sablectl installer/operator helper.
 sablectl:
@@ -106,6 +106,9 @@ update-peas:
 
 test:
 	go test ./...
+
+test-web:
+	node --test web/logic.test.cjs
 
 test-integration:
 	go test -tags integration -v ./...

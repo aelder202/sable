@@ -189,10 +189,7 @@ function loginThrottleMessage(resp) {
 
 async function loadAgents() {
   try {
-    const resp = await apiFetch('/api/agents');
-    if (!resp.ok) return;
-
-    const agents = await resp.json();
+    const agents = await apiFetchAll('/api/agents');
     allAgents = Array.isArray(agents) ? agents.slice() : [];
     pruneSelectedAgents();
 
@@ -584,6 +581,9 @@ function selectAgent(agent) {
   closeClearConfirmModal();
   activeAgentID = agent.id;
   activeAgent = agent;
+	$('rekey-secret-output').hidden = true;
+	$('rekey-secret-output').textContent = '';
+	$('copy-rekey-secret-btn').hidden = true;
   seenTaskIDs = new Set();
   currentOutputs = [];
   outputsRequestID++;
@@ -647,6 +647,7 @@ function updateSessionHeader() {
   $('output-resizer').hidden = false;
   $('tag-input').value = (activeAgent.tags || []).join(', ');
   $('notes-input').value = activeAgent.notes || '';
+	$('artifact-retention-input').value = String(activeAgent.artifact_retention || 256);
   updateSessionWarning();
 
   if (!interactiveMode) applyTaskTypeUI();

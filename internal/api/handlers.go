@@ -1,12 +1,14 @@
 package api
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/aelder202/sable/internal/protocol"
@@ -29,6 +31,8 @@ const (
 	maxTaskBodyBytes       = maxUploadTaskPayloadBytes + 1024
 	maxArtifactBodyBytes   = 75 * 1024 * 1024
 	maxDNSTaskPayloadBytes = 8 * 1024
+	defaultPageSize        = 500
+	maxPageSize            = 500
 )
 
 // Router is the operator-facing HTTP handler with security middleware applied.
@@ -62,6 +66,7 @@ func agentsCollectionHandler(store *session.Store) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			agents := store.List()
+			agents = paginateResponse(w, r, agents)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(agents) //nolint:errcheck
 		case http.MethodPost:
@@ -124,12 +129,19 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 			return
 		}
 		if len(parts) == 1 {
-			if r.Method != http.MethodGet {
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(agent) //nolint:errcheck
+			case http.MethodDelete:
+				if !store.DeleteAgent(agentID) {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(agent) //nolint:errcheck
 			return
 		}
 		switch parts[1] {
@@ -147,9 +159,13 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 			getQueuedTasksHandler(store, agentID)(w, r)
 		case "metadata":
 			updateAgentMetadataHandler(store, agentID)(w, r)
+		case "rekey":
+			rekeyAgentHandler(store, agentID)(w, r)
 		case "artifacts":
 			if len(parts) == 2 {
 				artifactsHandler(store, agentID)(w, r)
+			} else if len(parts) == 3 && parts[2] == "retention" {
+				artifactRetentionHandler(store, agentID)(w, r)
 			} else if len(parts) == 3 {
 				getArtifactHandler(store, agentID, parts[2])(w, r)
 			} else {
@@ -232,7 +248,7 @@ func auditHandler(store *session.Store) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(store.AuditLog()) //nolint:errcheck
+		json.NewEncoder(w).Encode(paginateResponse(w, r, store.AuditLog())) //nolint:errcheck
 	}
 }
 
@@ -241,7 +257,7 @@ func taskOutputsHandler(store *session.Store, agentID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			outputs := store.GetOutputs(agentID)
+			outputs := paginateResponse(w, r, store.GetOutputs(agentID))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(outputs) //nolint:errcheck
 		case http.MethodDelete:
@@ -317,7 +333,7 @@ func artifactsHandler(store *session.Store, agentID string) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(store.ListArtifacts(agentID)) //nolint:errcheck
+			json.NewEncoder(w).Encode(paginateResponse(w, r, store.ListArtifacts(agentID))) //nolint:errcheck
 		case http.MethodPost:
 			createArtifactHandler(store, agentID, w, r)
 		default:
@@ -342,7 +358,11 @@ func createArtifactHandler(store *session.Store, agentID string, w http.Response
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	artifact, ok := store.AddArtifact(agentID, req)
+	artifact, ok, err := store.AddArtifactChecked(agentID, req)
+	if err != nil {
+		http.Error(w, "store artifact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -354,22 +374,109 @@ func createArtifactHandler(store *session.Store, agentID string, w http.Response
 
 func getArtifactHandler(store *session.Store, agentID, artifactID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 		if !agentIDRe.MatchString(artifactID) {
 			http.NotFound(w, r)
 			return
 		}
-		artifact, ok := store.GetArtifact(agentID, artifactID)
-		if !ok {
+		switch r.Method {
+		case http.MethodGet:
+			artifact, ok := store.GetArtifact(agentID, artifactID)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(artifact) //nolint:errcheck
+		case http.MethodDelete:
+			if !store.DeleteArtifact(agentID, artifactID) {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func rekeyAgentHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			http.Error(w, "could not generate secret", http.StatusInternalServerError)
+			return
+		}
+		if !store.RekeyAgent(agentID, secret) {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(artifact) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{
+			"id": agentID, "secret_hex": hex.EncodeToString(secret),
+		}) //nolint:errcheck
 	}
+}
+
+func artifactRetentionHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			MaxItems int `json:"max_items"`
+		}
+		if !decodeJSONBody(w, r, &req, 1024) {
+			return
+		}
+		if !store.SetArtifactRetention(agentID, req.MaxItems) {
+			http.Error(w, "max_items must be between 1 and 256", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func paginateResponse[T any](w http.ResponseWriter, r *http.Request, values []T) []T {
+	total := len(values)
+	limit := queryInt(r, "limit", defaultPageSize)
+	offset := queryInt(r, "offset", 0)
+	if limit < 1 {
+		limit = defaultPageSize
+	}
+	if limit > maxPageSize {
+		limit = maxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+	w.Header().Set("X-Limit", strconv.Itoa(limit))
+	w.Header().Set("X-Offset", strconv.Itoa(offset))
+	return values[offset:end]
+}
+
+func queryInt(r *http.Request, name string, fallback int) int {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func validateArtifact(artifact session.Artifact) error {

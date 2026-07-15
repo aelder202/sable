@@ -1,6 +1,9 @@
 package session_test
 
 import (
+	"bytes"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -269,7 +272,7 @@ func TestRecordOutputCapsHistory(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
 	for i := 0; i < 300; i++ {
-		s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t", Output: "x"})
+		s.RecordOutput("a1", &protocol.TaskResult{TaskID: fmt.Sprintf("t-%d", i), Output: "x"})
 	}
 	outs := s.GetOutputs("a1")
 	if len(outs) != 256 {
@@ -349,11 +352,18 @@ func TestPersistentStoreRoundTrip(t *testing.T) {
 	}); !ok {
 		t.Fatal("expected artifact save to find agent")
 	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("flush persistent state: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close persistent state: %v", err)
+	}
 
 	reloaded, err := session.NewPersistentStore(path)
 	if err != nil {
 		t.Fatalf("reload NewPersistentStore: %v", err)
 	}
+	t.Cleanup(func() { _ = reloaded.Close() })
 	agent, ok := reloaded.Get("a1")
 	if !ok {
 		t.Fatal("expected persisted agent after reload")
@@ -381,5 +391,107 @@ func TestPersistentStoreRoundTrip(t *testing.T) {
 	artifact, ok := reloaded.GetArtifact("a1", "artifact-1")
 	if !ok || artifact.Data != "aGVsbG8=" {
 		t.Fatalf("unexpected persisted artifact: %#v", artifact)
+	}
+}
+
+func TestTaskDeliveryRetriesUntilMatchingAcknowledgment(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
+	for _, task := range []*protocol.Task{
+		{ID: "task-1", Type: "shell", Payload: "one"},
+		{ID: "task-2", Type: "shell", Payload: "two"},
+	} {
+		if err := s.EnqueueTask("a1", task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := s.DeliverTask("a1")
+	retry := s.DeliverTask("a1")
+	if first == nil || retry == nil || first.ID != "task-1" || retry.ID != "task-1" {
+		t.Fatalf("lost-response retry did not redeliver first task: first=%+v retry=%+v", first, retry)
+	}
+	queued := s.GetQueuedTasks("a1")
+	if len(queued) != 2 || queued[0].Status != "in_flight" || queued[0].DeliveryAttempts != 2 {
+		t.Fatalf("unexpected delivery status: %+v", queued)
+	}
+
+	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "task-1", Type: "shell", Output: "done"})
+	if next := s.DeliverTask("a1"); next == nil || next.ID != "task-2" {
+		t.Fatalf("matching acknowledgment did not advance queue: %+v", next)
+	}
+	// A retried old result must not acknowledge the new in-flight task.
+	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "task-1", Type: "shell", Output: "done"})
+	if next := s.DeliverTask("a1"); next == nil || next.ID != "task-2" {
+		t.Fatalf("duplicate old result advanced queue: %+v", next)
+	}
+}
+
+func TestMaliciousChunkCountIsRejectedWithoutAssembly(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
+	complete := s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID: "malicious", Type: "download", Output: "x", ChunkIndex: 0, ChunkTotal: 1_000_000_000,
+	})
+	if !complete {
+		t.Fatal("invalid chunk metadata should produce a terminal error")
+	}
+	outputs := s.GetOutputs("a1")
+	if len(outputs) != 1 || !strings.Contains(outputs[0].Error, "chunk count") {
+		t.Fatalf("unexpected validation output: %+v", outputs)
+	}
+}
+
+func TestEncryptedStateAndArtifactBlobsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	key := bytes.Repeat([]byte{0x42}, 32)
+	s, err := session.NewPersistentStoreWithKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Register(&session.Agent{ID: "a1", Secret: bytes.Repeat([]byte{1}, 32)})
+	if _, ok, err := s.AddArtifactChecked("a1", session.Artifact{
+		ID: "artifact-1", Filename: "proof.txt", Data: "c2Vuc2l0aXZlLWRhdGE=",
+	}); err != nil || !ok {
+		t.Fatalf("store artifact: ok=%v err=%v", ok, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stateData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(stateData, []byte("a1")) || bytes.Contains(stateData, []byte("c2Vuc2l0aXZlLWRhdGE=")) {
+		t.Fatal("encrypted state leaked plaintext metadata or artifact content")
+	}
+	blobPath := filepath.Join(path+".artifacts", "a1", "artifact-1.blob")
+	blobData, err := os.ReadFile(blobPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(blobData, []byte("c2Vuc2l0aXZlLWRhdGE=")) {
+		t.Fatal("encrypted artifact blob leaked plaintext")
+	}
+	if _, err := session.NewPersistentStore(path); err == nil {
+		t.Fatal("encrypted state should require a key")
+	}
+
+	reloaded, err := session.NewPersistentStoreWithKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reloaded.Close() })
+	artifact, ok := reloaded.GetArtifact("a1", "artifact-1")
+	if !ok || artifact.Data != "c2Vuc2l0aXZlLWRhdGE=" {
+		t.Fatalf("unexpected reloaded artifact: %+v", artifact)
+	}
+	if !reloaded.DeleteArtifact("a1", "artifact-1") {
+		t.Fatal("expected persisted artifact deletion to succeed")
+	}
+	if _, err := os.Stat(blobPath); !os.IsNotExist(err) {
+		t.Fatalf("artifact blob still exists after deletion: %v", err)
 	}
 }

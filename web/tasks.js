@@ -762,7 +762,7 @@ function handlePathCompletionOutput(output) {
   }
 
   const items = Array.isArray(result.items) ? result.items : [];
-  renderPathSuggestions(pending.input, items, '');
+	renderPathSuggestions(pending.input, items, result.more ? 'Showing the first 200 matching paths. Refine the prefix for more.' : '');
 }
 
 function showPathSuggestionsLoading(path) {

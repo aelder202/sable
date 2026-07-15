@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Made task delivery acknowledgment-based with visible in-flight status, retry counts, idempotent results, and lost-response coverage for HTTPS and DNS.
+- Bounded result chunks, shell streams, growing downloads, path completion, remote directory pages, DNS request/response frames, and nonce-cache cleanup costs.
+- Added coalesced persistence, separate artifact blobs, graceful final flushes, optional AES-256-GCM state encryption, and manifest reuse for custom state/key paths.
+- Added paginated API collections, artifact deletion/retention, agent secret rotation/revocation, certificate-expiry warnings, and matching web controls.
+- Added race-detector, JavaScript, malicious-chunk, response-loss, DNS-boundary, encrypted-state, and vulnerability-scan coverage.
+
 ## 2.0.0 - 2026-04-28
 
 Sable 2.0 is a major operator-experience and tasking release. It expands the web console, adds setup and build workflows, introduces artifact-oriented results, and strengthens validation and result handling across agent, API, and listener paths.
@@ -70,4 +78,3 @@ Sable 2.0 is a major operator-experience and tasking release. It expands the web
 - Expanded web UI, CLI, REST API, configuration, and task reference documentation.
 - Added clear notes for embedded web assets, screenshot set expectations, and rebuild requirements.
 - Updated screenshots to match the current 2.0 UI.
-

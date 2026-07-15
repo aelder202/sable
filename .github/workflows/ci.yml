@@ -38,6 +38,19 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Race detector
+        run: go test -race ./...
+
+      - name: JavaScript syntax and unit tests
+        run: |
+          for file in web/*.js; do node --check "$file"; done
+          node --test web/logic.test.cjs
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       - name: Integration tests
         run: go test -tags integration -v ./...
 

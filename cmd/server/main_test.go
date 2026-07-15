@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +17,34 @@ func TestLoadOperatorPasswordFromEnv(t *testing.T) {
 	}
 	if password != "env-secret" {
 		t.Fatalf("unexpected password %q", password)
+	}
+}
+
+func TestLoadStateKeySupportsRawAndHex(t *testing.T) {
+	dir := t.TempDir()
+	raw := bytes.Repeat([]byte{0x5a}, 32)
+	rawPath := filepath.Join(dir, "raw.key")
+	if err := os.WriteFile(rawPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadStateKey(rawPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("raw state key: got=%x err=%v", got, err)
+	}
+	hexPath := filepath.Join(dir, "hex.key")
+	if err := os.WriteFile(hexPath, []byte(hex.EncodeToString(raw)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = loadStateKey(hexPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("hex state key: got=%x err=%v", got, err)
+	}
+	badPath := filepath.Join(dir, "bad.key")
+	if err := os.WriteFile(badPath, []byte("too-short"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadStateKey(badPath); err == nil {
+		t.Fatal("invalid state key should be rejected")
 	}
 }
 

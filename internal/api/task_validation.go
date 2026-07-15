@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -46,11 +47,8 @@ func validateTaskRequest(taskType, payload string) error {
 			return errors.New("completion path contains invalid characters")
 		}
 	case "ls":
-		if strings.TrimSpace(payload) == "" {
-			return errors.New("ls path required")
-		}
-		if hasDisallowedPathChars(payload) {
-			return errors.New("ls path contains invalid characters")
+		if err := validateDirectoryPayload(payload); err != nil {
+			return err
 		}
 	case "pathbrowse":
 		value := strings.TrimSpace(payload)
@@ -92,6 +90,34 @@ func validateTaskRequest(taskType, payload string) error {
 		return errors.New("invalid task type")
 	}
 
+	return nil
+}
+
+func validateDirectoryPayload(payload string) error {
+	value := strings.TrimSpace(payload)
+	if value == "" {
+		return errors.New("ls path required")
+	}
+	if !strings.HasPrefix(value, "{") {
+		if hasDisallowedPathChars(value) {
+			return errors.New("ls path contains invalid characters")
+		}
+		return nil
+	}
+	var request struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(value), &request); err != nil {
+		return errors.New("invalid ls page request")
+	}
+	if hasDisallowedPathChars(strings.TrimSpace(request.Path)) {
+		return errors.New("ls path contains invalid characters")
+	}
+	if request.Offset < 0 || request.Offset > 1_000_000 || request.Limit < 0 || request.Limit > 500 {
+		return errors.New("invalid ls page bounds")
+	}
 	return nil
 }
 

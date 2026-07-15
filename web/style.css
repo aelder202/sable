@@ -250,7 +250,8 @@ kbd {
 #send-btn.danger-button,
 #clear-confirm-btn,
 #kill-confirm-btn,
-#cancel-task-btn {
+#cancel-task-btn,
+#revoke-agent-btn {
   border-color: var(--danger);
   background: var(--danger-bg);
   color: #ffd9d6;
@@ -1554,6 +1555,30 @@ kbd {
 
 .panel-form.compact {
   flex: 0 0 auto;
+}
+
+.artifact-retention-controls {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+  padding-bottom: 10px;
+}
+
+#artifact-retention-input {
+  max-width: 100px;
+}
+
+.rekey-secret-output {
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+  padding: 8px;
+  user-select: all;
+}
+
+.file-browser-load-more {
+  flex: 0 0 auto;
+  margin: 10px;
 }
 
 #notes-input {

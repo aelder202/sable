@@ -12,7 +12,9 @@ The Task Builder groups actions by command, situational awareness, file handling
 
 Select sessions in the left sidebar to queue supported tasks across multiple sessions at once. Bulk queueing is available for Shell, Processes, Screenshot, Snapshot, Persistence, PEAS, and Sleep; file transfer, Interactive, and Kill remain single-session actions.
 
-Session metadata and saved results open from **Session Details**. The default Timeline view combines queued jobs, running work, completed results, artifacts, and audit events for the selected session. Use the detail filter or tabs to focus on Jobs, Artifacts, Notes, or Audit.
+Session metadata and saved results open from **Session Details**. The default Timeline view combines queued jobs, in-flight delivery attempts, running work, completed results, artifacts, and audit events for the selected session. Use the detail filter or tabs to focus on Jobs, Artifacts, Notes, or Audit. The Artifacts panel supports deletion and a 1â€“256 item retention limit. The Notes panel also exposes secret rotation and permanent agent revocation; rotating a secret requires rebuilding or reconfiguring that agent.
+
+The remote file browser returns directories in bounded pages. Use **Load More** for large directories; path completion shows at most 200 matches and asks you to refine the prefix when more exist.
 
 When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
 

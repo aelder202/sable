@@ -191,6 +191,59 @@ func TestPasswordFileOrManifestPrefersExplicit(t *testing.T) {
 	}
 }
 
+func TestURLValidationRejectsUnsafeOrigins(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:443",
+		"https://user:pass@127.0.0.1:443",
+		"https://127.0.0.1:443/path",
+		"https://127.0.0.1:443?x=1",
+	} {
+		if err := validateAgentServerURL(raw); err == nil {
+			t.Fatalf("validateAgentServerURL(%q) unexpectedly succeeded", raw)
+		}
+	}
+	if err := validateAgentServerURL("https://10.0.0.5:443"); err != nil {
+		t.Fatalf("valid agent origin rejected: %v", err)
+	}
+	if err := requireLoopbackAPIURL("https://example.com:8443"); err == nil {
+		t.Fatal("remote API URL should be rejected while TLS verification is disabled")
+	}
+	if err := requireLoopbackAPIURL("https://[::1]:8443"); err != nil {
+		t.Fatalf("loopback API rejected: %v", err)
+	}
+}
+
+func TestRunStartReusesManifestStatePaths(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(serverBinary(runtime.GOOS), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("pw.txt", []byte("password"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureStateKeyFile(filepath.FromSlash("secure/state.key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveManifest(manifest{
+		State: filepath.FromSlash("data/custom-state.json"), StateKeyFile: filepath.FromSlash("secure/state.key"), PasswordFile: "pw.txt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgs []string
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}}
+	if err := runStart(nil, runner, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "--state-file "+filepath.FromSlash("data/custom-state.json")) ||
+		!strings.Contains(joined, "--state-key-file "+filepath.FromSlash("secure/state.key")) {
+		t.Fatalf("start did not reuse manifest paths: %v", gotArgs)
+	}
+}
+
 func TestNextStepsAfterInstallIncludesRegistration(t *testing.T) {
 	t.Run("install only", func(t *testing.T) {
 		got := nextStepsAfterInstall(installConfig{PasswordFile: "pw.txt"}, false)

@@ -182,6 +182,47 @@ func TestTaskDeliveredOnBeacon(t *testing.T) {
 	}
 }
 
+func TestTaskIsRedeliveredAfterResponseLossUntilAcknowledged(t *testing.T) {
+	h, store := newTestSetup(t)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "t1", Type: "shell", Payload: "whoami"}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := postBeacon(t, h, makeBeacon(t, "agent-1", testSecret, time.Now().Unix()))
+	second := postBeacon(t, h, makeBeacon(t, "agent-1", testSecret, time.Now().Unix()))
+	for i, response := range []*httptest.ResponseRecorder{first, second} {
+		task, err := protocol.DecodeTask(response.Body.Bytes(), testSecret)
+		if err != nil || task.ID != "t1" {
+			t.Fatalf("response %d did not redeliver task: task=%+v err=%v", i+1, task, err)
+		}
+	}
+
+	ack := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{TaskID: "t1", Type: "shell", Output: "user"})
+	response := postBeacon(t, h, ack)
+	task, err := protocol.DecodeTask(response.Body.Bytes(), testSecret)
+	if err != nil || task.Type != "noop" {
+		t.Fatalf("acknowledged task should leave a noop response: task=%+v err=%v", task, err)
+	}
+	if queued := store.GetQueuedTasks("agent-1"); len(queued) != 0 {
+		t.Fatalf("acknowledged task remained queued: %+v", queued)
+	}
+}
+
+func TestMaliciousResultChunkTotalReturnsBoundedError(t *testing.T) {
+	h, store := newTestSetup(t)
+	body := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
+		TaskID: "bad-chunks", Type: "download", Output: "x", ChunkIndex: 0, ChunkTotal: 1_000_000_000,
+	})
+	response := postBeacon(t, h, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected terminal response, got %d", response.Code)
+	}
+	outputs := store.GetOutputs("agent-1")
+	if len(outputs) != 1 || !strings.Contains(outputs[0].Error, "chunk count") {
+		t.Fatalf("unexpected validation result: %+v", outputs)
+	}
+}
+
 func TestLargeChunkedOutputAccepted(t *testing.T) {
 	h, store := newTestSetup(t)
 	body := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{

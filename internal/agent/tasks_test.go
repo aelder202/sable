@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,6 +43,52 @@ func TestCompletePathReturnsDirectoryMatches(t *testing.T) {
 	}
 	if result.Common != filepath.Join(root, "sa") {
 		t.Fatalf("unexpected common prefix %q", result.Common)
+	}
+}
+
+func TestListDirectorySupportsBoundedPages(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 7; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file-%02d.txt", i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request, _ := json.Marshal(directoryRequest{Path: root, Offset: 0, Limit: 3})
+	output, taskErr := listDirectory(string(request))
+	if taskErr != "" {
+		t.Fatal(taskErr)
+	}
+	var first fileBrowserResult
+	if err := json.Unmarshal([]byte(output), &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries) != 3 || !first.More || first.Offset != 0 || first.Limit != 3 {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	request, _ = json.Marshal(directoryRequest{Path: root, Offset: 3, Limit: 3})
+	output, taskErr = listDirectory(string(request))
+	if taskErr != "" {
+		t.Fatal(taskErr)
+	}
+	var second fileBrowserResult
+	if err := json.Unmarshal([]byte(output), &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Entries) != 3 || !second.More || second.Offset != 3 || second.Entries[0].Name == first.Entries[0].Name {
+		t.Fatalf("unexpected second page: %+v", second)
+	}
+}
+
+func TestReadBoundedShellLineDrainsOversizedLine(t *testing.T) {
+	input := strings.Repeat("x", 128*1024) + "\nnext\n"
+	reader := bufio.NewReaderSize(strings.NewReader(input), 1024)
+	line, truncated, err := readBoundedShellLine(reader, 64)
+	if err != nil || !truncated || len(line) != 64 {
+		t.Fatalf("unexpected bounded line: len=%d truncated=%v err=%v", len(line), truncated, err)
+	}
+	next, truncated, err := readBoundedShellLine(reader, 64)
+	if err != nil || truncated || next != "next\n" {
+		t.Fatalf("oversized line was not fully drained: %q truncated=%v err=%v", next, truncated, err)
 	}
 }
 

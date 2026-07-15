@@ -13,14 +13,15 @@ type entry struct {
 // Cache is a concurrency-safe nonce store with TTL-based expiry.
 // It is used to detect and reject replayed beacon nonces.
 type Cache struct {
-	mu  sync.Mutex
-	ttl time.Duration
-	m   map[string]entry
+	mu        sync.Mutex
+	ttl       time.Duration
+	m         map[string]entry
+	nextSweep time.Time
 }
 
 // NewCache creates a Cache where nonces expire after ttl.
 func NewCache(ttl time.Duration) *Cache {
-	return &Cache{ttl: ttl, m: make(map[string]entry)}
+	return &Cache{ttl: ttl, m: make(map[string]entry), nextSweep: time.Now().Add(sweepInterval(ttl))}
 }
 
 // Seen reports whether n has been added and has not yet expired.
@@ -63,9 +64,24 @@ func (c *Cache) SeenOrAdd(n []byte) bool {
 // evict removes all expired entries. Must be called with c.mu held.
 func (c *Cache) evict() {
 	now := time.Now()
+	if now.Before(c.nextSweep) {
+		return
+	}
 	for k, e := range c.m {
 		if now.After(e.expiresAt) {
 			delete(c.m, k)
 		}
 	}
+	c.nextSweep = now.Add(sweepInterval(c.ttl))
+}
+
+func sweepInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 4
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > time.Minute {
+		return time.Minute
+	}
+	return interval
 }

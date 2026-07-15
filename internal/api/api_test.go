@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,69 @@ func setupAPI(t *testing.T) (*api.Router, *session.Store) {
 		JWTSecret:            []byte(testJWTSecret),
 	}
 	return api.NewRouter(store, cfg), store
+}
+
+func TestAgentLifecycleAndArtifactControls(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	headers := map[string]string{"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+
+	rekey := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/rekey", nil, headers)
+	if rekey.Code != http.StatusOK {
+		t.Fatalf("rekey status = %d: %s", rekey.Code, rekey.Body.String())
+	}
+	var rotated map[string]string
+	if err := json.NewDecoder(rekey.Body).Decode(&rotated); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := hex.DecodeString(rotated["secret_hex"])
+	if err != nil || len(decoded) != 32 {
+		t.Fatalf("invalid rotated secret: %q", rotated["secret_hex"])
+	}
+	stored, ok := store.Secret("agent-1")
+	if !ok || !bytes.Equal(stored, decoded) {
+		t.Fatal("rotated secret was not stored")
+	}
+
+	if _, ok := store.AddArtifact("agent-1", session.Artifact{ID: "artifact-1", Filename: "proof.txt", Data: "aGVsbG8="}); !ok {
+		t.Fatal("failed to seed artifact")
+	}
+	retention := doRequest(t, router, http.MethodPut, "/api/agents/agent-1/artifacts/retention", []byte(`{"max_items":1}`), headers)
+	if retention.Code != http.StatusNoContent {
+		t.Fatalf("retention status = %d: %s", retention.Code, retention.Body.String())
+	}
+	deletedArtifact := doRequest(t, router, http.MethodDelete, "/api/agents/agent-1/artifacts/artifact-1", nil, headers)
+	if deletedArtifact.Code != http.StatusNoContent {
+		t.Fatalf("delete artifact status = %d", deletedArtifact.Code)
+	}
+
+	deletedAgent := doRequest(t, router, http.MethodDelete, "/api/agents/agent-1", nil, headers)
+	if deletedAgent.Code != http.StatusNoContent {
+		t.Fatalf("delete agent status = %d", deletedAgent.Code)
+	}
+	if _, ok := store.Get("agent-1"); ok {
+		t.Fatal("revoked agent still exists")
+	}
+}
+
+func TestCollectionPaginationHeadersAndSlices(t *testing.T) {
+	router, store := setupAPI(t)
+	store.Register(&session.Agent{ID: "agent-2", Secret: []byte("secret")})
+	store.Register(&session.Agent{ID: "agent-3", Secret: []byte("secret")})
+	token := loginAndGetToken(t, router)
+	w := doRequest(t, router, http.MethodGet, "/api/agents?limit=1&offset=1", nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusOK || w.Header().Get("X-Total-Count") != "3" || w.Header().Get("X-Limit") != "1" || w.Header().Get("X-Offset") != "1" {
+		t.Fatalf("unexpected pagination response: status=%d headers=%v", w.Code, w.Header())
+	}
+	var agents []session.Agent
+	if err := json.NewDecoder(w.Body).Decode(&agents); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].ID != "agent-2" {
+		t.Fatalf("unexpected page: %+v", agents)
+	}
 }
 
 // doRequest performs an in-process HTTP request against the router using httptest.NewRecorder.

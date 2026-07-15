@@ -146,7 +146,7 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var task *protocol.Task
 	if outputComplete {
-		task = h.store.DequeueTask(beacon.AgentID)
+		task = h.store.DeliverTask(beacon.AgentID)
 	}
 	if task == nil {
 		task = &protocol.Task{Type: "noop"}

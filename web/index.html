@@ -281,6 +281,13 @@
                 </section>
                 <section id="artifacts-panel" class="session-panel" role="tabpanel" hidden>
                   <h5>Artifacts</h5>
+				  <div class="panel-form compact artifact-retention-controls">
+					<label class="field-label" for="artifact-retention-input">Retain newest artifacts</label>
+					<div class="inline-row">
+					  <input id="artifact-retention-input" type="number" min="1" max="256" value="256">
+					  <button id="save-artifact-retention-btn" type="button">Apply</button>
+					</div>
+				  </div>
                   <div id="artifact-list" class="panel-list"></div>
                 </section>
                 <section id="notes-panel" class="session-panel" role="tabpanel" hidden>
@@ -292,6 +299,16 @@
                     <textarea id="notes-input" placeholder="Session notes"></textarea>
                     <button id="save-metadata-btn" type="button">Save Notes</button>
                   </div>
+				  <h5>Agent Identity</h5>
+				  <div class="panel-form compact">
+					<p class="panel-hint">Rotating the secret requires rebuilding or reconfiguring the agent. Revocation permanently removes its server-side state.</p>
+					<div class="inline-row">
+					  <button id="rekey-agent-btn" type="button">Rotate Secret</button>
+					  <button id="revoke-agent-btn" class="danger-button" type="button">Revoke Agent</button>
+					</div>
+					<code id="rekey-secret-output" class="rekey-secret-output" hidden></code>
+					<button id="copy-rekey-secret-btn" type="button" hidden>Copy New Secret</button>
+				  </div>
                 </section>
                 <section id="audit-panel" class="session-panel" role="tabpanel" hidden>
                   <h5>Audit</h5>
@@ -364,7 +381,8 @@
   </div>
 
   <input type="file" id="upload-file-input">
-  <script src="/api.js"></script>
+	<script src="/logic.js"></script>
+	<script src="/api.js"></script>
   <script src="/sessions.js"></script>
   <script src="/tasks.js"></script>
   <script src="/artifacts.js"></script>

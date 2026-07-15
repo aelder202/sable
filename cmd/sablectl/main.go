@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,7 @@ const (
 type manifest struct {
 	Config       string            `json:"config,omitempty"`
 	State        string            `json:"state,omitempty"`
+	StateKeyFile string            `json:"state_key_file,omitempty"`
 	Cert         string            `json:"cert,omitempty"`
 	Key          string            `json:"key,omitempty"`
 	PasswordFile string            `json:"password_file,omitempty"`
@@ -157,18 +159,25 @@ type installConfig struct {
 	PasswordFile string
 	APIURL       string
 	StatePath    string
+	StateKeyPath string
 }
 
 func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) error {
+	m := loadManifestOrDefault()
+	statePath := m.State
+	if statePath == "" {
+		statePath = defaultStatePath
+	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cfg := installConfig{
-		Label:       defaultAgentLabel,
-		Agents:      "linux",
-		BuildServer: true,
-		Register:    true,
-		APIURL:      defaultAPIURL,
-		StatePath:   defaultStatePath,
+		Label:        defaultAgentLabel,
+		Agents:       "linux",
+		BuildServer:  true,
+		Register:     true,
+		APIURL:       defaultAPIURL,
+		StatePath:    statePath,
+		StateKeyPath: m.StateKeyFile,
 	}
 	fs.StringVar(&cfg.ServerURL, "url", "", "agent listener URL, for example https://10.0.0.5:443")
 	fs.StringVar(&cfg.ServerURL, "server-url", "", "alias for --url")
@@ -184,6 +193,7 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	fs.StringVar(&cfg.PasswordFile, "password-file", "", "operator password file to create or use")
 	fs.StringVar(&cfg.APIURL, "api", cfg.APIURL, "operator API URL for registration")
 	fs.StringVar(&cfg.StatePath, "state-file", cfg.StatePath, "server state file")
+	fs.StringVar(&cfg.StateKeyPath, "state-key-file", cfg.StateKeyPath, "optional state encryption key file (created when missing)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -193,8 +203,15 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	if !validAgentTarget(cfg.Agents) {
 		return fmt.Errorf("invalid --agents %q", cfg.Agents)
 	}
+	if err := requireLoopbackAPIURL(cfg.APIURL); err != nil {
+		return err
+	}
+	if cfg.StateKeyPath != "" {
+		if err := ensureStateKeyFile(cfg.StateKeyPath); err != nil {
+			return err
+		}
+	}
 
-	m := loadManifestOrDefault()
 	primary, created, err := ensurePrimaryConfig(cfg)
 	if err != nil {
 		return err
@@ -204,8 +221,9 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 		m.Cert = "server.crt"
 		m.Key = "server.key"
 	}
-	if m.State == "" {
-		m.State = cfg.StatePath
+	m.State = cfg.StatePath
+	if cfg.StateKeyPath != "" {
+		m.StateKeyFile = cfg.StateKeyPath
 	}
 	addAgentPath(&m, "config.env", primary.Target)
 
@@ -248,7 +266,7 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 			return errors.New("--start requires --password-file or --password")
 		}
 		logPath := filepath.Join(".sable", "server.log")
-		if err := startServer(runner, serverBinary(runtime.GOOS), cfg.PasswordFile, password, cfg.StatePath, logPath); err != nil {
+		if err := startServer(runner, serverBinary(runtime.GOOS), cfg.PasswordFile, password, cfg.StatePath, cfg.StateKeyPath, logPath); err != nil {
 			return err
 		}
 		addUnique(&m.Logs, logPath)
@@ -294,7 +312,7 @@ func ensurePrimaryConfig(cfg installConfig) (agentConfig, bool, error) {
 	if serverURL == "" {
 		return agentConfig{}, false, errors.New("--url is required when config.env does not exist")
 	}
-	if _, err := url.ParseRequestURI(serverURL); err != nil {
+	if err := validateAgentServerURL(serverURL); err != nil {
 		return agentConfig{}, false, fmt.Errorf("invalid --url: %w", err)
 	}
 	label := strings.TrimSpace(cfg.Label)
@@ -399,11 +417,17 @@ func ensureAdditionalAgent(primary agentConfig, label, target string) (agentConf
 }
 
 func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) error {
+	m := loadManifestOrDefault()
+	statePath := m.State
+	if statePath == "" {
+		statePath = defaultStatePath
+	}
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	passwordFile := fs.String("password-file", "", "operator password file")
 	password := fs.String("password", "", "operator password")
-	stateFile := fs.String("state-file", defaultStatePath, "server state file")
+	stateFile := fs.String("state-file", statePath, "server state file")
+	stateKeyFile := fs.String("state-key-file", m.StateKeyFile, "optional state encryption key file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -414,8 +438,14 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	if _, err := os.Stat(binary); err != nil {
 		return fmt.Errorf("%s not found; run sablectl rebuild --server-only", binary)
 	}
-	resolvedFile := passwordFileOrManifest(*passwordFile, loadManifestOrDefault())
+	resolvedFile := passwordFileOrManifest(*passwordFile, m)
 	args = []string{"--state-file", *stateFile}
+	if strings.TrimSpace(*stateKeyFile) != "" {
+		if err := validateExistingStateKeyFile(*stateKeyFile); err != nil {
+			return err
+		}
+		args = append(args, "--state-key-file", *stateKeyFile)
+	}
 	env := []string{}
 	switch {
 	case resolvedFile != "":
@@ -538,6 +568,9 @@ func runAgentRegister(args []string, stdout io.Writer) error {
 	}
 	if len(positional) > 1 {
 		return errors.New("usage: sablectl agent register [label|all] --password-file ./pw.txt")
+	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
 	}
 	selector := "all"
 	if len(positional) == 1 {
@@ -716,7 +749,7 @@ func runReset(args []string, stdout io.Writer) error {
 	if m, err := loadManifest(); err == nil {
 		targets = append(targets, m.Config, m.Cert, m.Key, m.PasswordFile)
 		if !*keepState {
-			targets = append(targets, m.State)
+			targets = append(targets, m.State, m.StateKeyFile)
 		}
 		targets = append(targets, m.Agents...)
 		targets = append(targets, m.Builds...)
@@ -807,6 +840,9 @@ func runDoctor(args []string, runner commandRunner, stdout io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
+	}
 	checks := []doctorCheck{
 		checkGo(runner),
 		checkPort("agent https", "tcp", ":443"),
@@ -869,7 +905,7 @@ func buildAgent(runner commandRunner, agent agentConfig, target string, stdout, 
 	return out, nil
 }
 
-func startServer(runner commandRunner, binary, passwordFile, password, statePath, logPath string) error {
+func startServer(runner commandRunner, binary, passwordFile, password, statePath, stateKeyPath, logPath string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
 		return err
 	}
@@ -879,6 +915,9 @@ func startServer(runner commandRunner, binary, passwordFile, password, statePath
 	}
 	defer logFile.Close()
 	args := []string{"--state-file", statePath}
+	if stateKeyPath != "" {
+		args = append(args, "--state-key-file", stateKeyPath)
+	}
 	env := []string{}
 	if passwordFile != "" {
 		args = append(args, "--password-file", passwordFile)
@@ -935,6 +974,9 @@ func apiClient() *http.Client {
 }
 
 func login(client *http.Client, apiURL, password string) (string, error) {
+	if err := requireLoopbackAPIURL(apiURL); err != nil {
+		return "", err
+	}
 	body, _ := json.Marshal(map[string]string{"password": password})
 	resp, err := client.Post(strings.TrimRight(apiURL, "/")+"/api/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1004,6 +1046,9 @@ func registerAgent(client *http.Client, apiURL, token, agentID, secretHex string
 }
 
 func apiReachable(apiURL string) bool {
+	if requireLoopbackAPIURL(apiURL) != nil {
+		return false
+	}
 	client := apiClient()
 	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/")
 	if err != nil {
@@ -1011,6 +1056,93 @@ func apiReachable(apiURL string) bool {
 	}
 	resp.Body.Close()
 	return true
+}
+
+func requireLoopbackAPIURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid API URL: %w", err)
+	}
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("API URL must be an HTTPS loopback origin without credentials, path, query, or fragment")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("refusing insecure TLS verification for non-loopback API host %q", host)
+	}
+	return nil
+}
+
+func validateAgentServerURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" || u.Hostname() == "" {
+		return errors.New("agent URL must be an absolute https:// origin")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("agent URL must not include credentials, a path, query, or fragment")
+	}
+	return nil
+}
+
+func ensureStateKeyFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return validateAndRestrictStateKey(path, data)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read state key file: %w", err)
+	}
+	key, err := randomHex(32)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+	}
+	if err := securefile.WriteFile(path, []byte(key+"\n")); err != nil {
+		return fmt.Errorf("create state key file: %w", err)
+	}
+	return nil
+}
+
+func validateExistingStateKeyFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read state key file: %w", err)
+	}
+	return validateAndRestrictStateKey(path, data)
+}
+
+func validateAndRestrictStateKey(path string, data []byte) error {
+	if !validStateKeyData(data) {
+		return fmt.Errorf("%s must contain 32 raw bytes or 64 hexadecimal characters", path)
+	}
+	return securefile.Restrict(path)
+}
+
+func validStateKeyData(data []byte) bool {
+	if len(data) == 32 {
+		return true
+	}
+	decoded, err := hex.DecodeString(strings.TrimSpace(string(data)))
+	return err == nil && len(decoded) == 32
 }
 
 func waitForAPI(apiURL string, timeout time.Duration) {
@@ -1264,7 +1396,7 @@ func cleanList(values []string) []string {
 func manifestTargets(m manifest, keepState bool) []string {
 	targets := []string{m.Config, m.Cert, m.Key, m.PasswordFile}
 	if !keepState {
-		targets = append(targets, m.State)
+		targets = append(targets, m.State, m.StateKeyFile)
 	}
 	targets = append(targets, m.Agents...)
 	targets = append(targets, m.Builds...)
@@ -1392,7 +1524,7 @@ func newestModTime(paths []string) time.Time {
 
 func printInstallSummary(out io.Writer, m manifest, changed []string, registered bool, cfg installConfig) {
 	fmt.Fprintln(out, "artifacts:")
-	for _, path := range cleanList(append([]string{m.Config, m.Cert, m.Key, m.PasswordFile}, append(m.Agents, changed...)...)) {
+	for _, path := range cleanList(append([]string{m.Config, m.State, m.StateKeyFile, m.Cert, m.Key, m.PasswordFile}, append(m.Agents, changed...)...)) {
 		if path != "" {
 			fmt.Fprintf(out, "  %s\n", filepath.ToSlash(path))
 		}
@@ -1656,7 +1788,18 @@ func checkCertConfigMatch() doctorCheck {
 	if !strings.EqualFold(agent.CertFPHex, fp) {
 		return doctorCheck{Name: "cert", Err: "config.env fingerprint does not match server.crt"}
 	}
-	return doctorCheck{Name: "cert", Message: "fingerprint matches config.env"}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return doctorCheck{Name: "cert", Err: err.Error()}
+	}
+	remaining := time.Until(leaf.NotAfter)
+	if remaining <= 0 {
+		return doctorCheck{Name: "cert", Err: "certificate expired " + leaf.NotAfter.Format(time.RFC3339)}
+	}
+	if remaining <= 30*24*time.Hour {
+		return doctorCheck{Name: "cert", Message: "fingerprint matches; expires " + leaf.NotAfter.Format(time.RFC3339), Warn: true}
+	}
+	return doctorCheck{Name: "cert", Message: "fingerprint matches; expires " + leaf.NotAfter.Format(time.RFC3339)}
 }
 
 func checkStateWritable() doctorCheck {
@@ -1675,7 +1818,18 @@ func checkStateWritable() doctorCheck {
 	if err := securefile.Restrict(path); err != nil {
 		return doctorCheck{Name: "state", Err: err.Error()}
 	}
-	return doctorCheck{Name: "state", Message: filepath.ToSlash(path) + " writable"}
+	message := filepath.ToSlash(path) + " writable"
+	if m.StateKeyFile != "" {
+		keyData, err := os.ReadFile(m.StateKeyFile)
+		if err != nil {
+			return doctorCheck{Name: "state", Err: "state key: " + err.Error()}
+		}
+		if !validStateKeyData(keyData) {
+			return doctorCheck{Name: "state", Err: "state key must contain 32 raw bytes or 64 hexadecimal characters"}
+		}
+		message += "; encryption key valid"
+	}
+	return doctorCheck{Name: "state", Message: message}
 }
 
 func checkSensitivePermissions(fix bool) doctorCheck {
@@ -1717,7 +1871,7 @@ func checkSensitivePermissions(fix bool) doctorCheck {
 }
 
 func sensitiveLocalPaths(m manifest) []string {
-	paths := []string{m.Config, m.State, m.Cert, m.Key, m.PasswordFile, manifestPath}
+	paths := []string{m.Config, m.State, m.StateKeyFile, m.Cert, m.Key, m.PasswordFile, manifestPath}
 	paths = append(paths, m.Agents...)
 	paths = append(paths, m.Builds...)
 	return cleanList(paths)
