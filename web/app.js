@@ -94,7 +94,7 @@ let taskTypeSearchInput = null;
 
 const MAX_LOGIN_BODY_BYTES = 4096;
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
 
 const MAX_SLEEP_SECONDS = 24 * 60 * 60;
 

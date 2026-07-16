@@ -56,11 +56,31 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 	chunks := listener.ChunkForDNS(body)
 	client := &mdns.Client{Net: "udp", Timeout: time.Second, UDPSize: 4096}
 
+	// A complete set of chunks with tags from the wrong secret must not create
+	// reassembly state or process the beacon.
+	wrongSecret := []byte("00000000000000000000000000000000")
+	for i, chunk := range chunks {
+		msg := new(mdns.Msg)
+		qname := dnsBeaconQName(chunk, i, len(chunks), "1111111111111111", "agent-1", wrongSecret, domain)
+		msg.SetQuestion(qname, mdns.TypeA)
+		msg.SetEdns0(4096, false)
+		resp, _, err := client.Exchange(msg, pc.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("invalid DNS exchange chunk %d: %v", i, err)
+		}
+		if len(resp.Answer) != 0 {
+			t.Fatalf("invalid chunk %d received an answer", i)
+		}
+	}
+	if agent, _ := store.Get("agent-1"); !agent.LastSeen.IsZero() {
+		t.Fatal("invalid DNS chunk tags mutated the agent session")
+	}
+
 	var finalResp *mdns.Msg
 	var finalQName string
 	for i, chunk := range chunks {
 		msg := new(mdns.Msg)
-		finalQName = dnsBeaconQName(chunk, i, len(chunks), "0123456789abcdef", "agent-1", domain)
+		finalQName = dnsBeaconQName(chunk, i, len(chunks), "0000000000000000", "agent-1", testSecret, domain)
 		msg.SetQuestion(finalQName, mdns.TypeA)
 		msg.SetEdns0(4096, false)
 		msg.RecursionDesired = false
@@ -83,7 +103,8 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 	encodedTask := append([]byte(nil), first...)
 	for index := 1; index < totalResponses; index++ {
 		msg := new(mdns.Msg)
-		qname := "r." + padDNSNumber(index) + ".0123456789abcdef.agent-1." + domain
+		authTag := protocol.DNSResponseAuthTag(testSecret, "0000000000000000", "agent-1", index)
+		qname := "r." + padDNSNumber(index) + ".0000000000000000.agent-1." + authTag + "." + domain
 		msg.SetQuestion(qname, mdns.TypeTXT)
 		msg.SetEdns0(4096, false)
 		resp, _, err := client.Exchange(msg, pc.LocalAddr().String())
@@ -162,13 +183,15 @@ func decodeDNSFrame(t *testing.T, message *mdns.Msg) ([]byte, int) {
 	return nil, 0
 }
 
-func dnsBeaconQName(chunk []byte, idx, total int, sessionID, agentID, domain string) string {
+func dnsBeaconQName(chunk []byte, idx, total int, sessionID, agentID string, secret []byte, domain string) string {
 	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(chunk))
+	authTag := protocol.DNSChunkAuthTag(secret, sessionID, agentID, idx, total, chunk)
 	return encoded + "." +
 		padDNSNumber(idx) + "." +
 		padDNSNumber(total) + "." +
 		sessionID + "." +
 		agentID + "." +
+		authTag + "." +
 		domain
 }
 

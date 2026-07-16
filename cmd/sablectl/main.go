@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,30 +28,33 @@ import (
 	"github.com/aelder202/sable/internal/listener"
 	"github.com/aelder202/sable/internal/operatorpw"
 	"github.com/aelder202/sable/internal/securefile"
+	"github.com/aelder202/sable/internal/tlspin"
 	"github.com/google/uuid"
 )
 
 const (
-	modulePath        = "github.com/aelder202/sable"
-	manifestPath      = ".sable/install.json"
-	defaultStatePath  = "sable-state.json"
-	defaultAPIURL     = "https://127.0.0.1:8443"
-	defaultServerURL  = "https://127.0.0.1:443"
-	defaultAgentLabel = "main"
+	modulePath          = "github.com/aelder202/sable"
+	manifestPath        = ".sable/install.json"
+	defaultStatePath    = "sable-state.json"
+	defaultStateKeyPath = ".sable/state.key"
+	defaultAPIURL       = "https://127.0.0.1:8443"
+	defaultServerURL    = "https://127.0.0.1:443"
+	defaultAgentLabel   = "main"
 )
 
 type manifest struct {
-	Config       string            `json:"config,omitempty"`
-	State        string            `json:"state,omitempty"`
-	StateKeyFile string            `json:"state_key_file,omitempty"`
-	Cert         string            `json:"cert,omitempty"`
-	Key          string            `json:"key,omitempty"`
-	PasswordFile string            `json:"password_file,omitempty"`
-	Agents       []string          `json:"agents,omitempty"`
-	Builds       []string          `json:"builds,omitempty"`
-	Logs         []string          `json:"logs,omitempty"`
-	AgentTargets map[string]string `json:"agent_targets,omitempty"`
-	UpdatedAt    string            `json:"updated_at,omitempty"`
+	Config                  string            `json:"config,omitempty"`
+	State                   string            `json:"state,omitempty"`
+	StateKeyFile            string            `json:"state_key_file,omitempty"`
+	StateEncryptionDisabled bool              `json:"state_encryption_disabled,omitempty"`
+	Cert                    string            `json:"cert,omitempty"`
+	Key                     string            `json:"key,omitempty"`
+	PasswordFile            string            `json:"password_file,omitempty"`
+	Agents                  []string          `json:"agents,omitempty"`
+	Builds                  []string          `json:"builds,omitempty"`
+	Logs                    []string          `json:"logs,omitempty"`
+	AgentTargets            map[string]string `json:"agent_targets,omitempty"`
+	UpdatedAt               string            `json:"updated_at,omitempty"`
 }
 
 type agentConfig struct {
@@ -91,24 +95,79 @@ func (execRunner) Start(name string, args []string, env []string, stdout, stderr
 	return cmd.Process, nil
 }
 
+func runGoCommand(runner commandRunner, args, env []string, stdout, stderr io.Writer) error {
+	env, err := prepareGoCommandEnv(runtime.GOOS, env)
+	if err != nil {
+		return fmt.Errorf("prepare Go build environment: %w", err)
+	}
+	return runner.Run("go", args, env, stdout, stderr)
+}
+
+func prepareGoCommandEnv(goos string, base []string) ([]string, error) {
+	env := append([]string(nil), base...)
+	if goos != "windows" {
+		return env, nil
+	}
+
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: "GOCACHE", path: filepath.FromSlash(".sable/go-build/cache")},
+		{name: "GOTMPDIR", path: filepath.FromSlash(".sable/go-build/tmp")},
+	}
+	for _, item := range paths {
+		if environmentValue(env, item.name) != "" || strings.TrimSpace(os.Getenv(item.name)) != "" {
+			continue
+		}
+		path, err := filepath.Abs(item.path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", item.name, err)
+		}
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return nil, fmt.Errorf("create %s directory: %w", item.name, err)
+		}
+		env = append(env, item.name+"="+path)
+	}
+	return env, nil
+}
+
+func environmentValue(env []string, name string) string {
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(key, name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func main() {
-	if err := run(os.Args[1:], execRunner{}, os.Stdout, os.Stderr); err != nil {
+	if err := runWithInput(os.Args[1:], execRunner{}, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "sablectl:", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, runner commandRunner, stdout, stderr io.Writer) error {
+func runWithInput(args []string, runner commandRunner, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		printUsage(stdout)
 		return nil
 	}
 
 	switch args[0] {
+	case "setup":
+		return runSetup(args[1:], runner, stdin, stdout, stderr)
 	case "install":
 		return runInstall(args[1:], runner, stdout, stderr)
 	case "start":
 		return runStart(args[1:], runner, stdout, stderr)
+	case "up":
+		return runUp(args[1:], runner, stdout, stderr)
+	case "down":
+		return runDown(args[1:], stdout)
+	case "status":
+		return runStatus(args[1:], stdout)
 	case "agent":
 		return runAgent(args[1:], runner, stdout, stderr)
 	case "rebuild":
@@ -133,8 +192,13 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: sablectl <command> [flags]")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "commands:")
+	fmt.Fprintln(out, "  setup               guided first-run install, start, registration, and health check")
 	fmt.Fprintln(out, "  install             create config, certs, builds, and manifest")
 	fmt.Fprintln(out, "  start               run the Sable server")
+	fmt.Fprintln(out, "  up                  start the Sable server in the background")
+	fmt.Fprintln(out, "  down                gracefully stop the background server")
+	fmt.Fprintln(out, "  status              report whether the local server is reachable")
+	fmt.Fprintln(out, "  agent create        create, build, and register an agent")
 	fmt.Fprintln(out, "  agent add <target>  create a local agent identity")
 	fmt.Fprintln(out, "  agent build <label> build a known agent")
 	fmt.Fprintln(out, "  agent register      register known local agent identities")
@@ -162,6 +226,378 @@ type installConfig struct {
 	StateKeyPath string
 }
 
+type setupConfig struct {
+	installConfig
+	Yes          bool
+	EncryptState bool
+}
+
+func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stderr io.Writer) error {
+	m := loadManifestOrDefault()
+	statePath := defaultString(m.State, defaultStatePath)
+	existingInstall := pathExists(manifestPath) || pathExists("config.env")
+	agents, windowsLabel := setupAgentDefaults(m)
+	serverURL := defaultServerURL
+	label := defaultAgentLabel
+	profile := "default"
+	dnsDomain := ""
+	if existing, err := loadAgentConfig("config.env"); err == nil {
+		serverURL = existing.ServerURL
+		label = existing.Label
+		profile = existing.Profile
+		dnsDomain = existing.DNSDomain
+	}
+
+	cfg := setupConfig{
+		installConfig: installConfig{
+			ServerURL:    serverURL,
+			Label:        label,
+			WindowsLabel: windowsLabel,
+			Profile:      profile,
+			DNSDomain:    dnsDomain,
+			Agents:       agents,
+			BuildServer:  true,
+			Start:        true,
+			Register:     true,
+			PasswordFile: defaultString(m.PasswordFile, filepath.FromSlash(".sable/operator-password")),
+			APIURL:       defaultAPIURL,
+			StatePath:    statePath,
+			StateKeyPath: manifestStateKeyDefault(m),
+		},
+		EncryptState: !m.StateEncryptionDisabled,
+	}
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "usage: sablectl setup [flags]")
+		fmt.Fprintln(stdout, "Run without --yes for a guided setup, or provide flags with --yes for unattended setup.")
+		fs.PrintDefaults()
+	}
+	fs.StringVar(&cfg.ServerURL, "url", cfg.ServerURL, "agent listener URL")
+	fs.StringVar(&cfg.Label, "label", cfg.Label, "primary agent label")
+	fs.StringVar(&cfg.WindowsLabel, "windows-label", cfg.WindowsLabel, "Windows agent label when --agents=both")
+	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "agent profile: default, fast, quiet, dns")
+	fs.StringVar(&cfg.DNSDomain, "dns-domain", cfg.DNSDomain, "DNS fallback domain when --profile=dns")
+	fs.StringVar(&cfg.Agents, "agents", cfg.Agents, "agent artifacts to build: linux, windows, both, none")
+	fs.StringVar(&cfg.PasswordFile, "password-file", cfg.PasswordFile, "operator password file to create or reuse")
+	fs.StringVar(&cfg.APIURL, "api", cfg.APIURL, "loopback operator API URL")
+	fs.StringVar(&cfg.StatePath, "state-file", cfg.StatePath, "server state file")
+	fs.StringVar(&cfg.StateKeyPath, "state-key-file", cfg.StateKeyPath, "state encryption key file")
+	fs.BoolVar(&cfg.EncryptState, "encrypt-state", cfg.EncryptState, "encrypt persisted state")
+	fs.BoolVar(&cfg.Start, "start", cfg.Start, "start the server and register agents")
+	fs.BoolVar(&cfg.Yes, "yes", false, "accept defaults and run without prompts")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	if !cfg.Yes {
+		if existingInstall {
+			fmt.Fprintln(stdout, "Existing Sable configuration detected. Setup will reuse identities and repair missing artifacts.")
+		}
+		fmt.Fprintln(stdout, "Sable guided setup")
+		fmt.Fprintln(stdout, "Press Enter to accept the value shown in brackets.")
+		scanner := bufio.NewScanner(stdin)
+		var err error
+		if cfg.ServerURL, err = promptValue(scanner, stdout, "Agent callback URL", cfg.ServerURL); err != nil {
+			return err
+		}
+		if cfg.Agents, err = promptChoice(scanner, stdout, "Agent targets", cfg.Agents, []string{"linux", "windows", "both", "none"}); err != nil {
+			return err
+		}
+		if cfg.Label, err = promptValue(scanner, stdout, "Primary agent label", cfg.Label); err != nil {
+			return err
+		}
+		if cfg.Agents == "both" {
+			if cfg.WindowsLabel, err = promptValue(scanner, stdout, "Windows agent label", cfg.WindowsLabel); err != nil {
+				return err
+			}
+		}
+		if cfg.Profile, err = promptChoice(scanner, stdout, "Beacon profile", cfg.Profile, []string{"default", "fast", "quiet", "dns"}); err != nil {
+			return err
+		}
+		if cfg.Profile == "dns" {
+			if cfg.DNSDomain, err = promptRequired(scanner, stdout, "DNS fallback domain", cfg.DNSDomain); err != nil {
+				return err
+			}
+		}
+		if cfg.PasswordFile, err = promptValue(scanner, stdout, "Operator password file", cfg.PasswordFile); err != nil {
+			return err
+		}
+		if cfg.EncryptState, err = promptBool(scanner, stdout, "Encrypt persisted state", cfg.EncryptState); err != nil {
+			return err
+		}
+		if cfg.Start, err = promptBool(scanner, stdout, "Start the server after building", cfg.Start); err != nil {
+			return err
+		}
+		printSetupPlan(stdout, cfg)
+		confirmed, err := promptBool(scanner, stdout, "Run setup", true)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(stdout, "Setup cancelled.")
+			return nil
+		}
+	}
+
+	if !cfg.EncryptState {
+		cfg.StateKeyPath = ""
+	}
+	if err := validateSetupConfig(cfg); err != nil {
+		return err
+	}
+	if existing, err := loadAgentConfig("config.env"); err == nil {
+		if cfg.ServerURL != existing.ServerURL || cfg.Label != existing.Label || cfg.Profile != existing.Profile || cfg.DNSDomain != existing.DNSDomain {
+			return errors.New("setup cannot change an existing agent identity's URL, label, or profile; run sablectl reset first")
+		}
+	}
+	alreadyRunning := apiReachable(cfg.APIURL)
+	installCfg := cfg.installConfig
+	if alreadyRunning && installCfg.Start {
+		fmt.Fprintf(stdout, "Server already reachable at %s; reusing it.\n", installCfg.APIURL)
+		installCfg.Start = false
+	}
+	if err := runInstall(installArgs(installCfg), runner, stdout, stderr); err != nil {
+		return err
+	}
+	controlBinary := sablectlBinary(runtime.GOOS)
+	if err := runGoCommand(runner, []string{"build", "-o", controlBinary, "./cmd/sablectl"}, nil, stdout, stderr); err != nil {
+		return fmt.Errorf("build sablectl: %w", err)
+	}
+	fmt.Fprintf(stdout, "built: %s\n", controlBinary)
+
+	fmt.Fprintln(stdout, "health check:")
+	if err := runDoctor([]string{"--api", cfg.APIURL}, runner, stdout); err != nil {
+		return fmt.Errorf("setup completed but health checks failed: %w", err)
+	}
+	printSetupComplete(stdout, cfg)
+	return nil
+}
+
+func setupAgentDefaults(m manifest) (string, string) {
+	hasLinux := false
+	hasWindows := false
+	windowsLabel := "win01"
+	envs, _ := knownAgentEnvPaths(m, "")
+	for _, envPath := range envs {
+		agent, err := loadAgentConfig(envPath)
+		if err != nil {
+			continue
+		}
+		target := agent.Target
+		if target == "" {
+			target = m.AgentTargets[filepath.ToSlash(envPath)]
+		}
+		switch target {
+		case "windows":
+			hasWindows = true
+			if filepath.Clean(envPath) != filepath.Clean("config.env") {
+				windowsLabel = agent.Label
+			}
+		case "linux":
+			hasLinux = true
+		}
+	}
+	switch {
+	case hasLinux && hasWindows:
+		return "both", windowsLabel
+	case hasWindows:
+		return "windows", windowsLabel
+	default:
+		return "linux", windowsLabel
+	}
+}
+
+func validateSetupConfig(cfg setupConfig) error {
+	if err := validateAgentServerURL(cfg.ServerURL); err != nil {
+		return fmt.Errorf("invalid --url: %w", err)
+	}
+	if !validAgentTarget(cfg.Agents) {
+		return fmt.Errorf("invalid --agents %q", cfg.Agents)
+	}
+	if err := agentlabel.Validate(cfg.Label); err != nil {
+		return err
+	}
+	if cfg.Agents == "both" {
+		if err := agentlabel.Validate(cfg.WindowsLabel); err != nil {
+			return err
+		}
+	}
+	if _, _, err := resolveProfile(cfg.Profile); err != nil {
+		return err
+	}
+	if cfg.Profile == "dns" && strings.TrimSpace(cfg.DNSDomain) == "" {
+		return errors.New("dns profile requires --dns-domain")
+	}
+	if strings.TrimSpace(cfg.PasswordFile) == "" {
+		return errors.New("setup requires --password-file")
+	}
+	return requireLoopbackAPIURL(cfg.APIURL)
+}
+
+func installArgs(cfg installConfig) []string {
+	return []string{
+		"--url", cfg.ServerURL,
+		"--label", cfg.Label,
+		"--windows-label", cfg.WindowsLabel,
+		"--profile", cfg.Profile,
+		"--dns-domain", cfg.DNSDomain,
+		"--agents", cfg.Agents,
+		"--server=" + fmt.Sprint(cfg.BuildServer),
+		"--start=" + fmt.Sprint(cfg.Start),
+		"--register=" + fmt.Sprint(cfg.Register),
+		"--password-file", cfg.PasswordFile,
+		"--api", cfg.APIURL,
+		"--state-file", cfg.StatePath,
+		"--state-key-file", cfg.StateKeyPath,
+	}
+}
+
+func promptValue(scanner *bufio.Scanner, out io.Writer, label, defaultValue string) (string, error) {
+	fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", err
+		}
+		return defaultValue, nil
+	}
+	value := strings.TrimSpace(scanner.Text())
+	if value == "" {
+		return defaultValue, nil
+	}
+	return value, nil
+}
+
+func promptRequired(scanner *bufio.Scanner, out io.Writer, label, defaultValue string) (string, error) {
+	for {
+		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("%s is required", strings.ToLower(label))
+		}
+		value := strings.TrimSpace(scanner.Text())
+		if value == "" {
+			value = defaultValue
+		}
+		if strings.TrimSpace(value) != "" {
+			return value, nil
+		}
+		fmt.Fprintln(out, "A value is required.")
+	}
+}
+
+func promptChoice(scanner *bufio.Scanner, out io.Writer, label, defaultValue string, choices []string) (string, error) {
+	allowed := make(map[string]bool, len(choices))
+	for _, choice := range choices {
+		allowed[choice] = true
+	}
+	for {
+		fmt.Fprintf(out, "%s (%s) [%s]: ", label, strings.Join(choices, "/"), defaultValue)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return "", err
+			}
+			return defaultValue, nil
+		}
+		value := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if value == "" {
+			value = defaultValue
+		}
+		if allowed[value] {
+			return value, nil
+		}
+		fmt.Fprintf(out, "Choose one of: %s.\n", strings.Join(choices, ", "))
+	}
+}
+
+func promptBool(scanner *bufio.Scanner, out io.Writer, label string, defaultValue bool) (bool, error) {
+	hint := "y/N"
+	if defaultValue {
+		hint = "Y/n"
+	}
+	for {
+		fmt.Fprintf(out, "%s [%s]: ", label, hint)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return false, err
+			}
+			return defaultValue, nil
+		}
+		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+		case "":
+			return defaultValue, nil
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Fprintln(out, "Enter yes or no.")
+		}
+	}
+}
+
+func printSetupPlan(out io.Writer, cfg setupConfig) {
+	fmt.Fprintln(out, "Setup plan:")
+	fmt.Fprintf(out, "  callback: %s\n", cfg.ServerURL)
+	fmt.Fprintf(out, "  agents: %s\n", cfg.Agents)
+	fmt.Fprintf(out, "  profile: %s\n", cfg.Profile)
+	fmt.Fprintf(out, "  state encryption: %t\n", cfg.EncryptState)
+	fmt.Fprintf(out, "  start now: %t\n", cfg.Start)
+}
+
+func printSetupComplete(out io.Writer, cfg setupConfig) {
+	fmt.Fprintln(out, "setup complete")
+	fmt.Fprintf(out, "console: %s\n", cfg.APIURL)
+	fmt.Fprintf(out, "credentials: %s\n", filepath.ToSlash(cfg.PasswordFile))
+	if !cfg.Start {
+		fmt.Fprintln(out, "next: sablectl up")
+	}
+	m := loadManifestOrDefault()
+	fmt.Fprintln(out, "agent artifacts:")
+	for _, build := range m.Builds {
+		if strings.HasPrefix(filepath.ToSlash(build), "builds/") {
+			printAgentDeployment(out, build, targetForArtifact(build))
+		}
+	}
+	fmt.Fprintln(out, "deploy only to systems you own or are authorized to test")
+}
+
+func printAgentDeployment(out io.Writer, path, target string) {
+	slashPath := filepath.ToSlash(path)
+	checksum := "unavailable"
+	if file, err := os.Open(path); err == nil {
+		hash := sha256.New()
+		if _, err := io.Copy(hash, file); err == nil {
+			checksum = hex.EncodeToString(hash.Sum(nil))
+		}
+		_ = file.Close()
+	}
+	fmt.Fprintf(out, "  %s\n", slashPath)
+	fmt.Fprintf(out, "    sha256: %s\n", checksum)
+	if target == "windows" {
+		fmt.Fprintf(out, "    transfer: Copy-Item %s \\\\<authorized-target>\\C$\\Temp\\sable-agent.exe\n", path)
+		fmt.Fprintln(out, "    start: Invoke-Command -ComputerName <authorized-target> { Start-Process C:\\Temp\\sable-agent.exe -WindowStyle Hidden }")
+		return
+	}
+	fmt.Fprintf(out, "    transfer: scp %s user@<authorized-target>:/tmp/sable-agent\n", slashPath)
+	fmt.Fprintln(out, "    start: ssh user@<authorized-target> 'chmod +x /tmp/sable-agent && nohup /tmp/sable-agent >/dev/null 2>&1 &'")
+}
+
+func targetForArtifact(path string) string {
+	if strings.EqualFold(filepath.Ext(path), ".exe") {
+		return "windows"
+	}
+	return "linux"
+}
+
 func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) error {
 	m := loadManifestOrDefault()
 	statePath := m.State
@@ -177,7 +613,7 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 		Register:     true,
 		APIURL:       defaultAPIURL,
 		StatePath:    statePath,
-		StateKeyPath: m.StateKeyFile,
+		StateKeyPath: manifestStateKeyDefault(m),
 	}
 	fs.StringVar(&cfg.ServerURL, "url", "", "agent listener URL, for example https://10.0.0.5:443")
 	fs.StringVar(&cfg.ServerURL, "server-url", "", "alias for --url")
@@ -193,12 +629,16 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	fs.StringVar(&cfg.PasswordFile, "password-file", "", "operator password file to create or use")
 	fs.StringVar(&cfg.APIURL, "api", cfg.APIURL, "operator API URL for registration")
 	fs.StringVar(&cfg.StatePath, "state-file", cfg.StatePath, "server state file")
-	fs.StringVar(&cfg.StateKeyPath, "state-key-file", cfg.StateKeyPath, "optional state encryption key file (created when missing)")
+	fs.StringVar(&cfg.StateKeyPath, "state-key-file", cfg.StateKeyPath, "state encryption key file; use 'none' to opt out")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	cfg.StateKeyPath = normalizeStateKeyPath(cfg.StateKeyPath)
+	if !statePersistenceEnabled(cfg.StatePath) {
+		cfg.StateKeyPath = ""
 	}
 	if !validAgentTarget(cfg.Agents) {
 		return fmt.Errorf("invalid --agents %q", cfg.Agents)
@@ -206,7 +646,7 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	if err := requireLoopbackAPIURL(cfg.APIURL); err != nil {
 		return err
 	}
-	if cfg.StateKeyPath != "" {
+	if statePersistenceEnabled(cfg.StatePath) && cfg.StateKeyPath != "" {
 		if err := ensureStateKeyFile(cfg.StateKeyPath); err != nil {
 			return err
 		}
@@ -222,9 +662,8 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 		m.Key = "server.key"
 	}
 	m.State = cfg.StatePath
-	if cfg.StateKeyPath != "" {
-		m.StateKeyFile = cfg.StateKeyPath
-	}
+	m.StateKeyFile = cfg.StateKeyPath
+	m.StateEncryptionDisabled = statePersistenceEnabled(cfg.StatePath) && cfg.StateKeyPath == ""
 	addAgentPath(&m, "config.env", primary.Target)
 
 	agentBuilds, err := ensureInstallAgents(primary, cfg)
@@ -385,8 +824,14 @@ func ensureAdditionalAgent(primary agentConfig, label, target string) (agentConf
 	if err := agentlabel.Validate(label); err != nil {
 		return agentConfig{}, "", err
 	}
+	if label == primary.Label {
+		return agentConfig{}, "", fmt.Errorf("agent label %q is already used by config.env", label)
+	}
 	envPath := filepath.Join("agents", label+".env")
 	if existing, err := loadAgentConfig(envPath); err == nil {
+		if existing.Target != "" && existing.Target != target {
+			return agentConfig{}, "", fmt.Errorf("agent %q already targets %s", label, existing.Target)
+		}
 		existing.Target = target
 		return existing, envPath, nil
 	} else if !os.IsNotExist(err) {
@@ -427,12 +872,16 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	passwordFile := fs.String("password-file", "", "operator password file")
 	password := fs.String("password", "", "operator password")
 	stateFile := fs.String("state-file", statePath, "server state file")
-	stateKeyFile := fs.String("state-key-file", m.StateKeyFile, "optional state encryption key file")
+	stateKeyFile := fs.String("state-key-file", manifestStateKeyDefault(m), "state encryption key file; use 'none' to opt out")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	stateKeyPath := normalizeStateKeyPath(*stateKeyFile)
+	if !statePersistenceEnabled(*stateFile) {
+		stateKeyPath = ""
 	}
 	binary := serverBinary(runtime.GOOS)
 	if _, err := os.Stat(binary); err != nil {
@@ -440,12 +889,12 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	}
 	resolvedFile := passwordFileOrManifest(*passwordFile, m)
 	args = []string{"--state-file", *stateFile}
-	if strings.TrimSpace(*stateKeyFile) != "" {
-		if err := validateExistingStateKeyFile(*stateKeyFile); err != nil {
+	if statePersistenceEnabled(*stateFile) && stateKeyPath != "" {
+		if err := ensureStateKeyFile(stateKeyPath); err != nil {
 			return err
 		}
-		args = append(args, "--state-key-file", *stateKeyFile)
 	}
+	args = append(args, "--state-key-file", defaultString(stateKeyPath, "none"))
 	env := []string{}
 	switch {
 	case resolvedFile != "":
@@ -461,11 +910,159 @@ func runStart(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	return runner.Run("./"+binary, args, env, stdout, stderr)
 }
 
+func runUp(args []string, runner commandRunner, stdout, stderr io.Writer) error {
+	m := loadManifestOrDefault()
+	statePath := defaultString(m.State, defaultStatePath)
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	passwordFile := fs.String("password-file", "", "operator password file")
+	password := fs.String("password", "", "operator password")
+	stateFile := fs.String("state-file", statePath, "server state file")
+	stateKeyFile := fs.String("state-key-file", manifestStateKeyDefault(m), "state encryption key file; use 'none' to opt out")
+	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	stateKeyPath := normalizeStateKeyPath(*stateKeyFile)
+	if !statePersistenceEnabled(*stateFile) {
+		stateKeyPath = ""
+	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
+	}
+	resolvedFile := passwordFileOrManifest(*passwordFile, m)
+	resolvedPassword, err := readOperatorPassword(resolvedFile, *password)
+	if err != nil {
+		return err
+	}
+	if apiReachable(*apiURL) {
+		fmt.Fprintf(stdout, "server already running at %s\n", *apiURL)
+		return registerKnownAgents(*apiURL, resolvedPassword, m, stdout)
+	}
+	binary := serverBinary(runtime.GOOS)
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf("%s not found; run sablectl rebuild --server-only", binary)
+	}
+	if statePersistenceEnabled(*stateFile) && stateKeyPath != "" {
+		if err := ensureStateKeyFile(stateKeyPath); err != nil {
+			return err
+		}
+	}
+	logPath := filepath.Join(".sable", "server.log")
+	if err := startServer(runner, binary, resolvedFile, resolvedPassword, *stateFile, stateKeyPath, logPath); err != nil {
+		return err
+	}
+	waitForAPI(*apiURL, 10*time.Second)
+	if !apiReachable(*apiURL) {
+		return fmt.Errorf("server did not become reachable at %s; see %s", *apiURL, filepath.ToSlash(logPath))
+	}
+	addUnique(&m.Logs, logPath)
+	m.State = *stateFile
+	m.StateKeyFile = stateKeyPath
+	m.StateEncryptionDisabled = statePersistenceEnabled(*stateFile) && stateKeyPath == ""
+	if err := saveManifest(m); err != nil {
+		return err
+	}
+	if err := registerKnownAgents(*apiURL, resolvedPassword, m, stdout); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "server running at %s\n", *apiURL)
+	fmt.Fprintf(stdout, "log: %s\n", filepath.ToSlash(logPath))
+	return nil
+}
+
+func runDown(args []string, stdout io.Writer) error {
+	m := loadManifestOrDefault()
+	fs := flag.NewFlagSet("down", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	passwordFile := fs.String("password-file", "", "operator password file")
+	password := fs.String("password", "", "operator password")
+	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
+	}
+	if !apiReachable(*apiURL) {
+		fmt.Fprintln(stdout, "server stopped")
+		return nil
+	}
+	resolvedPassword, err := readOperatorPassword(passwordFileOrManifest(*passwordFile, m), *password)
+	if err != nil {
+		return err
+	}
+	client, err := apiClient()
+	if err != nil {
+		return err
+	}
+	token, err := login(client, *apiURL, resolvedPassword)
+	if err != nil {
+		return err
+	}
+	if err := requestShutdown(client, *apiURL, token); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !apiReachable(*apiURL) {
+			fmt.Fprintln(stdout, "server stopped")
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return errors.New("server accepted shutdown but is still reachable after 10 seconds")
+}
+
+func runStatus(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
+	}
+	if apiReachable(*apiURL) {
+		fmt.Fprintf(stdout, "running: %s\n", *apiURL)
+		return nil
+	}
+	fmt.Fprintln(stdout, "stopped")
+	return nil
+}
+
+func registerKnownAgents(apiURL, password string, m manifest, stdout io.Writer) error {
+	envs, err := knownAgentEnvPaths(m, "")
+	if err != nil {
+		return err
+	}
+	if len(envs) == 0 {
+		return nil
+	}
+	if err := registerEnvFiles(apiURL, password, envs); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "registered %d local agent identity(s)\n", len(envs))
+	return nil
+}
+
 func runAgent(args []string, runner commandRunner, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: sablectl agent <add|build|register> ...")
+		return errors.New("usage: sablectl agent <create|add|build|register>")
 	}
 	switch args[0] {
+	case "create":
+		return runAgentCreate(args[1:], runner, stdout, stderr)
 	case "add":
 		return runAgentAdd(args[1:], stdout)
 	case "build":
@@ -475,6 +1072,77 @@ func runAgent(args []string, runner commandRunner, stdout, stderr io.Writer) err
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
+}
+
+func runAgentCreate(args []string, runner commandRunner, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("agent create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	label := fs.String("label", "", "agent label")
+	offlinePEAS := fs.Bool("offline-peas", false, "update PEAS cache before building")
+	register := fs.Bool("register", true, "register when the local server is reachable")
+	password := fs.String("password", "", "operator password")
+	passwordFile := fs.String("password-file", "", "operator password file")
+	apiURL := fs.String("api", defaultAPIURL, "operator API URL")
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("usage: sablectl agent create <linux|windows> --label <name>")
+	}
+	target := strings.ToLower(positional[0])
+	if target != "linux" && target != "windows" {
+		return fmt.Errorf("invalid agent target %q", target)
+	}
+	if err := requireLoopbackAPIURL(*apiURL); err != nil {
+		return err
+	}
+	primary, err := loadAgentConfig("config.env")
+	if err != nil {
+		return fmt.Errorf("load config.env: %w", err)
+	}
+	agent, envPath, err := ensureAdditionalAgent(primary, *label, target)
+	if err != nil {
+		return err
+	}
+	m := loadManifestOrDefault()
+	addAgentPath(&m, envPath, target)
+	if err := saveManifest(m); err != nil {
+		return err
+	}
+	if *offlinePEAS {
+		if err := runGoCommand(runner, []string{"run", "./tools/updatepeas"}, nil, stdout, stderr); err != nil {
+			return fmt.Errorf("update PEAS cache: %w", err)
+		}
+	}
+	out, err := buildAgent(runner, agent, target, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	addUnique(&m.Builds, out)
+	if err := saveManifest(m); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "agent: %s\n", agent.Label)
+	fmt.Fprintf(stdout, "env: %s\n", filepath.ToSlash(envPath))
+	fmt.Fprintf(stdout, "built: %s\n", filepath.ToSlash(out))
+	printAgentDeployment(stdout, out, target)
+	if !*register {
+		return nil
+	}
+	if !apiReachable(*apiURL) {
+		fmt.Fprintln(stdout, "registration deferred: start the server with sablectl up")
+		return nil
+	}
+	resolvedPassword, err := readOperatorPassword(passwordFileOrManifest(*passwordFile, m), *password)
+	if err != nil {
+		return err
+	}
+	if err := registerEnvFiles(*apiURL, resolvedPassword, []string{envPath}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "registered: %s (%s)\n", agent.Label, agent.ID)
+	return nil
 }
 
 func runAgentAdd(args []string, stdout io.Writer) error {
@@ -538,7 +1206,7 @@ func runAgentBuild(args []string, runner commandRunner, stdout, stderr io.Writer
 		return fmt.Errorf("invalid target %q", target)
 	}
 	if *offlinePEAS {
-		if err := runner.Run("go", []string{"run", "./tools/updatepeas"}, nil, stdout, stderr); err != nil {
+		if err := runGoCommand(runner, []string{"run", "./tools/updatepeas"}, nil, stdout, stderr); err != nil {
 			return fmt.Errorf("update PEAS cache: %w", err)
 		}
 	}
@@ -639,7 +1307,7 @@ func runRebuild(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	}
 	if !*serverOnly {
 		if *offlinePEAS {
-			if err := runner.Run("go", []string{"run", "./tools/updatepeas"}, nil, stdout, stderr); err != nil {
+			if err := runGoCommand(runner, []string{"run", "./tools/updatepeas"}, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("update PEAS cache: %w", err)
 			}
 		}
@@ -883,7 +1551,7 @@ func runDoctor(args []string, runner commandRunner, stdout io.Writer) error {
 
 func buildServer(runner commandRunner, stdout, stderr io.Writer) (string, error) {
 	out := serverBinary(runtime.GOOS)
-	if err := runner.Run("go", []string{"build", "-o", out, "./cmd/server"}, nil, stdout, stderr); err != nil {
+	if err := runGoCommand(runner, []string{"build", "-o", out, "./cmd/server"}, nil, stdout, stderr); err != nil {
 		return "", fmt.Errorf("build server: %w", err)
 	}
 	return out, nil
@@ -896,7 +1564,7 @@ func buildAgent(runner commandRunner, agent agentConfig, target string, stdout, 
 	}
 	env := []string{"GOOS=" + target, "GOARCH=amd64"}
 	args := []string{"build", "-ldflags", agentLDFlags(agent), "-o", out, "./cmd/agent"}
-	if err := runner.Run("go", args, env, stdout, stderr); err != nil {
+	if err := runGoCommand(runner, args, env, stdout, stderr); err != nil {
 		return "", fmt.Errorf("build %s agent %s: %w", target, agent.Label, err)
 	}
 	if err := securefile.Restrict(out); err != nil {
@@ -914,10 +1582,7 @@ func startServer(runner commandRunner, binary, passwordFile, password, statePath
 		return fmt.Errorf("open server log: %w", err)
 	}
 	defer logFile.Close()
-	args := []string{"--state-file", statePath}
-	if stateKeyPath != "" {
-		args = append(args, "--state-key-file", stateKeyPath)
-	}
+	args := []string{"--state-file", statePath, "--state-key-file", defaultString(stateKeyPath, "none")}
 	env := []string{}
 	if passwordFile != "" {
 		args = append(args, "--password-file", passwordFile)
@@ -931,7 +1596,10 @@ func startServer(runner commandRunner, binary, passwordFile, password, statePath
 }
 
 func registerEnvFiles(apiURL, password string, paths []string) error {
-	client := apiClient()
+	client, err := apiClient()
+	if err != nil {
+		return err
+	}
 	token, err := login(client, apiURL, password)
 	if err != nil {
 		return err
@@ -964,13 +1632,8 @@ func registerEnvFiles(apiURL, password string, paths []string) error {
 	return nil
 }
 
-func apiClient() *http.Client {
-	return &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // loopback self-signed server
-		},
-	}
+func apiClient() (*http.Client, error) {
+	return tlspin.NewClientFromCert("server.crt", 5*time.Second)
 }
 
 func login(client *http.Client, apiURL, password string) (string, error) {
@@ -1045,17 +1708,37 @@ func registerAgent(client *http.Client, apiURL, token, agentID, secretHex string
 	return fmt.Errorf("register %s failed (HTTP %d): %s", agentID, resp.StatusCode, strings.TrimSpace(string(data)))
 }
 
+func requestShutdown(client *http.Client, apiURL, token string) error {
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiURL, "/")+"/api/admin/shutdown", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("shutdown failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("shutdown failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
 func apiReachable(apiURL string) bool {
 	if requireLoopbackAPIURL(apiURL) != nil {
 		return false
 	}
-	client := apiClient()
+	client, err := apiClient()
+	if err != nil {
+		return false
+	}
 	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/")
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
-	return true
+	return resp.StatusCode == http.StatusOK
 }
 
 func requireLoopbackAPIURL(raw string) error {
@@ -1072,7 +1755,7 @@ func requireLoopbackAPIURL(raw string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("refusing insecure TLS verification for non-loopback API host %q", host)
+		return fmt.Errorf("operator API must use a loopback host, got %q", host)
 	}
 	return nil
 }
@@ -1118,16 +1801,30 @@ func ensureStateKeyFile(path string) error {
 	return nil
 }
 
-func validateExistingStateKeyFile(path string) error {
+func normalizeStateKeyPath(path string) string {
 	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil
+	switch strings.ToLower(path) {
+	case "", "none", "off", "disabled":
+		return ""
+	default:
+		return path
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read state key file: %w", err)
+}
+
+func manifestStateKeyDefault(m manifest) string {
+	if m.StateEncryptionDisabled {
+		return "none"
 	}
-	return validateAndRestrictStateKey(path, data)
+	return defaultString(m.StateKeyFile, filepath.FromSlash(defaultStateKeyPath))
+}
+
+func statePersistenceEnabled(path string) bool {
+	switch strings.ToLower(strings.TrimSpace(path)) {
+	case "", "none", "off", "disabled":
+		return false
+	default:
+		return true
+	}
 }
 
 func validateAndRestrictStateKey(path string, data []byte) error {
@@ -1208,6 +1905,11 @@ func resolvePasswordFile(path, password string) (string, error) {
 			return "", err
 		}
 		password = generated
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", fmt.Errorf("create password directory: %w", err)
+		}
 	}
 	if err := securefile.WriteFile(path, []byte(password+"\n")); err != nil {
 		return "", fmt.Errorf("write password file: %w", err)
@@ -1541,13 +2243,7 @@ func nextStepsAfterInstall(cfg installConfig, registered bool) []string {
 	if cfg.Start {
 		return []string{"sablectl agent register --password-file " + filepath.ToSlash(cfg.PasswordFile)}
 	}
-	startCmd := "sablectl start"
-	registerCmd := "sablectl agent register"
-	if cfg.PasswordFile != "" {
-		startCmd += " --password-file " + filepath.ToSlash(cfg.PasswordFile)
-		registerCmd += " --password-file " + filepath.ToSlash(cfg.PasswordFile)
-	}
-	return []string{startCmd, registerCmd}
+	return []string{"sablectl up"}
 }
 
 func printChanged(out io.Writer, changed []string) {
@@ -1625,6 +2321,13 @@ func serverBinary(goos string) string {
 		return "sable-server.exe"
 	}
 	return "sable-server"
+}
+
+func sablectlBinary(goos string) string {
+	if goos == "windows" {
+		return "sablectl.exe"
+	}
+	return "sablectl"
 }
 
 func agentOutputPath(label, target string) string {

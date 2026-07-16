@@ -24,6 +24,7 @@ var agentIDRe = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,64}$`)
 type Config struct {
 	OperatorPasswordHash *PasswordHash
 	JWTSecret            []byte
+	Shutdown             func()
 }
 
 const (
@@ -47,12 +48,29 @@ func NewRouter(store *session.Store, cfg *Config) *Router {
 	auth := requireJWT(cfg.JWTSecret)
 
 	mux.HandleFunc("/api/auth/login", limitLogin(rl, loginHandler(cfg)))
+	mux.Handle("/api/admin/shutdown", auth(http.HandlerFunc(shutdownHandler(cfg))))
 	mux.Handle("/api/audit", auth(http.HandlerFunc(auditHandler(store))))
 	mux.Handle("/api/agents", auth(http.HandlerFunc(agentsCollectionHandler(store))))
 	mux.Handle("/api/agents/", auth(http.HandlerFunc(agentRouter(store))))
 
 	r := &Router{mux: mux}
 	return r
+}
+
+func shutdownHandler(cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if cfg.Shutdown == nil {
+			http.Error(w, "shutdown is not available", http.StatusServiceUnavailable)
+			return
+		}
+		cfg.Shutdown()
+		w.WriteHeader(http.StatusAccepted)
+	}
 }
 
 // ServeHTTP applies security headers to all responses.

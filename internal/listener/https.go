@@ -19,6 +19,7 @@ const (
 	timestampSlack          = 2 * time.Minute
 	maxHTTPSRequestsPerHost = 200 // per httpsRateWindow; allows ~10/s for interactive-mode agents
 	httpsRateWindow         = 10 * time.Second
+	maxHTTPSRateBuckets     = 4096
 )
 
 type httpsBucket struct {
@@ -27,8 +28,9 @@ type httpsBucket struct {
 }
 
 type httpsRateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*httpsBucket
+	mu        sync.Mutex
+	buckets   map[string]*httpsBucket
+	nextSweep time.Time
 }
 
 func newHTTPSRateLimiter() *httpsRateLimiter {
@@ -39,14 +41,25 @@ func (rl *httpsRateLimiter) allow(source string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := time.Now()
-	for key, b := range rl.buckets {
-		if now.After(b.resetAt) {
-			delete(rl.buckets, key)
+	if !now.Before(rl.nextSweep) {
+		for key, b := range rl.buckets {
+			if !now.Before(b.resetAt) {
+				delete(rl.buckets, key)
+			}
 		}
+		rl.nextSweep = now.Add(httpsRateWindow)
 	}
 	b, ok := rl.buckets[source]
-	if !ok || now.After(b.resetAt) {
+	if !ok {
+		if len(rl.buckets) >= maxHTTPSRateBuckets {
+			return false
+		}
 		rl.buckets[source] = &httpsBucket{count: 1, resetAt: now.Add(httpsRateWindow)}
+		return true
+	}
+	if !now.Before(b.resetAt) {
+		b.count = 1
+		b.resetAt = now.Add(httpsRateWindow)
 		return true
 	}
 	if b.count >= maxHTTPSRequestsPerHost {
@@ -90,7 +103,7 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var peek struct {
 		AgentID string `json:"id"`
 	}
-	if err := json.Unmarshal(body, &peek); err != nil || peek.AgentID == "" {
+	if err := json.Unmarshal(body, &peek); err != nil || !validAgentID(peek.AgentID) {
 		http.NotFound(w, r)
 		return
 	}
@@ -116,17 +129,7 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// secret lookup. protocol.DecodeBeacon already enforces this, but we re-check
 	// here so that the listener never acts on a mismatched identity even if the
 	// protocol layer is changed in the future.
-	if beacon.AgentID != peek.AgentID {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Reject beacons outside the ±2 minute window.
-	age := time.Since(time.Unix(beacon.Timestamp, 0))
-	if age < 0 {
-		age = -age
-	}
-	if age > timestampSlack {
+	if !validBeacon(beacon, peek.AgentID, time.Now()) {
 		http.NotFound(w, r)
 		return
 	}

@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,12 +12,16 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/aelder202/sable/internal/protocol"
+	"github.com/aelder202/sable/internal/tlspin"
 )
 
 const (
-	maxRemotePathBytes        = 4096
-	maxUploadFileBytes        = 50 * 1024 * 1024
-	maxUploadTaskPayloadBytes = maxRemotePathBytes + 1 + ((maxUploadFileBytes+2)/3)*4
+	maxRemotePathBytes        = protocol.MaxRemotePathBytes
+	maxUploadFileBytes        = protocol.MaxUploadFileBytes
+	maxUploadTaskPayloadBytes = protocol.MaxUploadTaskPayloadBytes
 )
 
 // CLI is the interactive operator shell that talks to the REST API.
@@ -28,16 +31,16 @@ type CLI struct {
 	client  *http.Client
 }
 
-// New creates a CLI targeting the operator API at baseURL with the given JWT.
-// InsecureSkipVerify is only allowed for loopback API URLs.
-func New(baseURL, token string) (*CLI, error) {
+// New creates a certificate-pinned CLI targeting the loopback operator API.
+func New(baseURL, token, certPath string) (*CLI, error) {
 	if err := requireLoopbackBaseURL(baseURL); err != nil {
 		return nil, err
 	}
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+	client, err := tlspin.NewClientFromCert(certPath, 2*time.Minute)
+	if err != nil {
+		return nil, err
 	}
-	return &CLI{baseURL: baseURL, token: token, client: &http.Client{Transport: tr}}, nil
+	return &CLI{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client}, nil
 }
 
 // Run starts the interactive shell. Blocks until the user types "exit" or "quit".
@@ -225,6 +228,16 @@ func buildUploadPayload(localPath, remotePath string) (string, error) {
 		return "", fmt.Errorf("remote path must be 1-%d bytes without control characters", maxRemotePathBytes)
 	}
 
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return "", fmt.Errorf("stat local file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("local upload path must be a regular file")
+	}
+	if info.Size() > maxUploadFileBytes {
+		return "", fmt.Errorf("upload file too large: %d bytes (max %d)", info.Size(), maxUploadFileBytes)
+	}
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", fmt.Errorf("read local file: %w", err)
@@ -248,13 +261,13 @@ func strVal(m map[string]interface{}, key string) string {
 }
 
 func requireLoopbackBaseURL(baseURL string) error {
-	u, err := url.Parse(baseURL)
+	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return fmt.Errorf("invalid API URL: %w", err)
 	}
 	host := u.Hostname()
-	if host == "" {
-		return fmt.Errorf("API URL must include a hostname")
+	if u.Scheme != "https" || host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("API URL must be an HTTPS loopback origin without credentials, path, query, or fragment")
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsLoopback() {
@@ -263,5 +276,5 @@ func requireLoopbackBaseURL(baseURL string) error {
 	if strings.EqualFold(host, "localhost") {
 		return nil
 	}
-	return fmt.Errorf("CLI only permits insecure TLS to loopback API URLs, got %q", host)
+	return fmt.Errorf("CLI requires a loopback API host, got %q", host)
 }

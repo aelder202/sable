@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"io"
 	"os"
@@ -110,10 +111,10 @@ func TestGoVersionAtLeast(t *testing.T) {
 		required string
 		want     bool
 	}{
-		{"go version go1.26.2 windows/amd64", "1.26.2", true},
-		{"go version go1.26.3 windows/amd64", "1.26.2", true},
-		{"go version go1.27.0 windows/amd64", "1.26.2", true},
-		{"go version go1.25.9 windows/amd64", "1.26.2", false},
+		{"go version go1.26.5 windows/amd64", "1.26.5", true},
+		{"go version go1.26.6 windows/amd64", "1.26.5", true},
+		{"go version go1.27.0 windows/amd64", "1.26.5", true},
+		{"go version go1.26.4 windows/amd64", "1.26.5", false},
 	}
 	for _, tt := range tests {
 		if got := goVersionAtLeast(tt.output, tt.required); got != tt.want {
@@ -206,7 +207,7 @@ func TestURLValidationRejectsUnsafeOrigins(t *testing.T) {
 		t.Fatalf("valid agent origin rejected: %v", err)
 	}
 	if err := requireLoopbackAPIURL("https://example.com:8443"); err == nil {
-		t.Fatal("remote API URL should be rejected while TLS verification is disabled")
+		t.Fatal("remote operator API URL should be rejected")
 	}
 	if err := requireLoopbackAPIURL("https://[::1]:8443"); err != nil {
 		t.Fatalf("loopback API rejected: %v", err)
@@ -244,10 +245,43 @@ func TestRunStartReusesManifestStatePaths(t *testing.T) {
 	}
 }
 
-func TestNextStepsAfterInstallIncludesRegistration(t *testing.T) {
+func TestRunStartPassesExplicitEncryptionOptOut(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(serverBinary(runtime.GOOS), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("pw.txt", []byte("password"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgs []string
+	runner := testRunner{run: func(_ string, args []string, _ []string, _, _ io.Writer) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}}
+	if err := runStart([]string{"--password-file", "pw.txt", "--state-key-file", "none"}, runner, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(gotArgs, " "); !strings.Contains(joined, "--state-key-file none") {
+		t.Fatalf("explicit encryption opt-out was not passed to server: %v", gotArgs)
+	}
+	if _, err := os.Stat(filepath.FromSlash(defaultStateKeyPath)); !os.IsNotExist(err) {
+		t.Fatalf("encryption opt-out unexpectedly created a state key: %v", err)
+	}
+}
+
+func TestManifestRemembersEncryptionOptOut(t *testing.T) {
+	if got := manifestStateKeyDefault(manifest{StateEncryptionDisabled: true}); got != "none" {
+		t.Fatalf("plaintext manifest default = %q, want none", got)
+	}
+	if got := manifestStateKeyDefault(manifest{}); got != filepath.FromSlash(defaultStateKeyPath) {
+		t.Fatalf("secure manifest default = %q, want %q", got, filepath.FromSlash(defaultStateKeyPath))
+	}
+}
+
+func TestNextStepsAfterInstallUsesManagedLifecycle(t *testing.T) {
 	t.Run("install only", func(t *testing.T) {
 		got := nextStepsAfterInstall(installConfig{PasswordFile: "pw.txt"}, false)
-		want := []string{"sablectl start --password-file pw.txt", "sablectl agent register --password-file pw.txt"}
+		want := []string{"sablectl up"}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("next = %v, want %v", got, want)
 		}
@@ -439,6 +473,46 @@ func TestBuildAgentRestrictsOutputArtifact(t *testing.T) {
 	}
 }
 
+func TestPrepareGoCommandEnvUsesWorkspaceDirectoriesOnWindows(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GOCACHE", "")
+	t.Setenv("GOTMPDIR", "")
+
+	env, err := prepareGoCommandEnv("windows", []string{"GOOS=linux", "GOARCH=amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"GOCACHE", "GOTMPDIR"} {
+		path := environmentValue(env, name)
+		if path == "" || !filepath.IsAbs(path) {
+			t.Fatalf("%s = %q, want an absolute workspace path", name, path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s directory: %v", name, err)
+		}
+	}
+	if got := environmentValue(env, "GOOS"); got != "linux" {
+		t.Fatalf("GOOS = %q, want linux", got)
+	}
+}
+
+func TestPrepareGoCommandEnvRespectsExplicitOverrides(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GOCACHE", "")
+	t.Setenv("GOTMPDIR", "")
+
+	env, err := prepareGoCommandEnv("windows", []string{"GOCACHE=C:\\custom-cache", "GOTMPDIR=C:\\custom-tmp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := environmentValue(env, "GOCACHE"); got != `C:\custom-cache` {
+		t.Fatalf("GOCACHE = %q", got)
+	}
+	if got := environmentValue(env, "GOTMPDIR"); got != `C:\custom-tmp` {
+		t.Fatalf("GOTMPDIR = %q", got)
+	}
+}
+
 func TestCheckSensitivePermissionsCanHardenExistingFiles(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile("config.env", []byte("secret"), 0644); err != nil {
@@ -479,5 +553,139 @@ func TestReadOperatorPasswordHandlesUTF16BOMFromPowerShell(t *testing.T) {
 	}
 	if got != "secret" {
 		t.Fatalf("password = %q, want secret (UTF-16 LE BOM should be stripped)", got)
+	}
+}
+
+func TestRunSetupUnattendedCreatesSecureLocalInstall(t *testing.T) {
+	t.Chdir(t.TempDir())
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		if name != "go" {
+			return nil
+		}
+		if len(args) == 1 && args[0] == "version" {
+			_, _ = io.WriteString(stdout, "go version go1.26.5 test/amd64\n")
+			return nil
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				return os.WriteFile(args[i+1], []byte("server"), 0600)
+			}
+		}
+		return nil
+	}}
+
+	var out strings.Builder
+	err := runSetup([]string{
+		"--yes",
+		"--start=false",
+		"--agents=none",
+		"--api=https://127.0.0.1:65534",
+	}, runner, strings.NewReader(""), &out, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"config.env",
+		"server.crt",
+		"server.key",
+		serverBinary(runtime.GOOS),
+		sablectlBinary(runtime.GOOS),
+		filepath.FromSlash(".sable/operator-password"),
+		filepath.FromSlash(".sable/state.key"),
+		filepath.FromSlash(".sable/install.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+	if !strings.Contains(out.String(), "setup complete") || !strings.Contains(out.String(), "next: sablectl up") {
+		t.Fatalf("unexpected setup output: %s", out.String())
+	}
+}
+
+func TestRunAgentCreateBuildsAndDefersRegistrationWhenOffline(t *testing.T) {
+	t.Chdir(t.TempDir())
+	primary := strings.Join([]string{
+		"AGENT_ID=12345678-1234-1234-1234-123456789abc",
+		"AGENT_SECRET_HEX=" + strings.Repeat("a", 64),
+		"CERT_FP_HEX=" + strings.Repeat("b", 64),
+		"SERVER_URL=https://127.0.0.1:443",
+		"AGENT_LABEL=main",
+		"AGENT_TARGET=linux",
+		"",
+	}, "\n")
+	if err := os.WriteFile("config.env", []byte(primary), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				if err := os.MkdirAll(filepath.Dir(args[i+1]), 0700); err != nil {
+					return err
+				}
+				return os.WriteFile(args[i+1], []byte("agent"), 0600)
+			}
+		}
+		return nil
+	}}
+	var out strings.Builder
+	err := runAgentCreate([]string{
+		"linux",
+		"--label", "web01",
+		"--api", "https://127.0.0.1:65534",
+	}, runner, &out, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.FromSlash("agents/web01.env"),
+		filepath.FromSlash("builds/web01/agent-linux"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+	if !strings.Contains(out.String(), "registration deferred") {
+		t.Fatalf("expected deferred registration message, got %s", out.String())
+	}
+}
+
+func TestPromptChoiceRetriesInvalidInput(t *testing.T) {
+	scanner := bufio.NewScanner(strings.NewReader("invalid\nboth\n"))
+	var out strings.Builder
+	got, err := promptChoice(scanner, &out, "Agents", "linux", []string{"linux", "windows", "both"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "both" || !strings.Contains(out.String(), "Choose one of") {
+		t.Fatalf("choice=%q output=%q", got, out.String())
+	}
+}
+
+func TestSetupHelpReturnsSuccessfully(t *testing.T) {
+	var out strings.Builder
+	if err := runSetup([]string{"--help"}, testRunner{}, strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "usage: sablectl setup") || !strings.Contains(out.String(), "-yes") {
+		t.Fatalf("unexpected help output: %s", out.String())
+	}
+}
+
+func TestPrintAgentDeploymentIncludesChecksumAndPlatformCommands(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("agent.exe", []byte("agent"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	printAgentDeployment(&out, "agent.exe", "windows")
+	if strings.Contains(out.String(), "sha256: unavailable") || !strings.Contains(out.String(), "Copy-Item") || !strings.Contains(out.String(), "Invoke-Command") {
+		t.Fatalf("unexpected Windows deployment output: %s", out.String())
+	}
+
+	out.Reset()
+	printAgentDeployment(&out, "agent.exe", "linux")
+	if !strings.Contains(out.String(), "scp agent.exe") || !strings.Contains(out.String(), "ssh user@<authorized-target>") {
+		t.Fatalf("unexpected Linux deployment output: %s", out.String())
 	}
 }

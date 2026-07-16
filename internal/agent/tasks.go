@@ -22,7 +22,7 @@ const (
 	shellTimeout           = 60 * time.Second
 	maxShellOutputBytes    = 512 * 1024       // 512 KB
 	maxDownloadBytes       = 50 * 1024 * 1024 // 50 MB
-	maxUploadBytes         = 50 * 1024 * 1024 // 50 MB
+	maxUploadBytes         = protocol.MaxUploadFileBytes
 	downloadProgressEvery  = 30 * time.Second
 	maxPathCompletionItems = 200
 	defaultDirectoryPage   = 250

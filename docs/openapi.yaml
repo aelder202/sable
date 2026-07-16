@@ -28,6 +28,8 @@ security:
 tags:
   - name: Auth
     description: Operator authentication.
+  - name: Admin
+    description: Local server lifecycle operations.
   - name: Agents
     description: Registered agent sessions and metadata.
   - name: Tasks
@@ -100,6 +102,23 @@ paths:
                 items: { $ref: '#/components/schemas/AuditEvent' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/admin/shutdown:
+    post:
+      tags: [Admin]
+      operationId: shutdownServer
+      summary: Gracefully stop the local Sable server
+      description: |
+        Requests the same graceful shutdown path used for an operating-system
+        termination signal. The operator API is loopback-only and this route
+        requires a valid operator JWT.
+      responses:
+        '202':
+          description: Shutdown accepted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '503':
+          description: The host process did not configure lifecycle control.
 
   /api/agents:
     get:
@@ -239,7 +258,7 @@ paths:
         | `download`, `complete`, `ls` | Required. Remote path, no null/CR/LF, max 4096 bytes. |
         | `pathbrowse` | `start` or `stop`. |
         | `interactive` | `start` or `stop`. |
-        | `upload` | `<remote-path>:<base64-data>`. Max payload ~67 MB; raw file max 50 MB. Cannot be queued for an agent currently using the DNS transport when payload exceeds 8 KB. |
+        | `upload` | `<remote-path>:<base64-data>`. Max payload ~53.4 MiB; raw file max 40 MiB. Cannot be queued for an agent currently using the DNS transport when payload exceeds 8 KiB. |
         | `sleep` | Integer seconds, 1–86400. |
         | `cancel` | Task ID to cancel, max 64 chars. |
         | `kill`, `ps`, `screenshot`, `persistence`, `peas`, `snapshot` | Must be empty. |
@@ -670,7 +689,7 @@ components:
           description: |
             Per-type rules and limits are listed on the operation. Standard
             payloads are capped at ~48 KB; `upload` payloads are capped at
-            ~67 MB (raw file max 50 MB).
+            ~53.4 MiB (raw file max 40 MiB).
 
     TaskSummary:
       type: object

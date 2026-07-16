@@ -6,6 +6,7 @@ This page is a quick-scan summary. Everything except `POST /api/auth/login` requ
 
 | Method | Path | Notes |
 |--------|------|-------|
+| `POST` | `/api/admin/shutdown` | Gracefully stop the local server. Used by `sablectl down`. |
 | `POST` | `/api/auth/login` | `{"password":"..."}` → `{"token":"..."}`. Rate-limited 5/min/IP. |
 | `GET` | `/api/agents` | List agents (no `outputs`). Supports `limit`/`offset`. |
 | `POST` | `/api/agents` | Register. `{"id":"...","secret_hex":"..."}`. `id` is 1–64 alphanumeric+hyphen. |

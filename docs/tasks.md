@@ -11,7 +11,7 @@
 | **Persistence** | None | Lists common autorun and persistence locations for defensive review. It does not modify the host. |
 | **PEAS** | None | Runs the matching PEASS-ng helper for the session OS. Progress appears in Output; the final result is a saveable text artifact. |
 | **Download** | Remote path | Reads a remote file up to 50 MB. Path suggestions and **Browse** help select a path; large results are chunked and reassembled server-side before the save action appears. |
-| **Upload** | Local file and remote path | Sends a local file up to 50 MB to the selected session. Drag a file onto Output or use **Choose File**. Keep large uploads on HTTPS transport. |
+| **Upload** | Local file and remote path | Sends a local file up to 40 MiB to the selected session. Drag a file onto Output or use **Choose File**. Keep large uploads on HTTPS transport. |
 | **Sleep** | Seconds, `1`-`86400` | Changes the selected session's beacon interval. |
 | **Interactive** | None | Opens a persistent `/bin/sh` or `cmd.exe` session. The agent uses a 100 ms beacon interval while interactive mode is active. Use `exit`, `quit`, or **Exit** to return to normal tasking. |
 
@@ -29,9 +29,9 @@ Use **PS** to request a read-only process listing. Use **Persistence** to list c
 
 Use **Screenshot** to take a single operator-initiated screenshot. The agent downscales and compresses the image, then sends it through bounded result chunks; it is not a continuous capture stream.
 
-Use **PEAS** to run the matching PEASS-ng helper for the selected session OS: LinPEAS on Linux/macOS and winPEAS on Windows. Agent builds can embed cached PEAS scripts for offline targets; otherwise the agent downloads the matching helper at run time. Progress entries are posted while it prepares and runs, and the final output is captured as a text artifact and returned as a saveable result.
+Use **PEAS** to run the matching PEASS-ng helper for the selected session OS: LinPEAS on Linux/macOS and winPEAS on Windows. Agents execute only an embedded helper that was downloaded from a fixed release and verified against its pinned SHA-256 digest at build time; there is no runtime network-download fallback. Progress entries are posted while it runs, and the final output is returned as a saveable text artifact.
 
-For offline PEAS support, run `sablectl rebuild --offline-peas` (which refreshes the PEAS cache before rebuilding agents), or run `make update-peas` once and then build agents normally with `sablectl rebuild`, `sablectl agent build <label>`, or the `make build-agent-*` targets. The updater caches the latest PEASS-ng scripts under `internal/agent/peas/`; those local copies are embedded into subsequently built agent binaries and are ignored by git.
+Before building agents that need PEAS, run `sablectl rebuild --offline-peas`, or run `make update-peas` once and then build normally. The updater uses a fixed release URL, verifies the pinned SHA-256 digest before writing, and caches the verified scripts under `internal/agent/peas/`. Those local copies are embedded into subsequent agent binaries and ignored by git. Updating the pin is an explicit reviewed source change.
 
 Use **Snapshot** for a bounded text report covering identity, network, route, disk, and environment basics.
 
@@ -57,7 +57,7 @@ The agent reads files up to 50 MB, base64-encodes them, and the browser auto-dec
 
 Click **Upload** or drag a file onto the output area. Enter the remote destination path when prompted.
 
-Uploads cap at 50 MB. Large uploads are still delivered as a single HTTPS task payload, so keep upload tasks on HTTPS rather than DNS transport.
+Uploads cap at 40 MiB. This keeps the JSON/base64/encryption envelope below the agent's bounded 72 MiB HTTPS response reader. Upload tasks remain single HTTPS payloads, so do not use DNS transport for large files.
 
 ### Kill safety
 
@@ -71,13 +71,13 @@ Queueing `kill` requires a second confirmation click. There is no undo.
 | `ps` | `ps` | Read-only process listing. Output cap 48 KB. |
 | `screenshot` | `screenshot` | One operator-initiated bounded screenshot. Returns a chunked image result, not a stream. |
 | `persistence` | `persistence` | Read-only listing of common persistence locations for the agent OS. Output cap 48 KB. |
-| `peas` | `peas` | Runs embedded LinPEAS/winPEAS when available, otherwise downloads the matching helper. Returns output as a text artifact. |
+| `peas` | `peas` | Runs a build-time SHA-256-verified embedded LinPEAS/winPEAS helper. Returns output as a text artifact. |
 | `snapshot` | `snapshot` | Collects a bounded host snapshot report and returns it as a text artifact. |
 | `ls` | Internal File Browser task | Read-only structured directory listing used by the Download task's Browse button. |
 | `cancel` | `cancel <task-id>` | Cancels a running background task when supported. |
 | `interactive` | Web UI / API | Open or close a persistent shell on the agent. |
 | `download` | `download <remote-path>` | Read a file off the agent. 50 MB cap; results are chunked and reassembled server-side. |
-| `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. 50 MB cap; use HTTPS transport for large files. |
+| `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. 40 MiB cap; use HTTPS transport for large files. |
 | `pathbrowse` | Web UI Download field | Internal: primes fast beaconing for the path browser. |
 | `complete` | Web UI Download field | Internal: lists matching paths under the typed prefix. Extends the fast path-browse window. |
 | `sleep` | `sleep <seconds>` | Change beacon interval. Range 1–86400. |

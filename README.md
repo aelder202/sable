@@ -61,9 +61,9 @@ See [docs/architecture.md](docs/architecture.md) for the crypto details, network
 
 ## Prerequisites
 
-- Go 1.26.2 or later (matches `go.mod`)
+- Go 1.26.5 or later (matches `go.mod` and includes the current security fixes)
 - `make` (Linux, macOS, or Windows; PowerShell or cmd)
-- Root / admin on the server host if binding `443` (and `53` when DNS fallback is on)
+- Permission to bind `443` (and `53/udp` when DNS fallback is on). Prefer a dedicated unprivileged account with only the bind capability, or use high ports and an OS-level redirect.
 
 Agents cross-compile through `GOOS`/`GOARCH`, so you can build from any host OS.
 
@@ -78,9 +78,54 @@ git clone https://github.com/aelder202/sable
 cd sable
 ```
 
+### Guided Setup (Recommended)
+
+From a fresh clone, run one command:
+
+```sh
+go run ./cmd/sablectl setup
+```
+
+The guide asks for the agent callback URL, target platforms, labels, beacon
+profile, credential location, state encryption, and whether to start now. It
+then creates the local configuration and TLS certificate, builds `sablectl`,
+the server, and selected agents, starts the server, registers local identities,
+and runs the health checks. The final summary includes each agent artifact's
+SHA-256 checksum and authorized Linux or Windows deployment command templates.
+
+For an unattended local lab setup using the secure defaults:
+
+```sh
+go run ./cmd/sablectl setup --yes
+```
+
+For an unattended setup with an externally reachable agent listener and both
+agent platforms:
+
+```sh
+go run ./cmd/sablectl setup --yes \
+  --url https://<your-server-ip>:443 \
+  --agents both \
+  --windows-label win01
+```
+
+After setup, use the generated control binary:
+
+```sh
+./sablectl status
+./sablectl down
+./sablectl up
+```
+
+On Windows, use `.\sablectl.exe` in place of `./sablectl`. Setup stores the
+generated operator password at `.sable/operator-password`, the state encryption
+key at `.sable/state.key`, and server logs at `.sable/server.log` by default.
+
+The manual steps below remain available for custom or development installs.
+
 Modules pull on the first build. Run `go mod download` if you want to pre-warm the cache.
 
-### 2. Install
+### Manual Install
 
 Build the unified helper, then let it create the local config, TLS certificate, server binary, selected agent binaries, and `.sable/install.json` manifest.
 
@@ -127,7 +172,7 @@ Set-Content -Encoding ascii -NoNewline .\pw.txt "yourpassword"
 
 `SABLE_OPERATOR_PASSWORD` and stdin both work too.
 
-By default the server persists operator metadata to `sable-state.json` and large artifact bodies to `sable-state.json.artifacts/`. Registered agents, reliable queued/in-flight tasks, output history, notes, tags, artifacts, and audit events survive a restart. These files contain secrets and task output, so treat them like `config.env`. Sable tightens generated sensitive-file permissions; `sablectl doctor` warns about broad local ACLs/modes, certificate expiry, and invalid state keys. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, or disable persistence with `--state-file none`. Optional AES-256-GCM encryption is enabled with `--state-key-file <path>` / `SABLE_STATE_KEY_FILE`; `sablectl install --state-key-file .sable/state.key ...` creates and records a suitable key.
+By default the server persists operator metadata to `sable-state.json`, stores large artifact bodies under `sable-state.json.artifacts/`, and encrypts both with AES-256-GCM using `.sable/state.key`. Registered agents, reliable queued/in-flight tasks, output history, notes, tags, artifacts, and audit events survive a restart. Sable creates the key when missing and writes sensitive files through restricted temporary files and atomic replacement. Back up the key separately: encrypted state cannot be recovered without it. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, disable persistence with `--state-file none`, or explicitly opt out of encryption with `--state-key-file none`.
 
 The server prints its TLS fingerprint and listener status:
 
@@ -172,10 +217,12 @@ If you skipped `--password-file` during install, pass it here (the flag may go b
 Create another local identity, then build it:
 
 ```sh
-./sablectl agent add windows --label win01
-./sablectl agent build win01
-./sablectl agent register win01
+./sablectl agent create windows --label win01
 ```
+
+`agent create` creates the identity, builds its artifact, and registers it when
+the local server is running. If the server is offline, registration is deferred
+until the next `sablectl up`.
 
 After source changes, rebuild without remembering which target changed:
 

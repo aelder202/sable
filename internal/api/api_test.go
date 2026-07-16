@@ -16,7 +16,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const testJWTSecret = "test-jwt-secret-32-bytes-padding"
+const testJWTSecret = "test-only-signing-value"
 
 func setupAPI(t *testing.T) (*api.Router, *session.Store) {
 	t.Helper()
@@ -149,6 +149,38 @@ func signToken(t *testing.T, claims jwt.Claims) string {
 func TestLoginSuccess(t *testing.T) {
 	router, _ := setupAPI(t)
 	loginAndGetToken(t, router) // fails if token empty
+}
+
+func TestShutdownRequiresAuthenticationAndInvokesCallback(t *testing.T) {
+	store := session.NewStore()
+	shutdown := make(chan struct{}, 1)
+	router := api.NewRouter(store, &api.Config{
+		OperatorPasswordHash: api.HashPassword("testpassword"),
+		JWTSecret:            []byte(testJWTSecret),
+		Shutdown: func() {
+			shutdown <- struct{}{}
+		},
+	})
+
+	unauthorized := doRequest(t, router, http.MethodPost, "/api/admin/shutdown", nil, nil)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized shutdown status = %d", unauthorized.Code)
+	}
+	token := loginAndGetToken(t, router)
+	headers := map[string]string{"Authorization": "Bearer " + token}
+	wrongMethod := doRequest(t, router, http.MethodGet, "/api/admin/shutdown", nil, headers)
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET shutdown status = %d", wrongMethod.Code)
+	}
+	accepted := doRequest(t, router, http.MethodPost, "/api/admin/shutdown", nil, headers)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("shutdown status = %d: %s", accepted.Code, accepted.Body.String())
+	}
+	select {
+	case <-shutdown:
+	default:
+		t.Fatal("shutdown callback was not invoked")
+	}
 }
 
 func TestLoginWrongPassword(t *testing.T) {
@@ -537,7 +569,7 @@ func TestRegisterAgent(t *testing.T) {
 	// Valid registration.
 	body, _ := json.Marshal(map[string]string{
 		"id":         "new-agent-123",
-		"secret_hex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		"secret_hex": "0000000000000000000000000000000000000000000000000000000000000000",
 	})
 	w := doRequest(t, router, http.MethodPost, "/api/agents", body, map[string]string{
 		"Authorization": "Bearer " + token,
@@ -579,6 +611,12 @@ func TestGetTaskOutputs(t *testing.T) {
 func TestClearTaskOutputs(t *testing.T) {
 	router, store := setupAPI(t)
 	token := loginAndGetToken(t, router)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "task-1", Type: "shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if task := store.DeliverTask("agent-1"); task == nil {
+		t.Fatal("expected task delivery")
+	}
 	store.RecordOutput("agent-1", &protocol.TaskResult{TaskID: "task-1", Type: "shell", Output: "hello"})
 
 	w := doRequest(t, router, http.MethodDelete, "/api/agents/agent-1/tasks", nil, map[string]string{

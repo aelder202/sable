@@ -13,6 +13,16 @@ import (
 	"github.com/aelder202/sable/internal/session"
 )
 
+func enqueueAndDeliver(t *testing.T, s *session.Store, agentID string, task *protocol.Task) {
+	t.Helper()
+	if err := s.EnqueueTask(agentID, task); err != nil {
+		t.Fatal(err)
+	}
+	if delivered := s.DeliverTask(agentID); delivered == nil || delivered.ID != task.ID {
+		t.Fatalf("task %q was not delivered: %+v", task.ID, delivered)
+	}
+}
+
 func TestRegisterAndGet(t *testing.T) {
 	s := session.NewStore()
 	ag := &session.Agent{
@@ -175,7 +185,9 @@ func TestUpdateInfo(t *testing.T) {
 func TestRecordAndGetOutputs(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t1", Type: "shell"})
 	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t1", Output: "hello"})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t2", Type: "shell"})
 	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t2", Output: "world", Error: "oops"})
 	outs := s.GetOutputs("a1")
 	if len(outs) != 2 {
@@ -189,6 +201,7 @@ func TestRecordAndGetOutputs(t *testing.T) {
 func TestClearOutputs(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t1", Type: "shell"})
 	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t1", Output: "hello"})
 
 	if !s.ClearOutputs("a1") {
@@ -205,6 +218,7 @@ func TestClearOutputs(t *testing.T) {
 func TestRecordOutputReassemblesChunks(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "chunked", Type: "download"})
 
 	if complete := s.RecordOutput("a1", &protocol.TaskResult{
 		TaskID:     "chunked",
@@ -238,11 +252,12 @@ func TestRecordOutputReassemblesChunks(t *testing.T) {
 func TestRecordOutputRejectsOversizedChunkedOutput(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "too-big", Type: "download"})
 
 	complete := s.RecordOutput("a1", &protocol.TaskResult{
 		TaskID:     "too-big",
 		Type:       "download",
-		Output:     strings.Repeat("x", 73*1024*1024),
+		Output:     strings.Repeat("x", 1024*1024+1),
 		ChunkIndex: 0,
 		ChunkTotal: 2,
 	})
@@ -252,6 +267,49 @@ func TestRecordOutputRejectsOversizedChunkedOutput(t *testing.T) {
 	outs := s.GetOutputs("a1")
 	if len(outs) != 1 || outs[0].Error == "" {
 		t.Fatalf("expected oversized error record, got %+v", outs)
+	}
+}
+
+func TestRecordOutputRejectsUnsolicitedTaskID(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+
+	if complete := s.RecordOutput("a1", &protocol.TaskResult{TaskID: "not-issued", Type: "shell", Output: "ignored"}); !complete {
+		t.Fatal("an unsolicited result should be terminally acknowledged")
+	}
+	if outputs := s.GetOutputs("a1"); len(outputs) != 0 {
+		t.Fatalf("unsolicited result was retained: %+v", outputs)
+	}
+}
+
+func TestRecordOutputBoundsConcurrentChunkAssemblies(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
+
+	for i := 0; i < 9; i++ {
+		taskID := fmt.Sprintf("background-%d", i)
+		enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: taskID, Type: "download"})
+		s.RecordOutput("a1", &protocol.TaskResult{
+			TaskID: taskID + "-download-progress",
+			Type:   "download_progress",
+			Output: "started",
+		})
+	}
+	for i := 0; i < 8; i++ {
+		if complete := s.RecordOutput("a1", &protocol.TaskResult{
+			TaskID: fmt.Sprintf("background-%d", i), Type: "download", Output: "part", ChunkIndex: 0, ChunkTotal: 2,
+		}); complete {
+			t.Fatalf("assembly %d unexpectedly completed", i)
+		}
+	}
+	if complete := s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID: "background-8", Type: "download", Output: "part", ChunkIndex: 0, ChunkTotal: 2,
+	}); !complete {
+		t.Fatal("assembly over the per-agent cap should complete with an error")
+	}
+	outputs := s.GetOutputs("a1")
+	if len(outputs) == 0 || !strings.Contains(outputs[len(outputs)-1].Error, "too many incomplete") {
+		t.Fatalf("expected assembly limit error, got %+v", outputs)
 	}
 }
 
@@ -272,7 +330,9 @@ func TestRecordOutputCapsHistory(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
 	for i := 0; i < 300; i++ {
-		s.RecordOutput("a1", &protocol.TaskResult{TaskID: fmt.Sprintf("t-%d", i), Output: "x"})
+		taskID := fmt.Sprintf("t-%d", i)
+		enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: taskID, Type: "shell"})
+		s.RecordOutput("a1", &protocol.TaskResult{TaskID: taskID, Output: "x"})
 	}
 	outs := s.GetOutputs("a1")
 	if len(outs) != 256 {
@@ -339,14 +399,15 @@ func TestPersistentStoreRoundTrip(t *testing.T) {
 	if _, ok := s.UpdateMetadata("a1", "important", []string{"lab", "lab", "linux"}); !ok {
 		t.Fatal("expected metadata update to find agent")
 	}
-	if err := s.EnqueueTask("a1", &protocol.Task{ID: "task-1", Type: "shell", Payload: "id"}); err != nil {
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "task-1", Type: "shell", Payload: "id"})
+	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "task-1", Type: "shell", Output: "hello"})
+	if err := s.EnqueueTask("a1", &protocol.Task{ID: "task-2", Type: "shell", Payload: "whoami"}); err != nil {
 		t.Fatalf("EnqueueTask: %v", err)
 	}
-	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "done-1", Type: "shell", Output: "hello"})
 	if _, ok := s.AddArtifact("a1", session.Artifact{
 		ID:       "artifact-1",
-		Key:      "done-1:output.txt",
-		TaskID:   "done-1",
+		Key:      "task-1:output.txt",
+		TaskID:   "task-1",
 		Filename: "output.txt",
 		Data:     "aGVsbG8=",
 	}); !ok {
@@ -374,7 +435,7 @@ func TestPersistentStoreRoundTrip(t *testing.T) {
 	if len(agent.Tags) != 2 || agent.Tags[0] != "lab" || agent.Tags[1] != "linux" {
 		t.Fatalf("unexpected persisted tags: %#v", agent.Tags)
 	}
-	if len(agent.Queued) != 1 || agent.Queued[0].ID != "task-1" {
+	if len(agent.Queued) != 1 || agent.Queued[0].ID != "task-2" {
 		t.Fatalf("unexpected persisted queue: %#v", agent.Queued)
 	}
 	outputs := reloaded.GetOutputs("a1")
@@ -391,6 +452,37 @@ func TestPersistentStoreRoundTrip(t *testing.T) {
 	artifact, ok := reloaded.GetArtifact("a1", "artifact-1")
 	if !ok || artifact.Data != "aGVsbG8=" {
 		t.Fatalf("unexpected persisted artifact: %#v", artifact)
+	}
+}
+
+func TestPersistentStoreRetainsBackgroundTaskCorrelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sable-state.json")
+	s, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "download-1", Type: "download"})
+	if !s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID: "download-1-progress", Type: "download_progress", Output: "started",
+	}) {
+		t.Fatal("progress result should acknowledge background task start")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close() //nolint:errcheck
+	if !reloaded.RecordOutput("a1", &protocol.TaskResult{TaskID: "download-1", Type: "download", Output: "finished"}) {
+		t.Fatal("background final result should remain correlated after restart")
+	}
+	outputs := reloaded.GetOutputs("a1")
+	if len(outputs) != 2 || outputs[1].TaskID != "download-1" || outputs[1].Output != "finished" {
+		t.Fatalf("unexpected restored background outputs: %+v", outputs)
 	}
 }
 
@@ -430,6 +522,7 @@ func TestTaskDeliveryRetriesUntilMatchingAcknowledgment(t *testing.T) {
 func TestMaliciousChunkCountIsRejectedWithoutAssembly(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "malicious", Type: "download"})
 	complete := s.RecordOutput("a1", &protocol.TaskResult{
 		TaskID: "malicious", Type: "download", Output: "x", ChunkIndex: 0, ChunkTotal: 1_000_000_000,
 	})

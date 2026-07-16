@@ -78,10 +78,12 @@ If you didn't pass `--password-file` during install, add it explicitly: `./sable
 Every additional agent gets its own env file under `agents/<label>.env`:
 
 ```sh
-./sablectl agent add linux --label web01
-./sablectl agent build web01
-./sablectl agent register web01
+./sablectl agent create linux --label web01
 ```
+
+`agent create` creates the identity, builds it, and registers it when the local
+server is reachable. An offline build remains valid and is registered on the
+next `sablectl up`.
 
 Labels must be lowercase with letters, digits, `-`, or `_`. `PC` and `VM` get rejected; use `pc` and `vm`.
 

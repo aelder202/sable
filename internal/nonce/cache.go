@@ -13,15 +13,26 @@ type entry struct {
 // Cache is a concurrency-safe nonce store with TTL-based expiry.
 // It is used to detect and reject replayed beacon nonces.
 type Cache struct {
-	mu        sync.Mutex
-	ttl       time.Duration
-	m         map[string]entry
-	nextSweep time.Time
+	mu         sync.Mutex
+	ttl        time.Duration
+	maxEntries int
+	m          map[string]entry
+	nextSweep  time.Time
 }
+
+const defaultMaxEntries = 100_000
 
 // NewCache creates a Cache where nonces expire after ttl.
 func NewCache(ttl time.Duration) *Cache {
-	return &Cache{ttl: ttl, m: make(map[string]entry), nextSweep: time.Now().Add(sweepInterval(ttl))}
+	return NewBoundedCache(ttl, defaultMaxEntries)
+}
+
+// NewBoundedCache creates a nonce cache with an explicit hard entry cap.
+func NewBoundedCache(ttl time.Duration, maxEntries int) *Cache {
+	if maxEntries < 1 {
+		maxEntries = 1
+	}
+	return &Cache{ttl: ttl, maxEntries: maxEntries, m: make(map[string]entry), nextSweep: time.Now().Add(sweepInterval(ttl))}
 }
 
 // Seen reports whether n has been added and has not yet expired.
@@ -38,6 +49,9 @@ func (c *Cache) Add(n []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.evict()
+	if len(c.m) >= c.maxEntries {
+		return
+	}
 	c.m[hex.EncodeToString(n)] = entry{expiresAt: time.Now().Add(c.ttl)}
 }
 
@@ -55,6 +69,11 @@ func (c *Cache) SeenOrAdd(n []byte) bool {
 	key := hex.EncodeToString(n)
 	now := time.Now()
 	if e, ok := c.m[key]; ok && now.Before(e.expiresAt) {
+		return true
+	}
+	if len(c.m) >= c.maxEntries {
+		// Fail closed when capacity is exhausted rather than allowing replay
+		// protection state to grow without bound.
 		return true
 	}
 	c.m[key] = entry{expiresAt: now.Add(c.ttl)}

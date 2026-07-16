@@ -118,4 +118,4 @@ gen-secret:
 
 ## Lint docs/openapi.yaml using Redocly CLI. Requires Node.js (uses npx; nothing committed).
 validate-openapi:
-	npx --yes @redocly/cli@latest lint docs/openapi.yaml
+	npx --yes @redocly/cli@2.39.0 lint docs/openapi.yaml

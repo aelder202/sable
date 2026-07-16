@@ -5,16 +5,19 @@
 - Agents pin the server cert by SHA-256 fingerprint. A trusted-CA cert substitution does not help an attacker because the fingerprint check fails first.
 - Operator password is hashed with Argon2id (t=3, m=64 MB, p=4). No plaintext storage.
 - Nonce replay protection is an atomic check-and-record; no TOCTOU window between concurrent beacons.
-- Per-source-IP rate limiting on both transports: 200 HTTPS / 1024 DNS requests per 10s window. DNS beacons span many label-sized queries, so their request budget is higher while concurrent sessions, total chunks, and assembled bytes remain bounded.
+- Per-source-IP rate limiting on both transports: 200 HTTPS / 1024 DNS requests per 10s window. Limiter maps are capped and swept periodically. DNS authenticates every chunk before allocating state and caps concurrent reassembly to eight sessions per source and 256 globally.
 - Agent IDs are restricted to alphanumeric + hyphen at registration. No path traversal, no injection through the ID field.
-- Task queues capped at 64 entries per agent; output history capped at 256.
-- The SSE stream endpoint disables its write deadline for long-lived connections; a 15s keepalive comment keeps proxies from timing the stream out. Other endpoints enforce the 10s write deadline.
+- Task queues are capped at 64 entries per agent. Results must correlate to a delivered or tracked background task; incomplete chunk assemblies, aggregate assembly bytes, output count, and retained output bytes are all bounded.
+- SSE connections may remain idle indefinitely, but every event and keepalive write receives a fresh five-second deadline so a slow or abandoned client cannot pin a writer goroutine.
 - `config.env`, `sable-state.json`, `server.crt`, `server.key`, `agents/*.env`, password files, and built agent binaries are sensitive. Do not commit them.
-- Sable is designed for local deployment. Persisted state is plaintext JSON by default so local recovery and troubleshooting remain simple. Treat `sable-state.json` and its `.artifacts` directory as highly sensitive: they contain agent pre-shared secrets, queued tasks, command output, artifact metadata/data, notes, tags, and audit history.
-- Optional at-rest encryption is enabled with `--state-key-file <path>` or `SABLE_STATE_KEY_FILE`. The key must be 32 raw bytes or 64 hexadecimal characters. AES-256-GCM protects both the metadata snapshot and artifact blobs; losing the key makes state unrecoverable. `sablectl install --state-key-file .sable/state.key` creates, restricts, records, and reuses a key file.
-- `sablectl` only disables TLS chain verification for loopback operator API origins. Agent listener URLs must be pathless HTTPS origins and continue to use certificate fingerprint pinning.
+- Persisted state is encrypted by default with AES-256-GCM through `.sable/state.key`. The key is generated when missing and protects both metadata and artifact blobs; losing it makes state unrecoverable. `--state-key-file none` is the explicit plaintext opt-out.
+- Operator CLI and `sablectl` clients require a loopback HTTPS origin and pin the exact leaf certificate from `server.crt`; they reject redirects and never accept an arbitrary self-signed listener. Agent listener URLs remain pathless HTTPS origins and use their build-time certificate fingerprint.
+- `sablectl down` uses a JWT-authenticated shutdown endpoint on the loopback-only operator API; it enters the server's normal graceful state-flush path.
 - The server logs certificate expiry at startup and warns inside 30 days; `sablectl doctor` reports the same condition.
-- Sable now tightens generated sensitive-file permissions at write time. On Unix-like systems it applies owner-only file modes. On Windows it replaces inherited file ACLs with entries for the current user, Administrators, and SYSTEM. Agent-producing `sablectl` and Makefile build paths also harden built agent binaries after compilation.
+- Sensitive bytes are written only after a temporary file has owner-only permissions/protected Windows ACLs; the restricted file is synced and atomically replaces its destination. Agent-producing `sablectl` and Makefile build paths also harden built agent binaries after compilation.
+- The optional pprof listener is loopback-only TLS, uses the pinned server certificate, requires the operator password as a bearer token, and applies bounded headers and I/O deadlines.
+- PEAS helpers are never fetched by an agent at runtime. The build-time updater uses fixed release URLs and verifies pinned SHA-256 digests before embedding an asset.
+- CI runs on main and release branches with pinned Actions/tool versions, Windows tests, cross-builds, race/static/vulnerability/secret scans, OpenAPI validation, and Dependabot updates.
 - Run `sablectl doctor` after install or when moving files. It warns if sensitive local files inherit broad permissions or grant access to unexpected principals. Run `sablectl doctor --fix-permissions` to harden existing generated files in place.
 - Manual Unix-like remediation: `chmod 600 config.env sable-state.json server.key pw.txt` and `chmod 700 agents`.
 - Manual Windows remediation when needed:

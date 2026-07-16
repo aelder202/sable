@@ -94,6 +94,7 @@ type Agent struct {
 	Artifacts         []Artifact    `json:"artifacts,omitempty"`
 	ArtifactRetention int           `json:"artifact_retention,omitempty"`
 	tasks             []*queuedTask
+	lastPersisted     time.Time
 }
 
 // Store is a concurrency-safe session store.
@@ -112,7 +113,10 @@ type Store struct {
 	subs   map[string][]chan struct{}
 
 	chunks map[string]*resultChunkAssembly
-	audit  []AuditEvent
+	// background tracks tasks acknowledged by a progress result while their
+	// asynchronous final result is still outstanding.
+	background map[string]time.Time
+	audit      []AuditEvent
 
 	persistCh   chan persistRequest
 	persistDone chan struct{}
@@ -120,18 +124,27 @@ type Store struct {
 }
 
 const (
-	maxQueuedTasksPerAgent = 64
-	maxOutputsPerAgent     = 256
-	maxArtifactsPerAgent   = 256
-	maxAuditEvents         = 512
-	maxChunkedOutputBytes  = 72 * 1024 * 1024
-	maxResultChunks        = 256
-	maxResultTaskIDBytes   = 128
-	maxResultTypeBytes     = 64
-	maxResultErrorBytes    = 64 * 1024
-	maxResultChunkBytes    = 1 * 1024 * 1024
-	chunkAssemblyTTL       = 10 * time.Minute
-	persistDebounce        = 250 * time.Millisecond
+	maxQueuedTasksPerAgent         = 64
+	maxOutputsPerAgent             = 256
+	maxArtifactsPerAgent           = 256
+	maxAuditEvents                 = 512
+	maxChunkedOutputBytes          = 72 * 1024 * 1024
+	maxResultChunks                = 256
+	maxResultTaskIDBytes           = 128
+	maxResultTypeBytes             = 64
+	maxResultErrorBytes            = 64 * 1024
+	maxResultChunkBytes            = 1 * 1024 * 1024
+	maxChunkAssemblies             = 256
+	maxChunkAssembliesPerAgent     = 8
+	maxChunkAssemblyBytes          = 256 * 1024 * 1024
+	maxChunkAssemblyBytesPerAgent  = 80 * 1024 * 1024
+	maxRetainedOutputBytesPerAgent = 128 * 1024 * 1024
+	maxBackgroundTasks             = 4096
+	maxBackgroundTasksPerAgent     = 64
+	chunkAssemblyTTL               = 10 * time.Minute
+	backgroundTaskTTL              = 2 * time.Hour
+	heartbeatPersistInterval       = 30 * time.Second
+	persistDebounce                = 250 * time.Millisecond
 )
 
 var encryptedStateMagic = []byte("SABLE-STATE-ENC-v1\n")
@@ -162,6 +175,7 @@ type persistedAgent struct {
 	Outputs           []TaskOutput          `json:"outputs,omitempty"`
 	Artifacts         []Artifact            `json:"artifacts,omitempty"`
 	ArtifactRetention int                   `json:"artifact_retention,omitempty"`
+	Background        map[string]time.Time  `json:"background,omitempty"`
 }
 
 type persistedQueuedTask struct {
@@ -174,11 +188,12 @@ type persistedQueuedTask struct {
 // NewStore returns an empty Store.
 func NewStore() *Store {
 	return &Store{
-		agents: make(map[string]*Agent),
-		order:  make([]string, 0),
-		subs:   make(map[string][]chan struct{}),
-		chunks: make(map[string]*resultChunkAssembly),
-		audit:  make([]AuditEvent, 0),
+		agents:     make(map[string]*Agent),
+		order:      make([]string, 0),
+		subs:       make(map[string][]chan struct{}),
+		chunks:     make(map[string]*resultChunkAssembly),
+		background: make(map[string]time.Time),
+		audit:      make([]AuditEvent, 0),
 	}
 }
 
@@ -260,11 +275,13 @@ func (s *Store) Register(a *Agent) {
 		a.Outputs = cloneOutputs(existing.Outputs)
 		a.Artifacts = cloneArtifacts(existing.Artifacts, true)
 		a.ArtifactRetention = existing.ArtifactRetention
+		a.lastPersisted = existing.lastPersisted
 	} else {
 		s.order = append(s.order, a.ID)
 	}
 	s.agents[a.ID] = a
 	s.appendAuditLocked(a.ID, "register", "agent registered")
+	a.lastPersisted = time.Now()
 	s.persistLocked()
 }
 
@@ -319,14 +336,19 @@ func (s *Store) UpdateInfoWithTransport(id, hostname, osName, arch, transport st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if a, ok := s.agents[id]; ok {
+		metadataChanged := a.Hostname != hostname || a.OS != osName || a.Arch != arch || (transport != "" && a.Transport != transport)
 		a.Hostname = hostname
 		a.OS = osName
 		a.Arch = arch
 		if transport != "" {
 			a.Transport = transport
 		}
-		a.LastSeen = time.Now()
-		s.persistLocked()
+		now := time.Now()
+		a.LastSeen = now
+		if metadataChanged || a.lastPersisted.IsZero() || now.Sub(a.lastPersisted) >= heartbeatPersistInterval {
+			a.lastPersisted = now
+			s.persistLocked()
+		}
 	}
 }
 
@@ -342,6 +364,14 @@ func (s *Store) RecordOutput(agentID string, result *protocol.TaskResult) bool {
 	}
 
 	if result == nil {
+		s.mu.Unlock()
+		return true
+	}
+	now := time.Now()
+	s.evictExpiredStateLocked(now)
+	if !s.resultMatchesKnownTaskLocked(agentID, a, result, now) {
+		// Authenticated but unsolicited results must not allocate assemblies,
+		// consume retained output, or acknowledge a different queued task.
 		s.mu.Unlock()
 		return true
 	}
@@ -364,6 +394,7 @@ func (s *Store) RecordOutput(agentID string, result *protocol.TaskResult) bool {
 	}
 	if complete {
 		s.ackTaskLocked(agentID, a, result)
+		s.completeBackgroundTaskLocked(agentID, result)
 		s.persistLocked()
 	}
 	s.mu.Unlock()
@@ -419,19 +450,53 @@ func appendOutputLocked(a *Agent, result *protocol.TaskResult) {
 		Error:     result.Error,
 		Timestamp: time.Now(),
 	})
-	if len(a.Outputs) > maxOutputsPerAgent {
-		a.Outputs = a.Outputs[len(a.Outputs)-maxOutputsPerAgent:]
+	trimOutputsLocked(a)
+}
+
+func trimOutputsLocked(a *Agent) {
+	retainedBytes := outputBytes(a.Outputs)
+	for len(a.Outputs) > 0 && (len(a.Outputs) > maxOutputsPerAgent || retainedBytes > maxRetainedOutputBytesPerAgent) {
+		retainedBytes -= outputByteSize(a.Outputs[0])
+		a.Outputs = a.Outputs[1:]
 	}
+}
+
+func outputBytes(outputs []TaskOutput) int {
+	total := 0
+	for _, output := range outputs {
+		total += outputByteSize(output)
+	}
+	return total
+}
+
+func outputByteSize(output TaskOutput) int {
+	return len(output.TaskID) + len(output.Type) + len(output.Output) + len(output.Error)
 }
 
 func (s *Store) recordChunkedOutputLocked(agentID string, a *Agent, result *protocol.TaskResult) bool {
 	if hasOutputLocked(a, result.TaskID) {
 		return true
 	}
-	s.evictExpiredChunksLocked(time.Now())
 	key := chunkKey(agentID, result.TaskID)
 	assembly, ok := s.chunks[key]
-	if !ok || len(assembly.parts) != result.ChunkTotal || assembly.taskType != result.Type {
+	if ok && (len(assembly.parts) != result.ChunkTotal || assembly.taskType != result.Type) {
+		delete(s.chunks, key)
+		appendOutputLocked(a, &protocol.TaskResult{
+			TaskID: result.TaskID,
+			Type:   result.Type,
+			Error:  "inconsistent chunk metadata",
+		})
+		return true
+	}
+	if !ok {
+		if len(s.chunks) >= maxChunkAssemblies || s.chunkAssemblyCountLocked(agentID) >= maxChunkAssembliesPerAgent {
+			appendOutputLocked(a, &protocol.TaskResult{
+				TaskID: result.TaskID,
+				Type:   result.Type,
+				Error:  "too many incomplete chunked outputs",
+			})
+			return true
+		}
 		assembly = &resultChunkAssembly{
 			taskType:  result.Type,
 			parts:     make([]string, result.ChunkTotal),
@@ -452,7 +517,9 @@ func (s *Store) recordChunkedOutputLocked(agentID string, a *Agent, result *prot
 		assembly.err = result.Error
 	}
 
-	if assembly.bytes > maxChunkedOutputBytes {
+	if assembly.bytes > maxChunkedOutputBytes ||
+		s.chunkAssemblyBytesLocked("") > maxChunkAssemblyBytes ||
+		s.chunkAssemblyBytesLocked(agentID) > maxChunkAssemblyBytesPerAgent {
 		delete(s.chunks, key)
 		appendOutputLocked(a, &protocol.TaskResult{
 			TaskID: result.TaskID,
@@ -489,13 +556,40 @@ func hasOutputLocked(a *Agent, taskID string) bool {
 	return false
 }
 
-func (s *Store) evictExpiredChunksLocked(now time.Time) {
+func (s *Store) evictExpiredStateLocked(now time.Time) {
 	cutoff := now.Add(-chunkAssemblyTTL)
 	for key, assembly := range s.chunks {
 		if assembly.updatedAt.Before(cutoff) {
 			delete(s.chunks, key)
 		}
 	}
+	for key, expiresAt := range s.background {
+		if !expiresAt.After(now) {
+			delete(s.background, key)
+		}
+	}
+}
+
+func (s *Store) chunkAssemblyCountLocked(agentID string) int {
+	prefix := agentID + "\x00"
+	count := 0
+	for key := range s.chunks {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Store) chunkAssemblyBytesLocked(agentID string) int {
+	prefix := agentID + "\x00"
+	total := 0
+	for key, assembly := range s.chunks {
+		if agentID == "" || strings.HasPrefix(key, prefix) {
+			total += assembly.bytes
+		}
+	}
+	return total
 }
 
 func chunkKey(agentID, taskID string) string {
@@ -807,6 +901,9 @@ func (s *Store) ackTaskLocked(agentID string, a *Agent, result *protocol.TaskRes
 	if !resultAcknowledgesTask(result, item.task.ID) {
 		return false
 	}
+	if result.TaskID != item.task.ID {
+		s.trackBackgroundTaskLocked(agentID, item.task.ID, time.Now())
+	}
 	a.tasks = a.tasks[1:]
 	s.appendAuditLocked(agentID, "ack_task", item.task.Type+" "+item.task.ID)
 	if item.task.Type == "kill" && len(a.tasks) > 0 {
@@ -815,6 +912,66 @@ func (s *Store) ackTaskLocked(agentID string, a *Agent, result *protocol.TaskRes
 		s.appendAuditLocked(agentID, "cancel_after_kill", strconv.Itoa(dropped)+" queued task(s)")
 	}
 	return true
+}
+
+func (s *Store) resultMatchesKnownTaskLocked(agentID string, a *Agent, result *protocol.TaskResult, now time.Time) bool {
+	if hasOutputLocked(a, result.TaskID) {
+		return true
+	}
+	if len(a.tasks) > 0 && a.tasks[0] != nil && a.tasks[0].task != nil && a.tasks[0].deliveryAttempts > 0 && resultAcknowledgesTask(result, a.tasks[0].task.ID) {
+		return true
+	}
+	prefix := agentID + "\x00"
+	for key, expiresAt := range s.background {
+		if !expiresAt.After(now) || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		taskID := strings.TrimPrefix(key, prefix)
+		if resultAcknowledgesTask(result, taskID) {
+			s.background[key] = now.Add(backgroundTaskTTL)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) trackBackgroundTaskLocked(agentID, taskID string, now time.Time) {
+	key := chunkKey(agentID, taskID)
+	if _, exists := s.background[key]; exists {
+		s.background[key] = now.Add(backgroundTaskTTL)
+		return
+	}
+
+	prefix := agentID + "\x00"
+	perAgent := 0
+	globalOldestKey := ""
+	globalOldestExpiry := time.Time{}
+	agentOldestKey := ""
+	agentOldestExpiry := time.Time{}
+	for existingKey, expiresAt := range s.background {
+		if globalOldestKey == "" || expiresAt.Before(globalOldestExpiry) {
+			globalOldestKey, globalOldestExpiry = existingKey, expiresAt
+		}
+		if strings.HasPrefix(existingKey, prefix) {
+			perAgent++
+			if agentOldestKey == "" || expiresAt.Before(agentOldestExpiry) {
+				agentOldestKey, agentOldestExpiry = existingKey, expiresAt
+			}
+		}
+	}
+	if perAgent >= maxBackgroundTasksPerAgent {
+		delete(s.background, agentOldestKey)
+	} else if len(s.background) >= maxBackgroundTasks {
+		delete(s.background, globalOldestKey)
+	}
+	s.background[key] = now.Add(backgroundTaskTTL)
+}
+
+func (s *Store) completeBackgroundTaskLocked(agentID string, result *protocol.TaskResult) {
+	if result == nil {
+		return
+	}
+	delete(s.background, chunkKey(agentID, result.TaskID))
 }
 
 func resultAcknowledgesTask(result *protocol.TaskResult, taskID string) bool {
@@ -877,6 +1034,11 @@ func (s *Store) DeleteAgent(agentID string) bool {
 	for key := range s.chunks {
 		if strings.HasPrefix(key, prefix) {
 			delete(s.chunks, key)
+		}
+	}
+	for key := range s.background {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.background, key)
 		}
 	}
 	s.appendAuditLocked(agentID, "delete_agent", "agent identity revoked")
@@ -1035,7 +1197,9 @@ func (s *Store) loadState() error {
 	}
 
 	s.agents = make(map[string]*Agent)
+	s.background = make(map[string]time.Time)
 	s.order = make([]string, 0, len(state.Agents))
+	now := time.Now()
 	for _, a := range state.Agents {
 		if a.ID == "" {
 			continue
@@ -1053,7 +1217,9 @@ func (s *Store) loadState() error {
 			Outputs:           cloneOutputs(a.Outputs),
 			Artifacts:         cloneArtifacts(a.Artifacts, true),
 			ArtifactRetention: a.ArtifactRetention,
+			lastPersisted:     a.LastSeen,
 		}
+		trimOutputsLocked(agent)
 		if s.blobDir != "" {
 			for i := range agent.Artifacts {
 				if agent.Artifacts[i].Data == "" {
@@ -1085,6 +1251,14 @@ func (s *Store) loadState() error {
 				deliveryAttempts: item.DeliveryAttempts,
 				lastDeliveredAt:  item.LastDeliveredAt,
 			})
+		}
+		backgroundCount := 0
+		for taskID, expiresAt := range a.Background {
+			if backgroundCount >= maxBackgroundTasksPerAgent || len(s.background) >= maxBackgroundTasks || taskID == "" || len(taskID) > maxResultTaskIDBytes || !expiresAt.After(now) {
+				continue
+			}
+			s.background[chunkKey(a.ID, taskID)] = expiresAt
+			backgroundCount++
 		}
 		s.agents[a.ID] = agent
 	}
@@ -1229,6 +1403,15 @@ func (s *Store) snapshotLocked() persistedStoreState {
 			Artifacts:         cloneArtifacts(a.Artifacts, false),
 			ArtifactRetention: a.ArtifactRetention,
 		}
+		prefix := a.ID + "\x00"
+		for key, expiresAt := range s.background {
+			if strings.HasPrefix(key, prefix) && expiresAt.After(time.Now()) {
+				if agent.Background == nil {
+					agent.Background = make(map[string]time.Time)
+				}
+				agent.Background[strings.TrimPrefix(key, prefix)] = expiresAt
+			}
+		}
 		for _, item := range a.tasks {
 			if item == nil || item.task == nil {
 				continue
@@ -1329,46 +1512,7 @@ func safeStorageComponent(value string) bool {
 }
 
 func writeSecureDataFile(path string, data []byte) error {
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) //nolint:errcheck
-	if err := securefile.Restrict(tmpPath); err != nil {
-		tmp.Close() //nolint:errcheck
-		return err
-	}
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close() //nolint:errcheck
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close() //nolint:errcheck
-		return err
-	}
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close() //nolint:errcheck
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-			return err
-		}
-		if retryErr := os.Rename(tmpPath, path); retryErr != nil {
-			return retryErr
-		}
-	}
-	return securefile.Restrict(path)
+	return securefile.WriteFile(path, data)
 }
 
 func encodeStateData(plaintext, key []byte) ([]byte, error) {

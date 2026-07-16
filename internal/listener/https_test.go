@@ -111,6 +111,48 @@ func TestExpiredTimestampReturns404(t *testing.T) {
 	}
 }
 
+func TestInvalidBeaconMetadataIsRejectedBeforeSessionMutation(t *testing.T) {
+	h, store := newTestSetup(t)
+	tests := []struct {
+		name   string
+		beacon *protocol.Beacon
+	}{
+		{
+			name: "nonce length",
+			beacon: &protocol.Beacon{
+				AgentID: "agent-1", Timestamp: time.Now().Unix(), Nonce: []byte("short"), Hostname: "victim", OS: "linux", Arch: "amd64",
+			},
+		},
+		{
+			name: "hostname length",
+			beacon: &protocol.Beacon{
+				AgentID: "agent-1", Timestamp: time.Now().Unix(), Nonce: []byte("0123456789abcdef"), Hostname: strings.Repeat("h", 256), OS: "linux", Arch: "amd64",
+			},
+		},
+		{
+			name: "extreme timestamp",
+			beacon: &protocol.Beacon{
+				AgentID: "agent-1", Timestamp: int64(^uint64(0) >> 1), Nonce: []byte("fedcba9876543210"), Hostname: "victim", OS: "linux", Arch: "amd64",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := protocol.EncodeBeacon(tt.beacon, testSecret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response := postBeacon(t, h, body); response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", response.Code)
+			}
+		})
+	}
+	agent, _ := store.Get("agent-1")
+	if !agent.LastSeen.IsZero() {
+		t.Fatalf("invalid metadata mutated session last-seen: %s", agent.LastSeen)
+	}
+}
+
 func TestWrongMethodReturns404(t *testing.T) {
 	h, _ := newTestSetup(t)
 	req := httptest.NewRequest(http.MethodGet, "/cdn/static/update", nil)
@@ -210,6 +252,10 @@ func TestTaskIsRedeliveredAfterResponseLossUntilAcknowledged(t *testing.T) {
 
 func TestMaliciousResultChunkTotalReturnsBoundedError(t *testing.T) {
 	h, store := newTestSetup(t)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "bad-chunks", Type: "download"}); err != nil {
+		t.Fatal(err)
+	}
+	store.DeliverTask("agent-1")
 	body := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
 		TaskID: "bad-chunks", Type: "download", Output: "x", ChunkIndex: 0, ChunkTotal: 1_000_000_000,
 	})
@@ -225,6 +271,10 @@ func TestMaliciousResultChunkTotalReturnsBoundedError(t *testing.T) {
 
 func TestLargeChunkedOutputAccepted(t *testing.T) {
 	h, store := newTestSetup(t)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "large-chunk", Type: "download"}); err != nil {
+		t.Fatal(err)
+	}
+	store.DeliverTask("agent-1")
 	body := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
 		TaskID:     "large-chunk",
 		Type:       "download",
@@ -243,9 +293,13 @@ func TestLargeChunkedOutputAccepted(t *testing.T) {
 
 func TestChunkedOutputDefersTaskDeliveryUntilComplete(t *testing.T) {
 	h, store := newTestSetup(t)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "chunked-result", Type: "download"}); err != nil {
+		t.Fatalf("EnqueueTask agent-1: %v", err)
+	}
 	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "next-task", Type: "shell", Payload: "id"}); err != nil {
 		t.Fatalf("EnqueueTask agent-1: %v", err)
 	}
+	store.DeliverTask("agent-1")
 
 	first := makeBeaconWithOutput(t, "agent-1", testSecret, &protocol.TaskResult{
 		TaskID:     "chunked-result",

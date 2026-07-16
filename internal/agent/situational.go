@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,11 +29,6 @@ const (
 	peasTimeout               = 10 * time.Minute
 	maxPEASToolBytes          = 5 * 1024 * 1024
 	maxPEASOutputBytes        = 8 * 1024 * 1024
-)
-
-const (
-	linPEASURL = "https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh"
-	winPEASURL = "https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEAS.bat"
 )
 
 // gnomeWaylandCmdTimeout is a shorter timeout for the individual gsettings/gdbus
@@ -197,22 +191,16 @@ func runPEAS(parent context.Context, plan *peasExecutionPlan, progress func(stri
 	defer os.RemoveAll(tmpDir) //nolint:errcheck
 
 	toolPath := filepath.Join(tmpDir, plan.filename)
-	source := plan.url
 	progress(fmt.Sprintf("[peas] checking embedded %s cache", plan.name))
 	embedded, err := writeEmbeddedPEASTool(plan, toolPath)
 	if err != nil {
 		return "", err.Error()
 	}
-	if embedded {
-		source = "embedded:" + plan.filename
-		progress(fmt.Sprintf("[peas] using embedded %s: %s", plan.name, plan.filename))
-	} else {
-		progress(fmt.Sprintf("[peas] downloading %s from %s", plan.name, plan.url))
-		if err := downloadPEASTool(parent, plan.url, toolPath); err != nil {
-			return "", err.Error()
-		}
-		progress(fmt.Sprintf("[peas] download complete: %s", plan.filename))
+	if !embedded {
+		return "", fmt.Sprintf("verified %s asset is not embedded; run the pinned PEAS updater and rebuild the agent", plan.name)
 	}
+	source := "embedded-verified:" + plan.filename
+	progress(fmt.Sprintf("[peas] using embedded verified %s: %s", plan.name, plan.filename))
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(toolPath, 0700); err != nil {
 			return "", err.Error()
@@ -247,7 +235,6 @@ func cancelBackgroundTask(taskID string) (string, string) {
 
 type peasExecutionPlan struct {
 	name           string
-	url            string
 	filename       string
 	outputFilename string
 	command        string
@@ -260,7 +247,6 @@ func peasPlan() (*peasExecutionPlan, error) {
 	case "windows":
 		return &peasExecutionPlan{
 			name:           "winPEAS",
-			url:            winPEASURL,
 			filename:       "winPEAS.bat",
 			outputFilename: "winpeas_" + ts + ".txt",
 			command:        "cmd.exe",
@@ -269,7 +255,6 @@ func peasPlan() (*peasExecutionPlan, error) {
 	case "linux":
 		return &peasExecutionPlan{
 			name:           "LinPEAS",
-			url:            linPEASURL,
 			filename:       "linpeas.sh",
 			outputFilename: "linpeas_" + ts + ".txt",
 			command:        "/bin/sh",
@@ -277,7 +262,6 @@ func peasPlan() (*peasExecutionPlan, error) {
 	case "darwin":
 		return &peasExecutionPlan{
 			name:           "LinPEAS",
-			url:            linPEASURL,
 			filename:       "linpeas.sh",
 			outputFilename: "linpeas_darwin_" + ts + ".txt",
 			command:        "/bin/sh",
@@ -285,39 +269,6 @@ func peasPlan() (*peasExecutionPlan, error) {
 	default:
 		return nil, fmt.Errorf("PEAS is not configured for %s", runtime.GOOS)
 	}
-}
-
-func downloadPEASTool(parent context.Context, url, dst string) error {
-	ctx, cancel := context.WithTimeout(parent, situationalTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("download PEAS: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download PEAS: server returned %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPEASToolBytes+1))
-	if err != nil {
-		return fmt.Errorf("read PEAS download: %w", err)
-	}
-	if len(data) > maxPEASToolBytes {
-		return fmt.Errorf("PEAS download exceeds limit of %d bytes", maxPEASToolBytes)
-	}
-	if len(data) == 0 {
-		return fmt.Errorf("PEAS download returned empty body")
-	}
-	if err := os.WriteFile(dst, data, 0600); err != nil {
-		return fmt.Errorf("write PEAS tool: %w", err)
-	}
-	return nil
 }
 
 func executePEASTool(parent context.Context, plan *peasExecutionPlan, toolPath, source string, progress func(string)) (string, string) {
@@ -626,81 +577,57 @@ func captureScreenshotLinux() ([]byte, error) {
 		failures = append(failures, candidate[0]+": command completed but did not create an image")
 	}
 
-	// Detect GNOME 45+ Wayland: unsafe-mode removed means XGetImage on root also
-	// returns BadMatch, so X11-based tools (scrot, maim, import) all fail too.
-	gnome45Wayland := false
-	for _, f := range failures {
-		if strings.Contains(f, "unsafe-mode key absent") {
-			gnome45Wayland = true
-			break
-		}
-	}
-
 	envSummary := linuxScreenshotEnvSummary(env)
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("supported screenshot utilities failed: %s. %s", strings.Join(failures, "; "), envSummary)
 		if envValue(env, "WAYLAND_DISPLAY") != "" {
-			if gnome45Wayland {
-				msg += ". GNOME 45+ Wayland: ensure python3-gi is installed (sudo apt install python3-gi) and xdg-desktop-portal is running"
-			} else {
-				msg += ". Install scrot or maim for XWayland capture (DISPLAY=" + envValue(env, "DISPLAY") + ")"
-			}
+			msg += ". Ensure python3-gi and xdg-desktop-portal are available, or install scrot/maim for XWayland capture (DISPLAY=" + envValue(env, "DISPLAY") + ")"
 		}
 		return nil, fmt.Errorf("%s", msg)
 	}
 	noUtilMsg := "no supported screenshot utility found; install one of gnome-screenshot, scrot, grim, maim, ImageMagick import, xfce4-screenshooter, mate-screenshot, spectacle, or flameshot"
 	if envValue(env, "WAYLAND_DISPLAY") != "" {
-		if gnome45Wayland {
-			noUtilMsg += ". GNOME 45+ Wayland: ensure python3-gi is installed (sudo apt install python3-gi) and xdg-desktop-portal is running"
-		} else {
-			noUtilMsg += ". On Wayland with XWayland available (DISPLAY=" + envValue(env, "DISPLAY") + "), scrot and maim work without extra configuration"
-		}
+		noUtilMsg += ". On Wayland, ensure python3-gi and xdg-desktop-portal are available; XWayland tools can use DISPLAY=" + envValue(env, "DISPLAY")
 	}
 	return nil, fmt.Errorf("%s", noUtilMsg)
 }
 
-// captureScreenshotGNOMEWayland captures the full GNOME Wayland desktop by
-// injecting screenshot code into GNOME Shell via Shell.Eval (requires unsafe-mode).
-// Unlike external D-Bus callers, code running inside the compositor has access
-// to the full composited frame and is not subject to the session-trust check.
 func captureScreenshotGNOMEWayland(png string, env []string) ([]byte, error) {
+	portalFailure := "python3 is not available"
+	if _, err := exec.LookPath("python3"); err == nil {
+		out, taskErr := runReadOnlyCommandEnv(20*time.Second, env, "python3", "-c", python3PortalScreenshot, png, fmt.Sprintf("sable%d", time.Now().UnixNano()))
+		if taskErr == "" {
+			if data, readErr := os.ReadFile(png); readErr == nil && len(data) > 0 {
+				return data, nil
+			}
+			portalFailure = "portal succeeded but did not write the requested temporary file"
+		} else {
+			portalFailure = summarizeCommandFailure(taskErr, out)
+		}
+	}
+
+	// Never enable GNOME Shell unsafe-mode. A read-only Shell.Eval fallback is
+	// permitted only when the desktop owner had already enabled it.
+	unsafeMode, unsafeModeErr := runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "get", "org.gnome.shell", "unsafe-mode")
+	if unsafeModeErr != "" || strings.TrimSpace(unsafeMode) != "true" {
+		return nil, fmt.Errorf("XDG screenshot portal failed: %s; GNOME Shell unsafe-mode is disabled and was not modified", portalFailure)
+	}
+	data, err := captureScreenshotGNOMEWaylandShellEval(png, env)
+	if err != nil {
+		return nil, fmt.Errorf("XDG screenshot portal failed: %s; read-only GNOME Shell fallback failed: %w", portalFailure, err)
+	}
+	return data, nil
+}
+
+// captureScreenshotGNOMEWaylandShellEval is called only when unsafe-mode was
+// already enabled. It never changes desktop security settings.
+func captureScreenshotGNOMEWaylandShellEval(png string, env []string) ([]byte, error) {
 	if _, err := exec.LookPath("gsettings"); err != nil {
 		return nil, fmt.Errorf("gsettings not available")
 	}
 	if _, err := exec.LookPath("gdbus"); err != nil {
 		return nil, fmt.Errorf("gdbus not available")
 	}
-
-	// unsafe-mode was removed in GNOME 45+. Shell.Eval is unavailable without it.
-	unsafeModeOut, unsafeModeErr := runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "writable", "org.gnome.shell", "unsafe-mode")
-	if unsafeModeErr != "" || strings.TrimSpace(unsafeModeOut) != "true" {
-		// GNOME 45+: unsafe-mode is gone. Use the XDG Desktop Portal Screenshot
-		// interface instead. python3-gi ships with the default Ubuntu GNOME desktop
-		// and the portal takes a silent full-screen capture with interactive=false.
-		if _, err := exec.LookPath("python3"); err == nil {
-			out, taskErr := runReadOnlyCommandEnv(20*time.Second, env, "python3", "-c", python3PortalScreenshot, png)
-			if taskErr == "" {
-				if data, err := os.ReadFile(png); err == nil && len(data) > 0 {
-					return data, nil
-				}
-				return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); xdg-portal: script succeeded but wrote no image")
-			}
-			return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); xdg-portal: %s", summarizeCommandFailure(taskErr, out))
-		}
-		return nil, fmt.Errorf("GNOME Shell screenshot not available: unsafe-mode key absent (GNOME 45+); python3 not found")
-	}
-
-	// unsafe-mode enables org.gnome.Shell.Eval which runs JS inside the compositor.
-	runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "set", "org.gnome.shell", "unsafe-mode", "true")
-	defer runReadOnlyCommandEnv(gnomeWaylandCmdTimeout, env, "gsettings", "set", "org.gnome.shell", "unsafe-mode", "false") //nolint:errcheck
-
-	// GNOME Shell processes the GSettings change asynchronously via its main loop.
-	// Wait for it to apply before making any Eval calls, otherwise they are denied.
-	time.Sleep(600 * time.Millisecond)
-
-	// Record the time before any screenshot attempt so gnomeWaylandWaitFile can
-	// distinguish files we created from pre-existing ones in the Pictures folder.
-	before := time.Now()
 
 	// eval calls org.gnome.Shell.Eval and returns the raw gdbus output and error.
 	eval := func(js string) (string, string) {
@@ -769,19 +696,9 @@ func captureScreenshotGNOMEWayland(png string, env []string) ([]byte, error) {
 				return data, nil
 			}
 		}
-		if strings.HasPrefix(status42, "S|") {
-			// Copy failed, but GNOME saved to its default path — read it directly.
-			savedPath := strings.TrimPrefix(status42, "S|")
-			if savedPath != "" {
-				if data, err := os.ReadFile(savedPath); err == nil && len(data) > 0 {
-					os.Remove(savedPath) //nolint:errcheck
-					return data, nil
-				}
-			}
-		}
-		// "P" (pump timed out) or "C" file read failure: the callback may still
-		// fire after Eval returned. Scan GNOME's default screenshot directories.
-		if data := gnomeWaylandWaitFile(png, before, 5*time.Second); len(data) > 0 {
+		// "P" (pump timed out) or "C" file read failure: wait only for the
+		// unique temporary path requested by this task.
+		if data := gnomeWaylandWaitFile(png, 5*time.Second); len(data) > 0 {
 			return data, nil
 		}
 	}
@@ -808,12 +725,11 @@ func captureScreenshotGNOMEWayland(png string, env []string) ([]byte, error) {
 				return data, nil
 			}
 		}
-		if data := gnomeWaylandWaitFile(png, before, 3*time.Second); len(data) > 0 {
+		if data := gnomeWaylandWaitFile(png, 3*time.Second); len(data) > 0 {
 			return data, nil
 		}
 	}
 
-	home, _ := os.UserHomeDir()
 	var reasons []string
 	if taskErr42 != "" {
 		reasons = append(reasons, "eval(42): "+summarizeCommandFailure(taskErr42, out42))
@@ -829,7 +745,7 @@ func captureScreenshotGNOMEWayland(png string, env []string) ([]byte, error) {
 	} else {
 		reasons = append(reasons, "eval(40): JS status="+st40+", no file written")
 	}
-	reasons = append(reasons, "scanned "+home+"/Pictures/{Screenshots,}")
+	reasons = append(reasons, "no image appeared at the task's unique temporary path")
 	return nil, fmt.Errorf("GNOME Shell screenshot failed (%s); install scrot for XWayland fallback", strings.Join(reasons, "; "))
 }
 
@@ -844,42 +760,15 @@ func gnomeEvalString(out string) string {
 	return ""
 }
 
-// gnomeWaylandWaitFile polls expectedPath for up to timeout. If the file does
-// not appear there, it also scans GNOME's default screenshot directories for any
-// PNG file created after after — covering the case where GNOME 42 saves to
-// "~/Pictures/Screenshot from YYYY-MM-DD HH-MM-SS.png" rather than our path.
-func gnomeWaylandWaitFile(expectedPath string, after time.Time, timeout time.Duration) []byte {
-	home, _ := os.UserHomeDir()
-	scanDirs := []string{
-		filepath.Join(home, "Pictures", "Screenshots"),
-		filepath.Join(home, "Pictures"),
-	}
+// gnomeWaylandWaitFile polls only the unique task-owned temporary path. It
+// never scans or deletes unrelated files from the user's Pictures directory.
+func gnomeWaylandWaitFile(expectedPath string, timeout time.Duration) []byte {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(250 * time.Millisecond)
 		if data, err := os.ReadFile(expectedPath); err == nil && len(data) > 0 {
 			os.Remove(expectedPath) //nolint:errcheck
 			return data
-		}
-		for _, dir := range scanDirs {
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
-					continue
-				}
-				info, err := e.Info()
-				if err != nil || !info.ModTime().After(after) {
-					continue
-				}
-				p := filepath.Join(dir, e.Name())
-				if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
-					os.Remove(p) //nolint:errcheck
-					return data
-				}
-			}
 		}
 	}
 	return nil
@@ -1015,7 +904,7 @@ def cb(c,se,pa,i,si,ps):
   if rv==0 and 'uri' in rs:r[0]=rs['uri']
   loop.quit()
 snd=bus.get_unique_name().replace(':','').replace('.','_')
-tok='sable1'
+tok=sys.argv[2]
 hdl='/org/freedesktop/portal/desktop/request/'+snd+'/'+tok
 bus.signal_subscribe(None,None,'Response',hdl,None,Gio.DBusSignalFlags.NONE,cb)
 pt=Gio.DBusProxy.new_sync(bus,Gio.DBusProxyFlags.NONE,None,'org.freedesktop.portal.Desktop','/org/freedesktop/portal/desktop','org.freedesktop.portal.Screenshot',None)

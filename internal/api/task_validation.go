@@ -6,14 +6,16 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+
+	"github.com/aelder202/sable/internal/protocol"
 )
 
 const (
 	maxSleepSeconds             = 24 * 60 * 60
-	maxRemotePath               = 4096
+	maxRemotePath               = protocol.MaxRemotePathBytes
 	maxStandardTaskPayloadBytes = 48 * 1024
-	maxUploadFileBytes          = 50 * 1024 * 1024
-	maxUploadTaskPayloadBytes   = maxRemotePath + 1 + ((maxUploadFileBytes+2)/3)*4
+	maxUploadFileBytes          = protocol.MaxUploadFileBytes
+	maxUploadTaskPayloadBytes   = protocol.MaxUploadTaskPayloadBytes
 )
 
 func maxTaskPayloadBytes(taskType string) int {

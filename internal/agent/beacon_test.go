@@ -41,7 +41,7 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 	beaconNonceFn = func() ([]byte, error) {
 		return nonceValue, nil
 	}
-	sendBeaconDNSFn = func([]byte, string) ([]byte, error) {
+	sendBeaconDNSFn = func([]byte, string, string, []byte) ([]byte, error) {
 		return nil, errors.New("dns disabled")
 	}
 

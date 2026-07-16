@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -28,7 +31,9 @@ import (
 	"github.com/aelder202/sable/internal/listener"
 	"github.com/aelder202/sable/internal/nonce"
 	"github.com/aelder202/sable/internal/operatorpw"
+	"github.com/aelder202/sable/internal/securefile"
 	"github.com/aelder202/sable/internal/session"
+	"github.com/aelder202/sable/internal/tlspin"
 	webui "github.com/aelder202/sable/web"
 	mdns "github.com/miekg/dns"
 )
@@ -36,11 +41,14 @@ import (
 func main() {
 	cliMode := flag.Bool("cli", false, "start interactive operator CLI instead of server")
 	apiURL := flag.String("api", "https://127.0.0.1:8443", "operator API URL (for --cli mode)")
+	apiAddr := flag.String("api-addr", "127.0.0.1:8443", "loopback operator API listen address")
+	agentAddr := flag.String("agent-addr", ":443", "agent HTTPS listen address")
+	dnsAddr := flag.String("dns-addr", ":53", "agent DNS UDP listen address")
 	passwordFile := flag.String("password-file", "", "read operator password from file")
 	dnsDomain := flag.String("dns-domain", defaultDNSDomain(), "enable DNS fallback listener for this authoritative domain")
 	debugAddr := flag.String("debug-addr", "", "optional loopback debug/pprof address, for example 127.0.0.1:6060")
 	stateFile := flag.String("state-file", defaultStateFile(), "operator state JSON file; use 'none' or 'off' to disable persistence")
-	stateKeyFile := flag.String("state-key-file", defaultStateKeyFile(), "optional file containing a 32-byte or 64-hex-character state encryption key")
+	stateKeyFile := flag.String("state-key-file", defaultStateKeyFile(), "state encryption key file; use 'none' to opt out of at-rest encryption")
 	flag.Parse()
 
 	password, err := loadOperatorPassword(*passwordFile)
@@ -51,7 +59,7 @@ func main() {
 
 	if *cliMode {
 		token := loginCLI(*apiURL, password)
-		c, err := cli.New(*apiURL, token)
+		c, err := cli.New(*apiURL, token, "server.crt")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -80,9 +88,13 @@ func main() {
 	}
 
 	statePath := normalizeStateFile(*stateFile)
-	stateKey, err := loadStateKey(*stateKeyFile)
-	if err != nil {
-		log.Fatalf("state key error: %v", err)
+	var stateKey []byte
+	if statePath != "" {
+		stateKeyPath := normalizeStateKeyFile(*stateKeyFile)
+		stateKey, err = loadOrCreateStateKey(stateKeyPath)
+		if err != nil {
+			log.Fatalf("state key error: %v", err)
+		}
 	}
 	store, err := session.NewPersistentStoreWithKey(statePath, stateKey)
 	if err != nil {
@@ -103,26 +115,37 @@ func main() {
 	beaconMux := http.NewServeMux()
 	beaconMux.Handle("/cdn/static/update", listener.NewHTTPSHandler(store, nc))
 	agentSrv := &http.Server{
-		Addr:              ":443",
+		Addr:              *agentAddr,
 		Handler:           beaconMux,
 		TLSConfig:         agentTLSCfg,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       2 * time.Minute,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
 	// Operator-facing API on 127.0.0.1:8443 over TLS (loopback-only).
 	// Binding to loopback prevents off-host exposure; TLS protects the JWT and
 	// operator password even on the local machine's network interfaces.
-	apiLn, err := tls.Listen("tcp", "127.0.0.1:8443", apiTLSCfg)
+	if err := requireLoopbackListenAddress(*apiAddr); err != nil {
+		log.Fatalf("invalid operator API address: %v", err)
+	}
+	apiLn, err := tls.Listen("tcp", *apiAddr, apiTLSCfg)
 	if err != nil {
 		log.Fatalf("operator API listen failed: %v", err)
 	}
 	jwtSecret := generateRandom(32)
+	shutdownCh := make(chan struct{}, 1)
 	apiCfg := &api.Config{
 		OperatorPasswordHash: api.HashPassword(password),
 		JWTSecret:            jwtSecret,
+		Shutdown: func() {
+			select {
+			case shutdownCh <- struct{}{}:
+			default:
+			}
+		},
 	}
 	fullMux := http.NewServeMux()
 	fullMux.Handle("/api/", api.NewRouter(store, apiCfg))
@@ -133,24 +156,35 @@ func main() {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() { errCh <- apiSrv.Serve(apiLn) }()
-	startDebugServer(*debugAddr)
+
+	var debugSrv *http.Server
+	if addr := strings.TrimSpace(*debugAddr); addr != "" {
+		var debugLn net.Listener
+		debugSrv, debugLn, err = createDebugServer(addr, listener.NewTLSConfig(cert), password)
+		if err != nil {
+			log.Fatalf("debug server listen failed: %v", err)
+		}
+		go func() { errCh <- debugSrv.Serve(debugLn) }()
+		log.Printf("[*] Authenticated debug endpoint on https://%s/debug/pprof/ (loopback only)", debugLn.Addr())
+	}
 
 	var dnsSrv *mdns.Server
 	if domain := normalizeDNSDomain(*dnsDomain); domain != "" {
 		dnsSrv = &mdns.Server{
-			Addr:    ":53",
+			Addr:    *dnsAddr,
 			Net:     "udp",
 			Handler: listener.NewDNSHandler(store, nc, domain),
 		}
 		go func() { errCh <- dnsSrv.ListenAndServe() }()
-		log.Printf("[*] Agent DNS listener on :53 for %s", domain)
+		log.Printf("[*] Agent DNS listener on %s for %s", *dnsAddr, domain)
 	}
 
-	log.Printf("[*] Operator API on https://127.0.0.1:8443 | Agent HTTPS listener on :443")
+	log.Printf("[*] Operator API on https://%s | Agent HTTPS listener on %s", *apiAddr, *agentAddr)
 	go func() { errCh <- agentSrv.ListenAndServeTLS("", "") }()
 
 	signals := make(chan os.Signal, 1)
@@ -158,6 +192,8 @@ func main() {
 	select {
 	case sig := <-signals:
 		log.Printf("[*] Shutting down after %s", sig)
+	case <-shutdownCh:
+		log.Printf("[*] Shutting down after authenticated operator request")
 	case serveErr := <-errCh:
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			log.Printf("server stopped: %v", serveErr)
@@ -168,6 +204,9 @@ func main() {
 	defer cancel()
 	_ = agentSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
+	if debugSrv != nil {
+		_ = debugSrv.Shutdown(ctx)
+	}
 	if dnsSrv != nil {
 		_ = dnsSrv.Shutdown()
 	}
@@ -177,18 +216,16 @@ func main() {
 }
 
 // loginCLI authenticates to the operator API and returns the JWT.
-// InsecureSkipVerify is only allowed for loopback API URLs.
 func loginCLI(apiURL, password string) string {
 	if err := requireLoopbackAPIURL(apiURL); err != nil {
 		log.Fatal(err)
 	}
-	client := &http.Client{ //nolint:gosec
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		},
+	client, err := tlspin.NewClientFromCert("server.crt", 15*time.Second)
+	if err != nil {
+		log.Fatalf("load operator API certificate pin: %v", err)
 	}
 	body, _ := json.Marshal(map[string]string{"password": password})
-	resp, err := client.Post(apiURL+"/api/auth/login", "application/json", bytes.NewReader(body))
+	resp, err := client.Post(strings.TrimRight(apiURL, "/")+"/api/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Fatalf("login failed: %v", err)
 	}
@@ -255,17 +292,33 @@ func defaultStateFile() string {
 }
 
 func defaultStateKeyFile() string {
-	return strings.TrimSpace(os.Getenv("SABLE_STATE_KEY_FILE"))
+	if path := strings.TrimSpace(os.Getenv("SABLE_STATE_KEY_FILE")); path != "" {
+		return path
+	}
+	return filepath.FromSlash(".sable/state.key")
 }
 
-func loadStateKey(path string) ([]byte, error) {
+func loadOrCreateStateKey(path string) ([]byte, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, nil
 	}
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		key := make([]byte, 32)
+		if _, randomErr := rand.Read(key); randomErr != nil {
+			return nil, fmt.Errorf("generate state key: %w", randomErr)
+		}
+		if writeErr := securefile.WriteFile(path, []byte(hex.EncodeToString(key)+"\n")); writeErr != nil {
+			return nil, fmt.Errorf("create state key file: %w", writeErr)
+		}
+		return key, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read state key file: %w", err)
+	}
+	if err := securefile.Restrict(path); err != nil {
+		return nil, fmt.Errorf("restrict state key file: %w", err)
 	}
 	if len(data) == 32 {
 		return data, nil
@@ -276,6 +329,16 @@ func loadStateKey(path string) ([]byte, error) {
 		return nil, errors.New("state key file must contain exactly 32 raw bytes or 64 hexadecimal characters")
 	}
 	return decoded, nil
+}
+
+func normalizeStateKeyFile(path string) string {
+	path = strings.TrimSpace(path)
+	switch strings.ToLower(path) {
+	case "", "none", "off", "disabled":
+		return ""
+	default:
+		return path
+	}
 }
 
 func normalizeStateFile(path string) string {
@@ -297,18 +360,16 @@ func normalizeDNSDomain(domain string) string {
 	return domain + "."
 }
 
-func startDebugServer(addr string) {
+func createDebugServer(addr string, tlsCfg *tls.Config, password string) (*http.Server, net.Listener, error) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
-		return
+		return nil, nil, errors.New("debug address is empty")
 	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		log.Fatalf("invalid debug address %q: %v", addr, err)
+	if err := requireLoopbackListenAddress(addr); err != nil {
+		return nil, nil, fmt.Errorf("invalid debug address: %w", err)
 	}
-	ip := net.ParseIP(host)
-	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		log.Fatalf("debug address must be loopback-only, got %q", host)
+	if tlsCfg == nil {
+		return nil, nil, errors.New("debug TLS configuration is required")
 	}
 
 	mux := http.NewServeMux()
@@ -317,10 +378,45 @@ func startDebugServer(addr string) {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	go func() {
-		log.Printf("[*] Debug endpoint on http://%s/debug/pprof/ (loopback only)", addr)
-		log.Fatal(http.ListenAndServe(addr, mux))
-	}()
+
+	expectedPassword := sha256.Sum256([]byte(password))
+	authenticated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		providedPassword := sha256.Sum256([]byte(token))
+		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || subtle.ConstantTimeCompare(providedPassword[:], expectedPassword[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sable-debug"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           api.WithSecurityHeaders(authenticated),
+		TLSConfig:         tlsCfg.Clone(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+	ln, err := tls.Listen("tcp", addr, server.TLSConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	return server, ln, nil
+}
+
+func requireLoopbackListenAddress(addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("address must be loopback-only, got %q", host)
+	}
+	return nil
 }
 
 func requireLoopbackAPIURL(apiURL string) error {
@@ -340,7 +436,7 @@ func requireLoopbackAPIURL(apiURL string) error {
 	case "localhost":
 		return nil
 	default:
-		return fmt.Errorf("refusing insecure CLI TLS for non-loopback API host %q", host)
+		return fmt.Errorf("operator CLI requires a loopback API host, got %q", host)
 	}
 }
 
