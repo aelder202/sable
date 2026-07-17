@@ -29,6 +29,7 @@ type TaskOutput struct {
 	Type            string    `json:"type"`
 	Payload         string    `json:"payload,omitempty"`
 	Output          string    `json:"output"`
+	Warning         string    `json:"warning,omitempty"`
 	Error           string    `json:"error,omitempty"`
 	QueuedAt        time.Time `json:"queued_at,omitempty"`
 	LastDeliveredAt time.Time `json:"last_delivered_at,omitempty"`
@@ -76,6 +77,7 @@ type queuedTask struct {
 
 type resultChunkAssembly struct {
 	taskType  string
+	warning   string
 	err       string
 	parts     []string
 	seen      []bool
@@ -161,6 +163,7 @@ type ActiveJob struct {
 type TaskOutcomeBucket struct {
 	Start      time.Time `json:"start"`
 	Successful int       `json:"successful"`
+	Warnings   int       `json:"warnings"`
 	Failed     int       `json:"failed"`
 }
 
@@ -249,6 +252,7 @@ const (
 	maxResultTaskIDBytes           = 128
 	maxResultTypeBytes             = 64
 	maxResultErrorBytes            = 64 * 1024
+	maxResultWarningBytes          = 64 * 1024
 	maxResultChunkBytes            = 1 * 1024 * 1024
 	maxChunkAssemblies             = 256
 	maxChunkAssembliesPerAgent     = 8
@@ -262,6 +266,7 @@ const (
 	backgroundTaskTTL              = 2 * time.Hour
 	heartbeatPersistInterval       = 30 * time.Second
 	persistDebounce                = 250 * time.Millisecond
+	taskDeliveryFailureMessage     = "task delivery failed: agent did not check in before the offline threshold"
 )
 
 var encryptedStateMagic = []byte("SABLE-STATE-ENC-v1\n")
@@ -468,6 +473,7 @@ func (s *Store) Register(a *Agent) {
 	if a.RegisteredAt.IsZero() {
 		a.RegisteredAt = now
 	}
+	a.Outputs = cloneOutputs(a.Outputs)
 	s.agents[a.ID] = a
 	s.appendAuditLocked(a.ID, "register", "agent registered")
 	a.lastPersisted = now
@@ -584,6 +590,15 @@ func (s *Store) RecordOutput(agentID string, result *protocol.TaskResult) bool {
 		s.mu.Unlock()
 		return true
 	}
+	// Older agents reported shell exit outcomes in Error. Treat those replies as
+	// warnings because receiving the result proves task delivery and agent
+	// communication succeeded.
+	if result.Type == "shell" && result.Error != "" && result.Warning == "" {
+		normalized := *result
+		normalized.Warning = normalized.Error
+		normalized.Error = ""
+		result = &normalized
+	}
 	now := time.Now()
 	s.evictExpiredStateLocked(now)
 	if !s.resultMatchesKnownTaskLocked(agentID, a, result, now) {
@@ -640,6 +655,9 @@ func validateTaskResult(result *protocol.TaskResult) string {
 	if len(result.Error) > maxResultErrorBytes {
 		return "task result error exceeded maximum size"
 	}
+	if len(result.Warning) > maxResultWarningBytes {
+		return "task result warning exceeded maximum size"
+	}
 	if len(result.Output) > maxResultChunkBytes {
 		return "task result chunk exceeded maximum size"
 	}
@@ -666,6 +684,7 @@ func (s *Store) appendOutputLocked(agentID string, a *Agent, result *protocol.Ta
 		Type:            result.Type,
 		Payload:         metadata.Payload,
 		Output:          result.Output,
+		Warning:         result.Warning,
 		Error:           result.Error,
 		QueuedAt:        metadata.QueuedAt,
 		LastDeliveredAt: metadata.LastDeliveredAt,
@@ -708,7 +727,7 @@ func outputBytes(outputs []TaskOutput) int {
 }
 
 func outputByteSize(output TaskOutput) int {
-	return len(output.TaskID) + len(output.Type) + len(output.Payload) + len(output.Output) + len(output.Error)
+	return len(output.TaskID) + len(output.Type) + len(output.Payload) + len(output.Output) + len(output.Warning) + len(output.Error)
 }
 
 func (s *Store) recordChunkedOutputLocked(agentID string, a *Agent, result *protocol.TaskResult) bool {
@@ -754,6 +773,9 @@ func (s *Store) recordChunkedOutputLocked(agentID string, a *Agent, result *prot
 	if result.Error != "" {
 		assembly.err = result.Error
 	}
+	if result.Warning != "" {
+		assembly.warning = result.Warning
+	}
 
 	if assembly.bytes > maxChunkedOutputBytes ||
 		s.chunkAssemblyBytesLocked("") > maxChunkAssemblyBytes ||
@@ -777,10 +799,11 @@ func (s *Store) recordChunkedOutputLocked(agentID string, a *Agent, result *prot
 	}
 	delete(s.chunks, key)
 	s.appendOutputLocked(agentID, a, &protocol.TaskResult{
-		TaskID: result.TaskID,
-		Type:   result.Type,
-		Output: output.String(),
-		Error:  assembly.err,
+		TaskID:  result.TaskID,
+		Type:    result.Type,
+		Output:  output.String(),
+		Warning: assembly.warning,
+		Error:   assembly.err,
 	})
 	return true
 }
@@ -1380,9 +1403,10 @@ func (s *Store) List() []*Agent {
 // intentionally omits output and artifact payload lists so frequent dashboard
 // refreshes remain cheap as the fleet grows.
 func (s *Store) Overview() FleetOverview {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := time.Now()
+	s.failOfflineInFlightTasksLocked(now)
 	hourlyStart := now.Truncate(time.Hour).Add(-23 * time.Hour)
 	dailyStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -6)
 	overview := FleetOverview{
@@ -1444,6 +1468,8 @@ func (s *Store) Overview() FleetOverview {
 				kind := "task_success"
 				if output.Error != "" {
 					kind = "task_failed"
+				} else if output.Warning != "" {
+					kind = "task_warning"
 				}
 				overview.RecentActivity = append(overview.RecentActivity, FleetActivityEvent{
 					Timestamp: output.Timestamp,
@@ -1451,7 +1477,7 @@ func (s *Store) Overview() FleetOverview {
 					AgentName: agentOverviewName(a),
 					Kind:      kind,
 					TaskType:  output.Type,
-					Detail:    output.Error,
+					Detail:    firstNonEmpty(output.Error, output.Warning),
 				})
 			}
 		}
@@ -1494,6 +1520,57 @@ func (s *Store) Overview() FleetOverview {
 		return overview.ActiveJobs[i].ReceivedAt.After(overview.ActiveJobs[j].ReceivedAt)
 	})
 	return overview
+}
+
+// failOfflineInFlightTasksLocked converts work that was delivered but never
+// acknowledged before the agent's sleep-aware Offline threshold into a
+// terminal communication failure. Tasks that are merely Overdue remain
+// in-flight so normal jitter and transient delays do not create false failures.
+func (s *Store) failOfflineInFlightTasksLocked(now time.Time) {
+	changed := false
+	for _, id := range s.order {
+		a, ok := s.agents[id]
+		if !ok || a.Retired || len(a.tasks) == 0 {
+			continue
+		}
+		item := a.tasks[0]
+		if item == nil || item.task == nil || item.deliveryAttempts == 0 {
+			continue
+		}
+		deadline := taskDeliveryFailureDeadline(a, item)
+		if deadline.IsZero() || !now.After(deadline) {
+			continue
+		}
+		s.appendOutputLocked(id, a, &protocol.TaskResult{
+			TaskID: item.task.ID,
+			Type:   item.task.Type,
+			Error:  taskDeliveryFailureMessage,
+		})
+		a.tasks = a.tasks[1:]
+		s.appendAuditLocked(id, "fail_task_delivery", item.task.Type+" "+item.task.ID)
+		changed = true
+	}
+	if changed {
+		s.persistLocked()
+	}
+}
+
+func taskDeliveryFailureDeadline(a *Agent, item *queuedTask) time.Time {
+	if a == nil || item == nil || item.lastDeliveredAt.IsZero() {
+		return time.Time{}
+	}
+	base := item.lastDeliveredAt
+	if a.LastSeen.After(base) {
+		base = a.LastSeen
+	}
+	offlineAfter := 10 * time.Minute
+	if a.SleepSeconds > 0 {
+		interval := time.Duration(a.SleepSeconds) * time.Second
+		if candidate := 4 * interval; candidate > offlineAfter {
+			offlineAfter = candidate
+		}
+	}
+	return base.Add(offlineAfter)
 }
 
 // ResolveFailureAlert removes one failure from Overview attention and counters
@@ -1580,11 +1657,22 @@ func addTaskOutcome(buckets []TaskOutcomeBucket, output TaskOutput) {
 		}
 		if output.Error != "" {
 			buckets[i].Failed++
+		} else if output.Warning != "" {
+			buckets[i].Warnings++
 		} else {
 			buckets[i].Successful++
 		}
 		return
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func agentOverviewName(a *Agent) string {
@@ -1689,6 +1777,8 @@ func (s *Store) agentSummaryLocked(a *Agent, now time.Time) AgentSummary {
 		switch {
 		case last.Error != "":
 			lastResultStatus = "failed"
+		case last.Warning != "":
+			lastResultStatus = "warning"
 		case strings.HasSuffix(last.Type, "_progress"):
 			lastResultStatus = "progress"
 		default:
@@ -1877,6 +1967,13 @@ func taskPayloadSummary(task *protocol.Task) string {
 func cloneOutputs(outputs []TaskOutput) []TaskOutput {
 	out := make([]TaskOutput, len(outputs))
 	copy(out, outputs)
+	for i := range out {
+		if out[i].Type == "shell" && out[i].Warning == "" && out[i].Error != "" &&
+			out[i].Error != taskDeliveryFailureMessage {
+			out[i].Warning = out[i].Error
+			out[i].Error = ""
+		}
+	}
 	return out
 }
 

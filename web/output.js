@@ -493,9 +493,11 @@ function appendTaskResultCard(output, historical) {
   rememberTaskMetadata(output.task_id, output, activeAgentID);
   const shouldScroll = followOutput || isOutputNearBottom();
   const failed = Boolean(output.error);
+  const warning = !failed && Boolean(output.warning);
+  const statusName = failed ? 'failed' : warning ? 'warning' : 'success';
   const card = document.createElement('article');
-  card.className = 'output-task-card' + (failed ? ' failed' : ' success');
-  card.dataset.outputType = failed ? 'error' : 'shell';
+  card.className = 'output-task-card ' + statusName;
+  card.dataset.outputType = failed ? 'error' : warning ? 'warning' : 'shell';
   card.dataset.outputTaskType = output.type || 'task';
   card.dataset.taskId = output.task_id;
   card.dataset.completedAt = output.timestamp || '';
@@ -524,11 +526,11 @@ function appendTaskResultCard(output, historical) {
   heading.appendChild(identifier);
 
   const status = document.createElement('span');
-  status.className = 'output-task-status ' + (failed ? 'failed' : 'success');
+  status.className = 'output-task-status ' + statusName;
   const statusDot = document.createElement('span');
   statusDot.className = 'output-task-status-dot';
   status.appendChild(statusDot);
-  status.appendChild(document.createTextNode(failed ? 'Failed' : 'Success'));
+  status.appendChild(document.createTextNode(failed ? 'Failed' : warning ? 'Warning' : 'Success'));
 
   const duration = document.createElement('span');
   duration.className = 'output-task-duration';
@@ -587,7 +589,7 @@ function appendTaskResultCard(output, historical) {
     card.querySelector('.output-task-command').textContent,
     output.type,
     output.task_id,
-    failed ? 'failed' : 'success',
+    statusName,
     bodyText,
   ].join(' ').toLowerCase();
   $('output').appendChild(card);
@@ -600,8 +602,11 @@ function appendTaskResultCard(output, historical) {
 function taskResultBody(output) {
   const captured = String(output.output || '').trimEnd();
   const error = String(output.error || '').trim();
+  const warning = String(output.warning || '').trim();
   if (captured && error) return captured + '\n\nError: ' + error;
+  if (captured && warning) return captured + '\n\nWarning: ' + warning;
   if (error) return 'Error: ' + error;
+  if (warning) return 'Warning: ' + warning;
   return captured || 'Task completed without text output.';
 }
 
@@ -906,7 +911,8 @@ function renderTimelineSummary() {
   activityGrid.className = 'summary-activity-grid';
   [
     { label: 'Commands', value: recentResults.length },
-    { label: 'Success', value: recentResults.filter(output => !output.error).length, tone: 'success' },
+    { label: 'Success', value: recentResults.filter(output => !output.error && !output.warning).length, tone: 'success' },
+    { label: 'Warnings', value: recentResults.filter(output => output.warning && !output.error).length, tone: 'warning' },
     { label: 'Failed', value: recentResults.filter(output => output.error).length, tone: 'failed' },
   ].forEach(stat => {
     const item = document.createElement('article');
@@ -1067,10 +1073,11 @@ function sessionTimelineEntries() {
     if (!output || !output.task_id) return;
     const timestamp = timelineDate(output.timestamp);
     const failed = Boolean(output.error);
+    const warning = !failed && Boolean(output.warning);
     const progress = String(output.type || '').endsWith('_progress');
     entries.push({
-      tone: failed ? 'failed' : progress ? 'progress' : 'done',
-      label: failed ? 'FAILED' : progress ? 'PROGRESS' : 'DONE',
+      tone: failed ? 'failed' : warning ? 'warning' : progress ? 'progress' : 'done',
+      label: failed ? 'FAILED' : warning ? 'WARNING' : progress ? 'PROGRESS' : 'DONE',
       title: timelineTaskTitle(output),
       detail: output.task_id.slice(0, 8) + timelineOutputDetail(output),
       time: timelineTimeLabel(timestamp, ''),
@@ -1163,6 +1170,7 @@ function timelinePayloadDetail(payload) {
 
 function timelineOutputDetail(output) {
   if (output.error) return ' - ' + output.error;
+  if (output.warning) return ' - ' + output.warning;
   const type = String(output.type || '');
   if (['download', 'download_archive', 'screenshot', 'peas', 'snapshot'].includes(type) && output.output) {
     return ' - saveable artifact ready';

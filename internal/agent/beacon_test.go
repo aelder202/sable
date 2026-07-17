@@ -267,6 +267,23 @@ func TestChunkTaskResultKeepsErrorsWhole(t *testing.T) {
 	}
 }
 
+func TestChunkTaskResultPreservesWarnings(t *testing.T) {
+	chunks := chunkTaskResult(&protocol.TaskResult{
+		TaskID:  "task-warning",
+		Type:    "shell",
+		Output:  strings.Repeat("x", resultChunkBytes+1),
+		Warning: "exit status 1",
+	})
+	if len(chunks) != 2 {
+		t.Fatalf("expected warning output to be chunked, got %#v", chunks)
+	}
+	for _, chunk := range chunks {
+		if chunk.Warning != "exit status 1" || chunk.Error != "" {
+			t.Fatalf("warning metadata was not preserved: %#v", chunk)
+		}
+	}
+}
+
 func TestSendBeaconHTTPSReadsLargeTaskResponse(t *testing.T) {
 	body := bytes.Repeat([]byte("a"), 256*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

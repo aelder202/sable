@@ -25,6 +25,7 @@ type TaskResult struct {
 	TaskID     string `json:"task_id"`
 	Type       string `json:"type"`
 	Output     string `json:"output"`
+	Warning    string `json:"warning,omitempty"`
 	Error      string `json:"error,omitempty"`
 	ChunkIndex int    `json:"chunk_index,omitempty"`
 	ChunkTotal int    `json:"chunk_total,omitempty"`

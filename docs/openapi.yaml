@@ -761,7 +761,7 @@ components:
         last_result_at: { type: string, format: date-time }
         last_result_status:
           type: string
-          enum: [success, progress, failed]
+          enum: [success, progress, warning, failed]
         notes: { type: string }
         tags:
           type: array
@@ -836,7 +836,7 @@ components:
         active_transfers: { type: integer, minimum: 0 }
         artifact_count: { type: integer, minimum: 0 }
         last_result_at: { type: string, format: date-time }
-        last_result_status: { type: string, enum: [success, progress, failed] }
+        last_result_status: { type: string, enum: [success, progress, warning, failed] }
 
     ActiveJob:
       type: object
@@ -927,10 +927,11 @@ components:
 
     TaskOutcomeBucket:
       type: object
-      required: [start, successful, failed]
+      required: [start, successful, warnings, failed]
       properties:
         start: { type: string, format: date-time }
         successful: { type: integer, minimum: 0 }
+        warnings: { type: integer, minimum: 0 }
         failed: { type: integer, minimum: 0 }
 
     FleetActivityEvent:
@@ -942,7 +943,7 @@ components:
         agent_name: { type: string }
         kind:
           type: string
-          enum: [task_success, task_failed, artifact_received, agent_overdue, agent_offline]
+          enum: [task_success, task_warning, task_failed, artifact_received, agent_overdue, agent_offline]
         task_type: { type: string }
         detail: { type: string }
 
@@ -976,6 +977,9 @@ components:
           type: string
           description: Sanitized task payload retained for operator-facing command labels.
         output: { type: string }
+        warning:
+          type: string
+          description: A shell command outcome returned by the agent that did not indicate a communication failure.
         error: { type: string }
         queued_at: { type: string, format: date-time }
         last_delivered_at:

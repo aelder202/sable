@@ -207,6 +207,7 @@ func chunkTaskResult(result *protocol.TaskResult) []*protocol.TaskResult {
 			TaskID:     result.TaskID,
 			Type:       result.Type,
 			Output:     result.Output[start:end],
+			Warning:    result.Warning,
 			ChunkIndex: i,
 			ChunkTotal: total,
 		})

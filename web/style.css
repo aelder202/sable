@@ -1525,7 +1525,8 @@ kbd {
 }
 
 .timeline-running .timeline-marker,
-.timeline-progress .timeline-marker {
+.timeline-progress .timeline-marker,
+.timeline-warning .timeline-marker {
   border-color: var(--warn);
 }
 
@@ -4143,6 +4144,10 @@ button.overview-stat:hover {
   background: rgba(255, 107, 122, 0.025);
 }
 
+#output .output-task-card.warning {
+  background: rgba(255, 193, 92, 0.025);
+}
+
 #output .output-task-card.pinned {
   box-shadow: inset 3px 0 0 var(--accent);
   background: rgba(72, 209, 194, 0.055);
@@ -4225,6 +4230,7 @@ button.overview-stat:hover {
 }
 
 .output-task-status.success { color: var(--success); }
+.output-task-status.warning { color: var(--warn); }
 .output-task-status.failed { color: var(--danger); }
 
 .output-task-status-dot {
@@ -4679,7 +4685,7 @@ button.overview-stat:hover {
 
 .summary-activity-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -4706,6 +4712,7 @@ button.overview-stat:hover {
 }
 
 .summary-activity-stat.success strong { color: var(--success); }
+.summary-activity-stat.warning strong { color: var(--warn); }
 .summary-activity-stat.failed strong { color: var(--danger); }
 
 .summary-link-button {
@@ -5592,6 +5599,13 @@ button.overview-stat:hover {
   flex-direction: column;
 }
 
+.attention-guidance {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.3;
+}
+
 .attention-entry {
   display: grid;
   grid-template-columns: 21px minmax(0, 1fr) auto;
@@ -5879,6 +5893,10 @@ button.overview-stat:hover {
   fill: var(--success);
 }
 
+.outcome-bar-warning {
+  fill: var(--warn);
+}
+
 .outcome-bar-failure {
   fill: #ff4f58;
 }
@@ -5917,6 +5935,10 @@ button.overview-stat:hover {
 
 .outcome-legend-swatch.successful {
   background: var(--success);
+}
+
+.outcome-legend-swatch.warning {
+  background: var(--warn);
 }
 
 .outcome-legend-swatch.failed {

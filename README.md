@@ -16,23 +16,37 @@ Sable is a C2 written in Go. The server takes encrypted beacons from agents over
 
 Password-gated operator console on loopback HTTPS:
 
-![Sable login screen](images/login.png)
+![Sable login screen](images/login.jpg)
 
-Agent workspace with command output, the Task Builder, and the full action menu:
+Fleet Overview with sleep-aware status, command outcomes, recent activity, and
+actionable failure alerts:
 
-![Sable web console with active session](images/landing_page.png)
+![Sable fleet Overview with warning totals and Needs Attention guidance](images/overview.jpg)
+
+Shell commands that reach the agent but return an OS or process error are shown
+as **Warnings**. **Failed** is reserved for delivery or agent communication
+failures. A failed-task banner remains until every item under **Needs
+Attention** is cleared with **Ignore** (for the current session) or
+**Acknowledge** (persistently); either choice retains the task output and
+outcome history.
+
+Agent workspace with Success, Warning, and Failed output cards, the Task
+Builder, and the full action menu:
+
+![Sable web console with active session and warning output](images/landing_page.jpg)
 
 Bulk tasking across selected agents:
 
-![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.png)
+![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.jpg)
 
-Agent details rail for jobs, artifacts, metadata, and audit history:
+Agent details rail with outcome totals, jobs, artifacts, metadata, and audit
+history:
 
-![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
+![Session Details with success, warning, and failed totals](images/session_details.jpg)
 
 Remote file browser for navigating paths and downloading files or directory ZIPs:
 
-![Download file browser modal](images/file_browser.png)
+![Download file browser modal](images/file_browser.jpg)
 
 ---
 
@@ -264,7 +278,18 @@ The agent shows up in the console within one beacon interval.
 
 `https://127.0.0.1:8443` on the server host (or through the tunnel). Accept the self-signed cert and log in with the operator password.
 
-After login the Overview dashboard summarizes the deployed fleet with sleep-aware status, activity, and health counters. Open Agents for task output, the Task Builder, metadata, artifacts, and Remote Files.
+After login the Overview dashboard summarizes the deployed fleet with
+sleep-aware status, activity, and Success, Warning, and Failed outcome counters.
+A shell command that reaches an agent but is rejected by the OS or exits with an
+error is a Warning. A task becomes Failed when delivery or agent communication
+breaks down, including when an agent misses its sleep-aware offline check-in
+threshold.
+
+Failed tasks appear under **Needs Attention** and keep the red Overview banner
+active. Open each failed task there and choose **Ignore** to clear it for the
+current browser session or **Acknowledge** to clear it persistently. Both
+actions retain the output and outcome history. Open **Agents** for task output,
+the Task Builder, metadata, artifacts, and Remote Files.
 
 ---
 

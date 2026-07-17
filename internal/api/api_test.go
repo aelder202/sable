@@ -263,7 +263,7 @@ func TestResolveOverviewFailureAlertRetainsOutputAndHistory(t *testing.T) {
 		"Authorization": "Bearer " + token,
 		"Content-Type":  "application/json",
 	}
-	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "failed-task", Type: "shell", Payload: "exit 1"}); err != nil {
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "failed-task", Type: "screenshot"}); err != nil {
 		t.Fatal(err)
 	}
 	if delivered := store.DeliverTask("agent-1"); delivered == nil || delivered.ID != "failed-task" {
@@ -271,8 +271,8 @@ func TestResolveOverviewFailureAlertRetainsOutputAndHistory(t *testing.T) {
 	}
 	if !store.RecordOutput("agent-1", &protocol.TaskResult{
 		TaskID: "failed-task",
-		Type:   "shell",
-		Error:  "exit status 1",
+		Type:   "screenshot",
+		Error:  "capture failed",
 	}) {
 		t.Fatal("failed task result was not recorded")
 	}

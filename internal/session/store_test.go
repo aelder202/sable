@@ -212,6 +212,7 @@ func TestOverviewIncludesOutcomeBucketsAndRecentActivity(t *testing.T) {
 		Transport:   "dns",
 		Outputs: []session.TaskOutput{
 			{TaskID: "success", Type: "shell", Timestamp: now.Add(-2 * time.Hour)},
+			{TaskID: "warning", Type: "shell", Warning: "exit status 1", Timestamp: now.Add(-45 * time.Minute)},
 			{TaskID: "failure", Type: "screenshot", Error: "capture failed", Timestamp: now.Add(-30 * time.Minute)},
 			{TaskID: "progress", Type: "download_progress", Timestamp: now.Add(-10 * time.Minute)},
 		},
@@ -224,13 +225,14 @@ func TestOverviewIncludesOutcomeBucketsAndRecentActivity(t *testing.T) {
 	if len(overview.TaskOutcomes24Hours) != 24 || len(overview.TaskOutcomes7Days) != 7 {
 		t.Fatalf("unexpected outcome bucket counts: 24h=%d 7d=%d", len(overview.TaskOutcomes24Hours), len(overview.TaskOutcomes7Days))
 	}
-	successful, failed := 0, 0
+	successful, warnings, failed := 0, 0, 0
 	for _, bucket := range overview.TaskOutcomes24Hours {
 		successful += bucket.Successful
+		warnings += bucket.Warnings
 		failed += bucket.Failed
 	}
-	if successful != 1 || failed != 1 || overview.FailedLast24Hours != 1 {
-		t.Fatalf("unexpected task outcomes: successful=%d failed=%d overview=%+v", successful, failed, overview)
+	if successful != 1 || warnings != 1 || failed != 1 || overview.FailedLast24Hours != 1 {
+		t.Fatalf("unexpected task outcomes: successful=%d warnings=%d failed=%d overview=%+v", successful, warnings, failed, overview)
 	}
 	if len(overview.FailureAlerts) != 1 || overview.FailureAlerts[0].TaskID != "failure" {
 		t.Fatalf("unexpected failure alerts: %+v", overview.FailureAlerts)
@@ -242,7 +244,7 @@ func TestOverviewIncludesOutcomeBucketsAndRecentActivity(t *testing.T) {
 			t.Fatalf("activity event lost agent identity: %+v", event)
 		}
 	}
-	for _, kind := range []string{"task_success", "task_failed", "artifact_received", "agent_overdue"} {
+	for _, kind := range []string{"task_success", "task_warning", "task_failed", "artifact_received", "agent_overdue"} {
 		if !kinds[kind] {
 			t.Fatalf("missing %q activity event: %+v", kind, overview.RecentActivity)
 		}
@@ -259,7 +261,7 @@ func TestOverviewIncludesOutcomeBucketsAndRecentActivity(t *testing.T) {
 	if resolved.FailedLast24Hours != 0 || len(resolved.FailureAlerts) != 0 {
 		t.Fatalf("acknowledged alert remained actionable: %+v", resolved.FailureAlerts)
 	}
-	if len(s.GetOutputs("lab-agent")) != 3 {
+	if len(s.GetOutputs("lab-agent")) != 4 {
 		t.Fatal("acknowledging an Overview alert changed retained agent output")
 	}
 	historicalFailures := 0
@@ -287,7 +289,7 @@ func TestAcknowledgedOverviewFailureAlertPersistsWithoutDeletingOutput(t *testin
 		FirstSeen: now.Add(-time.Hour),
 		LastSeen:  now,
 		Outputs: []session.TaskOutput{
-			{TaskID: "failed-task", Type: "shell", Error: "command failed", Timestamp: now.Add(-time.Minute)},
+			{TaskID: "failed-task", Type: "screenshot", Error: "capture failed", Timestamp: now.Add(-time.Minute)},
 		},
 	})
 	alerts := s.Overview().FailureAlerts
@@ -307,8 +309,43 @@ func TestAcknowledgedOverviewFailureAlertPersistsWithoutDeletingOutput(t *testin
 		t.Fatalf("acknowledged Overview alert returned after reload: %+v", got.FailureAlerts)
 	}
 	outputs := reloaded.GetOutputs("a1")
-	if len(outputs) != 1 || outputs[0].TaskID != "failed-task" || outputs[0].Error != "command failed" {
+	if len(outputs) != 1 || outputs[0].TaskID != "failed-task" || outputs[0].Error != "capture failed" {
 		t.Fatalf("acknowledging Overview alert changed persisted output: %+v", outputs)
+	}
+}
+
+func TestShellExecutionErrorIsRecordedAsWarning(t *testing.T) {
+	s := session.NewStore()
+	now := time.Now()
+	s.Register(&session.Agent{
+		ID:        "a1",
+		Secret:    []byte("secret"),
+		FirstSeen: now,
+		LastSeen:  now,
+	})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "shell-warning", Type: "shell", Payload: "not-a-real-command"})
+	if !s.RecordOutput("a1", &protocol.TaskResult{
+		TaskID: "shell-warning",
+		Type:   "shell",
+		Error:  "command was not recognized by the OS: not-a-real-command",
+	}) {
+		t.Fatal("shell warning result was not recorded")
+	}
+
+	outputs := s.GetOutputs("a1")
+	if len(outputs) != 1 || outputs[0].Error != "" || outputs[0].Warning == "" {
+		t.Fatalf("shell execution outcome was not normalized to a warning: %+v", outputs)
+	}
+	overview := s.Overview()
+	if overview.FailedLast24Hours != 0 || len(overview.FailureAlerts) != 0 {
+		t.Fatalf("shell warning incorrectly required attention: %+v", overview)
+	}
+	warnings := 0
+	for _, bucket := range overview.TaskOutcomes24Hours {
+		warnings += bucket.Warnings
+	}
+	if warnings != 1 {
+		t.Fatalf("shell warning missing from outcome history: %+v", overview.TaskOutcomes24Hours)
 	}
 }
 

@@ -180,6 +180,7 @@
                 <div id="outcome-chart" class="outcome-chart" role="img" aria-label="No completed task outcomes in this range."></div>
                 <div class="outcome-legend" aria-label="Task outcome totals">
                   <div><span class="outcome-legend-swatch successful"></span><span>Successful</span><strong id="outcome-successful-total">0</strong></div>
+                  <div><span class="outcome-legend-swatch warning"></span><span>Warnings</span><strong id="outcome-warning-total">0</strong></div>
                   <div><span class="outcome-legend-swatch failed"></span><span>Failed</span><strong id="outcome-failed-total">0</strong></div>
                 </div>
               </div>
@@ -188,7 +189,12 @@
 
           <aside class="overview-insights" aria-label="Fleet insights">
             <section class="overview-panel attention-panel">
-              <div class="overview-panel-heading"><h3>Needs attention</h3></div>
+              <div class="overview-panel-heading">
+                <div>
+                  <h3>Needs attention</h3>
+                  <p class="attention-guidance">Clear each failed task here with Ignore or Acknowledge.</p>
+                </div>
+              </div>
               <div id="overview-attention" class="attention-list"></div>
             </section>
             <section class="overview-panel recent-activity-panel">
@@ -309,6 +315,7 @@
                     <option value="operator">Operator</option>
                     <option value="shell">Shell</option>
                     <option value="artifact">Artifacts</option>
+                    <option value="warning">Warnings</option>
                     <option value="error">Errors</option>
                     <option value="progress">Progress</option>
                   </select>

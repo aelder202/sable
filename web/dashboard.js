@@ -79,6 +79,7 @@ function resetDashboard() {
   $('overview-fleet-mix').textContent = '';
   $('outcome-chart').textContent = '';
   $('outcome-successful-total').textContent = '0';
+  $('outcome-warning-total').textContent = '0';
   $('outcome-failed-total').textContent = '0';
   $('overview-health-copy').textContent = 'Waiting for fleet data.';
   $('overview-result-count').textContent = '0 agents';
@@ -363,6 +364,9 @@ function renderOverviewHealthSummary(overview, failuresNeedingAttention) {
       if (attention > 0) parts.push(attention + ' ' + pluralize(attention, 'agent needs', 'agents need') + ' attention');
       if (failures > 0) parts.push(failures + ' ' + pluralize(failures, 'task failed', 'tasks failed') + ' today');
       copy += parts.join(' and ') + '.';
+      if (failures > 0) {
+        copy += ' In Needs attention, Ignore or Acknowledge each failed task to clear this banner.';
+      }
     }
   }
   $('overview-health-copy').textContent = copy;
@@ -646,12 +650,15 @@ function renderTaskOutcomes() {
   const buckets = overviewOutcomeRange === '7d' ? overview.task_outcomes_7d : overview.task_outcomes_24h;
   const values = Array.isArray(buckets) ? buckets : [];
   const successful = values.reduce((total, bucket) => total + Number(bucket.successful || 0), 0);
+  const warnings = values.reduce((total, bucket) => total + Number(bucket.warnings || 0), 0);
   const failed = values.reduce((total, bucket) => total + Number(bucket.failed || 0), 0);
   $('outcome-successful-total').textContent = String(successful);
+  $('outcome-warning-total').textContent = String(warnings);
   $('outcome-failed-total').textContent = String(failed);
   $('outcome-chart').setAttribute(
     'aria-label',
-    successful + ' successful and ' + failed + ' failed task ' + pluralize(successful + failed, 'outcome', 'outcomes') +
+    successful + ' successful, ' + warnings + ' warning, and ' + failed + ' failed task ' +
+      pluralize(successful + warnings + failed, 'outcome', 'outcomes') +
       ' in the selected ' + (overviewOutcomeRange === '7d' ? '7 day' : '24 hour') + ' range.',
   );
   drawOutcomeChart(values);
@@ -669,7 +676,8 @@ function drawOutcomeChart(values) {
   const bottom = 26;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
-  const maxValue = Math.max(1, ...values.map(bucket => Number(bucket.successful || 0) + Number(bucket.failed || 0)));
+  const maxValue = Math.max(1, ...values.map(bucket =>
+    Number(bucket.successful || 0) + Number(bucket.warnings || 0) + Number(bucket.failed || 0)));
   const roundedMax = Math.max(2, Math.ceil(maxValue / 2) * 2);
 
   [roundedMax, roundedMax / 2, 0].forEach((value, index) => {
@@ -685,8 +693,10 @@ function drawOutcomeChart(values) {
     const barWidth = Math.max(7, Math.min(18, slot * 0.48));
     values.forEach((bucket, index) => {
       const success = Number(bucket.successful || 0);
+      const warning = Number(bucket.warnings || 0);
       const failure = Number(bucket.failed || 0);
       const successHeight = (success / roundedMax) * plotHeight;
+      const warningHeight = (warning / roundedMax) * plotHeight;
       const failureHeight = (failure / roundedMax) * plotHeight;
       const x = left + (slot * index) + ((slot - barWidth) / 2);
       const baseline = top + plotHeight;
@@ -697,11 +707,16 @@ function drawOutcomeChart(values) {
       }
       if (failure > 0) {
         svg.appendChild(svgElement('rect', {
-          x, y: baseline - successHeight - failureHeight, width: barWidth, height: failureHeight, rx: 1.5, class: 'outcome-bar-failure',
+          x, y: baseline - successHeight - warningHeight - failureHeight, width: barWidth, height: failureHeight, rx: 1.5, class: 'outcome-bar-failure',
+        }));
+      }
+      if (warning > 0) {
+        svg.appendChild(svgElement('rect', {
+          x, y: baseline - successHeight - warningHeight, width: barWidth, height: warningHeight, rx: 1.5, class: 'outcome-bar-warning',
         }));
       }
       const title = svgElement('title');
-      title.textContent = outcomeBucketLabel(bucket.start) + ': ' + success + ' successful, ' + failure + ' failed';
+      title.textContent = outcomeBucketLabel(bucket.start) + ': ' + success + ' successful, ' + warning + ' warnings, ' + failure + ' failed';
       const hit = svgElement('rect', {
         x: left + (slot * index), y: top, width: slot, height: plotHeight, class: 'outcome-bar-hit',
       });
@@ -761,6 +776,8 @@ function activityTitle(event) {
     return 'Task completed on ' + name;
   case 'task_failed':
     return humanTaskType(event.task_type) + ' failed on ' + name;
+  case 'task_warning':
+    return humanTaskType(event.task_type) + ' warning on ' + name;
   case 'artifact_received':
     return 'Artifact received from ' + name;
   case 'agent_overdue':
@@ -774,14 +791,14 @@ function activityTitle(event) {
 
 function activityTone(kind) {
   if (kind === 'task_failed' || kind === 'agent_offline') return 'danger';
-  if (kind === 'agent_overdue') return 'warning';
+  if (kind === 'task_warning' || kind === 'agent_overdue') return 'warning';
   return 'success';
 }
 
 function activityIcon(kind) {
   if (kind === 'task_failed') return 'failure';
   if (kind === 'artifact_received') return 'artifact';
-  if (kind === 'agent_overdue' || kind === 'agent_offline') return 'warning';
+  if (kind === 'task_warning' || kind === 'agent_overdue' || kind === 'agent_offline') return 'warning';
   return 'healthy';
 }
 

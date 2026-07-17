@@ -96,7 +96,13 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		taskErr = fmt.Sprintf("unknown task type: %q", t.Type)
 	}
 
-	return &protocol.TaskResult{TaskID: t.ID, Type: t.Type, Output: output, Error: taskErr}
+	result := &protocol.TaskResult{TaskID: t.ID, Type: t.Type, Output: output}
+	if t.Type == "shell" {
+		result.Warning = taskErr
+	} else {
+		result.Error = taskErr
+	}
+	return result
 }
 
 type pathCompletionResult struct {

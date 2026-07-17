@@ -98,7 +98,21 @@ test('Task Builder uses explicit current and selected target controls', () => {
 });
 
 test('Needs attention has its own constrained scroll container', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');
+  const dashboard = fs.readFileSync(path.join(__dirname, 'dashboard.js'), 'utf8');
+  assert.match(html, /Clear each failed task here with Ignore or Acknowledge\./);
+  assert.match(dashboard, /In Needs attention, Ignore or Acknowledge each failed task to clear this banner\./);
   assert.match(css, /\.attention-list\s*\{[^}]*flex:\s*1 1 auto;[^}]*overflow-y:\s*auto;/s);
   assert.match(css, /\.attention-panel\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s);
+});
+
+test('task outcome UI includes warning status', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const dashboard = fs.readFileSync(path.join(__dirname, 'dashboard.js'), 'utf8');
+  const output = fs.readFileSync(path.join(__dirname, 'output.js'), 'utf8');
+  assert.match(html, /id="outcome-warning-total"/);
+  assert.match(html, /<option value="warning">Warnings<\/option>/);
+  assert.match(dashboard, /bucket\.warnings/);
+  assert.match(output, /output\.warning/);
 });

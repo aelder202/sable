@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/aelder202/sable/internal/protocol"
 )
 
 func TestCompletePathReturnsDirectoryMatches(t *testing.T) {
@@ -246,6 +248,17 @@ func TestRunShellUnknownCommandReturnsRecognizedError(t *testing.T) {
 	}
 	if strings.TrimSpace(output) == "" {
 		t.Fatalf("runShell(%q) returned empty output", command)
+	}
+}
+
+func TestExecuteShellTaskReturnsWarningForCommandOutcome(t *testing.T) {
+	command := "sable-command-definitely-not-recognized-warning-zzzz"
+	result := executeTask(&protocol.Task{ID: "warning-task", Type: "shell", Payload: command})
+	if result.Error != "" {
+		t.Fatalf("shell command outcome was reported as a failure: %+v", result)
+	}
+	if result.Warning != "command was not recognized by the OS: "+command {
+		t.Fatalf("unexpected shell warning: %+v", result)
 	}
 }
 
