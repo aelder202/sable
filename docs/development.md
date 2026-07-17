@@ -9,7 +9,7 @@ When you want to verify the install path works as if you had just cloned the rep
 ./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt
 ```
 
-`reset` removes `.sable/`, `config.env`, `server.crt`, `server.key`, `sable-state.json`, the password file recorded in the manifest, the server binary, and the `agents/` and `builds/` directories. It is idempotent — safe to run with no manifest or after a partial install. Pass `--keep-state` to preserve `sable-state.json` (so registered agents survive the reinstall).
+`reset` removes `.sable/`, `config.env`, `server.crt`, `server.key`, `sable-state.json`, the password file recorded in the manifest, the server binary, and the `agents/` and `builds/` directories. It refuses before removing anything while the API listener or recorded server process is still running, so run `sablectl down` first. It is idempotent — safe to run with no manifest or after a partial install. Pass `--keep-state` to preserve `sable-state.json` (so registered agents survive the reinstall).
 
 `sablectl` itself is left in place so you can immediately reinstall.
 

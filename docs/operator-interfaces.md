@@ -2,21 +2,25 @@
 
 ## Web UI
 
-Sessions live in the left sidebar. Anything quiet for 3–10 minutes goes yellow; past 10 minutes goes red. Hover for the exact last-seen timestamp. Press `/` to focus the filter.
+The web UI opens on **Overview**, with a plain-language fleet health summary, fleet counters, a searchable agent inventory, actionable attention items, scrollable recent fleet activity, compact platform/transport composition, and task-outcome charts for the last 24 hours or 7 days. Failed-task attention items can be opened, ignored for the current browser session, or acknowledged from Overview. Acknowledgement uses an optional persistent browser warning and retains the agent's task output, Recent Activity entry, and outcome-chart history. Registration does not prove deployment: **Never seen** identifies an agent that has not beaconed. After first contact, **Active**, **Overdue**, and **Offline** are calculated from the agent's reported sleep interval and jitter allowance. Retired agents remain available when explicitly included.
+
+Open **Agents** for the task workspace. The agent rail can be collapsed to give Output more room. Operator display names are independent of immutable IDs and beacon-reported hostnames and can be changed with **More -> Edit info** on an agent card. Press `/` to focus the agent filter.
 
 The main console is split into Output and Task Builder. Output shows queued task echoes, task results, progress messages, errors, and saveable artifact rows. Use the output type filter to focus on shell output, operator events, artifacts, errors, or progress. Expand **Search Output** to filter rendered output rows only. Output rows can be pinned or copied without leaving the console. **Jump To Latest** resumes the live tail after scrolling up.
 
-Use **Clear Output** to clear the selected session's output history on the server. Cleared output stays cleared after switching sessions or reloading the page. Use **Save Output** to snapshot the currently rendered output as a `.txt` artifact under **Session Details -> Artifacts**. Saved output, screenshots, downloads, PEAS, and snapshot results are stored as server-side artifacts so they remain available after a browser refresh.
+Use **Clear Output** to clear the selected agent's output history on the server. Cleared output stays cleared after switching agents or reloading the page. Use **Save Output** to snapshot the currently rendered output as a `.txt` artifact under **Agent Details -> Artifacts**. Saved output, screenshots, downloads, PEAS, and snapshot results are stored as server-side artifacts so they remain available after a browser refresh.
 
-The Task Builder groups actions by command, situational awareness, file handling, and session control. It keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and the Download file browser both wait for the selected session to confirm the remote path browser is ready before their controls unlock. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
+The Task Builder groups actions by command, situational awareness, file handling, and agent control. It keeps the command line on its own full-width row only for actions that need operator input, such as Shell, Download, Upload, and Sleep. One-click actions such as Processes, Screenshot, Snapshot, Persistence, PEAS, and Interactive hide the command line until input is actually needed. Download path autofill and Remote Files start only for the selected agent and do not block navigation or actions elsewhere. Drag the handle between Output and Task Builder to resize the console, or double-click it to reset the height.
 
-Select sessions in the left sidebar to queue supported tasks across multiple sessions at once. Bulk queueing is available for Shell, Processes, Screenshot, Snapshot, Persistence, PEAS, and Sleep; file transfer, Interactive, and Kill remain single-session actions.
+Use the Task Builder's **Current agent** / **Selected agents** target toggle to choose single- or multi-agent execution before running a command. Selecting the multi-agent target enables sidebar selection and changes the primary action to show exactly how many agents will receive the task. Bulk queueing is available for Shell, Processes, Screenshot, Snapshot, Persistence, PEAS, and Sleep; file transfer, Interactive, and Kill remain single-agent actions. Retired agents retain their evidence but cannot be tasked until restored.
 
-Session metadata and saved results open from **Session Details**. The default Timeline view combines queued jobs, in-flight delivery attempts, running work, completed results, artifacts, and audit events for the selected session. Use the detail filter or tabs to focus on Jobs, Artifacts, Notes, or Audit. The Artifacts panel supports deletion and a 1â€“256 item retention limit. The Notes panel also exposes secret rotation and permanent agent revocation; rotating a secret requires rebuilding or reconfiguring that agent.
+The header's **active jobs** control opens a fleet-wide modal. A job is active only after the host has received it and while the server is waiting for its terminal result; tasks still waiting for first delivery remain queued and are not counted as active.
 
-The remote file browser returns directories in bounded pages. Use **Load More** for large directories; path completion shows at most 200 matches and asks you to refine the prefix when more exist.
+Agent identity, connection details, source IP, activity, jobs, artifacts, files, and audit history open in the closeable **Agent Details** drawer. Display name, tags, and notes are edited from the agent card's **More -> Edit info** action. The Artifacts panel supports deletion and a 1–256 item retention limit. Retirement hides an inactive identity while preserving history and artifacts; revocation permanently deletes retained state.
 
-When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS runs as a background task and is currently the cancellable task type; use the visible **Cancel PEAS** control there instead of opening Session Details during execution.
+Remote Files keeps per-agent navigation history, cache, scroll position, sorting, filtering, and selection. Files save directly; directories and multi-selections become one ZIP with visible progress, cancellation, retry, and retained-artifact saving. Use **Load More** for bounded directory pages.
+
+When a task supports cancellation, the Task Builder shows a dedicated cancellation row above the action selector. PEAS, file downloads, and directory archives can be cancelled there; transfers can also be cancelled from Remote Files.
 
 ### Console Keys
 
@@ -24,7 +28,7 @@ When a task supports cancellation, the Task Builder shows a dedicated cancellati
 - **Up / Down**: command history
 - **Ctrl/Cmd + K**: focus the task input
 - **Esc**: cancel an upload prompt or kill confirmation
-- **Clear Output**: clear persisted output history for the selected session
+- **Clear Output**: clear persisted output history for the selected agent
 - **Save Output**: save rendered output as a text artifact
 - **Jump To Latest**: resume the live tail after scrolling up
 

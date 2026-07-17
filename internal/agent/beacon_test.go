@@ -88,6 +88,15 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 	}
 }
 
+func TestRoutedHostIPUsesAgentRouteInsteadOfCallbackAddress(t *testing.T) {
+	if got := routedHostIP("https://127.0.0.1:443"); got != "127.0.0.1" {
+		t.Fatalf("routedHostIP = %q, want 127.0.0.1", got)
+	}
+	if got := routedHostIP("not a URL"); got != "" {
+		t.Fatalf("invalid callback returned host IP %q", got)
+	}
+}
+
 func TestRunDeliversSleepAndKillAcknowledgments(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	cfg := &Config{AgentID: "agent-ack", Secret: secret, ServerURL: "https://127.0.0.1:443", SleepSeconds: 30, CertFingerprint: []byte("unused")}

@@ -6,7 +6,9 @@ server.key
 pw.txt
 sable-state.json
 sable-state.json.tmp-*
+sable-state.json.recovery-*
 /sable-state.json.artifacts/
+/sable-state.json.recovery-*.artifacts/
 .sable/
 
 # Compiled binaries (root-level build outputs)

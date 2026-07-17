@@ -28,6 +28,7 @@ import (
 	"github.com/aelder202/sable/internal/listener"
 	"github.com/aelder202/sable/internal/operatorpw"
 	"github.com/aelder202/sable/internal/securefile"
+	"github.com/aelder202/sable/internal/session"
 	"github.com/aelder202/sable/internal/tlspin"
 	"github.com/google/uuid"
 )
@@ -35,6 +36,7 @@ import (
 const (
 	modulePath          = "github.com/aelder202/sable"
 	manifestPath        = ".sable/install.json"
+	serverPIDPath       = ".sable/server.pid"
 	defaultStatePath    = "sable-state.json"
 	defaultStateKeyPath = ".sable/state.key"
 	defaultAPIURL       = "https://127.0.0.1:8443"
@@ -228,8 +230,10 @@ type installConfig struct {
 
 type setupConfig struct {
 	installConfig
-	Yes          bool
-	EncryptState bool
+	Yes                    bool
+	EncryptState           bool
+	Replace                bool
+	ArchiveUnreadableState bool
 }
 
 func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -285,6 +289,8 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	fs.StringVar(&cfg.StateKeyPath, "state-key-file", cfg.StateKeyPath, "state encryption key file")
 	fs.BoolVar(&cfg.EncryptState, "encrypt-state", cfg.EncryptState, "encrypt persisted state")
 	fs.BoolVar(&cfg.Start, "start", cfg.Start, "start the server and register agents")
+	fs.BoolVar(&cfg.Replace, "replace", false, "stop a running server and permanently replace the existing installation")
+	fs.BoolVar(&cfg.ArchiveUnreadableState, "archive-unreadable-state", false, "preserve unreadable persisted state as a recovery backup and start with empty state")
 	fs.BoolVar(&cfg.Yes, "yes", false, "accept defaults and run without prompts")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -296,13 +302,46 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 
+	serverStatus := detectSetupServer(cfg.APIURL)
+	replaceExisting := cfg.Replace && existingInstall
+	var scanner *bufio.Scanner
 	if !cfg.Yes {
-		if existingInstall {
+		scanner = bufio.NewScanner(stdin)
+		if serverStatus.Running {
+			printSetupReplacementWarning(stdout, cfg.APIURL, serverStatus.VerifiedSable)
+			confirmed, err := promptBool(scanner, stdout, "Stop it and begin a clean setup", false)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				fmt.Fprintln(stdout, "Setup cancelled. The running server and current configuration were not changed.")
+				return nil
+			}
+			if err := stopServerForSetup(cfg.APIURL, m, stdout); err != nil {
+				return err
+			}
+			replaceExisting = true
+			fmt.Fprintln(stdout, "Server stopped. Current configuration remains intact until you confirm the setup plan.")
+		} else if existingInstall {
 			fmt.Fprintln(stdout, "Existing Sable configuration detected. Setup will reuse identities and repair missing artifacts.")
+		}
+		if !replaceExisting {
+			stateErr := validatePersistentState(cfg.StatePath, setupStateKeyPath(cfg))
+			if stateErr != nil {
+				printUnreadableStateWarning(stdout, cfg.StatePath, cfg.StateKeyPath, stateErr)
+				confirmed, err := promptBool(scanner, stdout, "Archive the unreadable state and continue with empty state", false)
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(stdout, "Setup cancelled. Persisted state and the current key were not changed.")
+					return nil
+				}
+				cfg.ArchiveUnreadableState = true
+			}
 		}
 		fmt.Fprintln(stdout, "Sable guided setup")
 		fmt.Fprintln(stdout, "Press Enter to accept the value shown in brackets.")
-		scanner := bufio.NewScanner(stdin)
 		var err error
 		if cfg.ServerURL, err = promptValue(scanner, stdout, "Agent callback URL", cfg.ServerURL); err != nil {
 			return err
@@ -344,6 +383,19 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 			fmt.Fprintln(stdout, "Setup cancelled.")
 			return nil
 		}
+	} else if serverStatus.Running {
+		if !cfg.Replace {
+			return fmt.Errorf("a server is already listening at %s; rerun with --replace to stop it and permanently replace the current installation", cfg.APIURL)
+		}
+		if err := stopServerForSetup(cfg.APIURL, m, stdout); err != nil {
+			return err
+		}
+		replaceExisting = true
+	}
+	if cfg.Yes && !replaceExisting {
+		if stateErr := validatePersistentState(cfg.StatePath, setupStateKeyPath(cfg)); stateErr != nil && !cfg.ArchiveUnreadableState {
+			return fmt.Errorf("persisted state is unreadable with the configured key: %w; restore the matching key or rerun with --archive-unreadable-state to preserve the unreadable data and start empty", stateErr)
+		}
 	}
 
 	if !cfg.EncryptState {
@@ -352,17 +404,27 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	if err := validateSetupConfig(cfg); err != nil {
 		return err
 	}
-	if existing, err := loadAgentConfig("config.env"); err == nil {
+	if replaceExisting {
+		fmt.Fprintln(stdout, "Removing the previous Sable configuration and persisted data.")
+		if err := resetInstallation(false, stdout, false); err != nil {
+			return err
+		}
+	} else if cfg.ArchiveUnreadableState {
+		if stateErr := validatePersistentState(cfg.StatePath, cfg.StateKeyPath); stateErr != nil {
+			archived, err := archivePersistentState(cfg.StatePath, time.Now())
+			if err != nil {
+				return err
+			}
+			for _, path := range archived {
+				fmt.Fprintf(stdout, "preserved for recovery: %s\n", filepath.ToSlash(path))
+			}
+		}
+	} else if existing, err := loadAgentConfig("config.env"); err == nil {
 		if cfg.ServerURL != existing.ServerURL || cfg.Label != existing.Label || cfg.Profile != existing.Profile || cfg.DNSDomain != existing.DNSDomain {
 			return errors.New("setup cannot change an existing agent identity's URL, label, or profile; run sablectl reset first")
 		}
 	}
-	alreadyRunning := apiReachable(cfg.APIURL)
 	installCfg := cfg.installConfig
-	if alreadyRunning && installCfg.Start {
-		fmt.Fprintf(stdout, "Server already reachable at %s; reusing it.\n", installCfg.APIURL)
-		installCfg.Start = false
-	}
 	if err := runInstall(installArgs(installCfg), runner, stdout, stderr); err != nil {
 		return err
 	}
@@ -550,7 +612,140 @@ func printSetupPlan(out io.Writer, cfg setupConfig) {
 	fmt.Fprintf(out, "  agents: %s\n", cfg.Agents)
 	fmt.Fprintf(out, "  profile: %s\n", cfg.Profile)
 	fmt.Fprintf(out, "  state encryption: %t\n", cfg.EncryptState)
+	if cfg.ArchiveUnreadableState {
+		fmt.Fprintln(out, "  unreadable state: preserve as recovery backup and start empty")
+	}
 	fmt.Fprintf(out, "  start now: %t\n", cfg.Start)
+}
+
+func printUnreadableStateWarning(out io.Writer, statePath, stateKeyPath string, stateErr error) {
+	fmt.Fprintf(out, "Persisted state at %s cannot be opened with the configured state key %s.\n", filepath.ToSlash(statePath), filepath.ToSlash(defaultString(stateKeyPath, "none")))
+	fmt.Fprintf(out, "Reason: %v\n", stateErr)
+	fmt.Fprintln(out, "The state will not be overwritten. Continuing will rename the state and artifact directory as recovery backups, then start with empty state.")
+	fmt.Fprintln(out, "Recovery backups remain encrypted and require the original matching key.")
+}
+
+func setupStateKeyPath(cfg setupConfig) string {
+	if !cfg.EncryptState {
+		return ""
+	}
+	return normalizeStateKeyPath(cfg.StateKeyPath)
+}
+
+type setupServerStatus struct {
+	Running       bool
+	VerifiedSable bool
+}
+
+func detectSetupServer(apiURL string) setupServerStatus {
+	if apiReachable(apiURL) {
+		return setupServerStatus{Running: true, VerifiedSable: true}
+	}
+	return setupServerStatus{Running: apiListenerReachable(apiURL)}
+}
+
+func apiListenerReachable(apiURL string) bool {
+	if requireLoopbackAPIURL(apiURL) != nil {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(apiURL))
+	if err != nil {
+		return false
+	}
+	address := u.Host
+	if u.Port() == "" {
+		address = net.JoinHostPort(u.Hostname(), "443")
+	}
+	conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func printSetupReplacementWarning(out io.Writer, apiURL string, verifiedSable bool) {
+	if verifiedSable {
+		fmt.Fprintf(out, "Running Sable server detected at %s.\n", apiURL)
+	} else {
+		fmt.Fprintf(out, "A process is already using the Sable API address %s.\n", apiURL)
+	}
+	fmt.Fprintln(out, "WARNING: Continuing will stop that server and create a clean Sable installation.")
+	fmt.Fprintln(out, "After final confirmation, current configuration, agent identities, persisted state and artifacts, keys, credentials, logs, and builds will be permanently removed.")
+}
+
+func stopServerForSetup(apiURL string, m manifest, out io.Writer) error {
+	if apiReachable(apiURL) {
+		for _, password := range knownOperatorPasswords(m) {
+			client, err := apiClient()
+			if err != nil {
+				break
+			}
+			token, err := login(client, apiURL, password)
+			if err != nil {
+				continue
+			}
+			if err := requestShutdown(client, apiURL, token); err != nil {
+				return err
+			}
+			if err := waitForServerStop(apiURL, 10*time.Second); err != nil {
+				return err
+			}
+			if err := waitForManagedServerExit(15 * time.Second); err != nil {
+				return err
+			}
+			removeServerPID()
+			fmt.Fprintln(out, "Stopped the running Sable server.")
+			return nil
+		}
+	}
+
+	if err := terminateManagedServer(apiURL); err == nil {
+		fmt.Fprintln(out, "Stopped the running Sable server.")
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return errors.New("the listener could not be stopped safely because it has no managed Sable PID and the recorded operator credentials did not authenticate; stop it with `sablectl down` or set SABLE_OPERATOR_PASSWORD, then rerun setup")
+}
+
+func knownOperatorPasswords(m manifest) []string {
+	passwords := []string{}
+	paths := cleanList([]string{m.PasswordFile, filepath.FromSlash(".sable/operator-password")})
+	for _, path := range paths {
+		if password, err := readOperatorPassword(path, ""); err == nil {
+			addUnique(&passwords, password)
+		}
+	}
+	if password := strings.TrimSpace(os.Getenv("SABLE_OPERATOR_PASSWORD")); password != "" {
+		addUnique(&passwords, password)
+	}
+	return passwords
+}
+
+func waitForServerStop(apiURL string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !apiListenerReachable(apiURL) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("server is still listening at %s after %s", apiURL, timeout)
+}
+
+func waitForManagedServerExit(timeout time.Duration) error {
+	pid, err := readServerPID()
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read managed Sable PID while waiting for shutdown: %w", err)
+	}
+	if err := waitForProcessExit(pid, timeout); err != nil {
+		return fmt.Errorf("wait for managed Sable server process %d: %w", pid, err)
+	}
+	return nil
 }
 
 func printSetupComplete(out io.Writer, cfg setupConfig) {
@@ -990,34 +1185,48 @@ func runDown(args []string, stdout io.Writer) error {
 	if err := requireLoopbackAPIURL(*apiURL); err != nil {
 		return err
 	}
-	if !apiReachable(*apiURL) {
+	if !apiListenerReachable(*apiURL) {
+		if err := waitForManagedServerExit(2 * time.Second); err != nil {
+			if terminateErr := terminateManagedServer(*apiURL); terminateErr != nil {
+				return fmt.Errorf("the API listener is closed, but the managed server process has not exited: %v", err)
+			}
+		}
 		fmt.Fprintln(stdout, "server stopped")
+		removeServerPID()
 		return nil
 	}
 	resolvedPassword, err := readOperatorPassword(passwordFileOrManifest(*passwordFile, m), *password)
 	if err != nil {
-		return err
+		return stopManagedServerAfterAuthFailure(*apiURL, err, stdout)
 	}
 	client, err := apiClient()
 	if err != nil {
-		return err
+		return stopManagedServerAfterAuthFailure(*apiURL, err, stdout)
 	}
 	token, err := login(client, *apiURL, resolvedPassword)
 	if err != nil {
-		return err
+		return stopManagedServerAfterAuthFailure(*apiURL, err, stdout)
 	}
 	if err := requestShutdown(client, *apiURL, token); err != nil {
+		return stopManagedServerAfterAuthFailure(*apiURL, err, stdout)
+	}
+	if err := waitForServerStop(*apiURL, 10*time.Second); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if !apiReachable(*apiURL) {
-			fmt.Fprintln(stdout, "server stopped")
-			return nil
-		}
-		time.Sleep(250 * time.Millisecond)
+	if err := waitForManagedServerExit(15 * time.Second); err != nil {
+		return err
 	}
-	return errors.New("server accepted shutdown but is still reachable after 10 seconds")
+	removeServerPID()
+	fmt.Fprintln(stdout, "server stopped")
+	return nil
+}
+
+func stopManagedServerAfterAuthFailure(apiURL string, authErr error, stdout io.Writer) error {
+	if err := terminateManagedServer(apiURL); err != nil {
+		return fmt.Errorf("authenticated shutdown unavailable (%v); managed server stop failed: %w", authErr, err)
+	}
+	fmt.Fprintln(stdout, "server stopped")
+	return nil
 }
 
 func runStatus(args []string, stdout io.Writer) error {
@@ -1412,11 +1621,17 @@ func runReset(args []string, stdout io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	return resetInstallation(*keepState, stdout, true)
+}
 
-	targets := defaultResetTargets(runtime.GOOS, *keepState)
+func resetInstallation(keepState bool, stdout io.Writer, showNext bool) error {
+	if err := ensureServerStoppedForReset(); err != nil {
+		return err
+	}
+	targets := defaultResetTargets(runtime.GOOS, keepState)
 	if m, err := loadManifest(); err == nil {
 		targets = append(targets, m.Config, m.Cert, m.Key, m.PasswordFile)
-		if !*keepState {
+		if !keepState {
 			targets = append(targets, m.State, m.StateKeyFile)
 		}
 		targets = append(targets, m.Agents...)
@@ -1442,7 +1657,27 @@ func runReset(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "nothing to remove")
 		return nil
 	}
-	fmt.Fprintln(stdout, "next: sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt")
+	if showNext {
+		fmt.Fprintln(stdout, "next: sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt")
+	}
+	return nil
+}
+
+func ensureServerStoppedForReset() error {
+	if apiListenerReachable(defaultAPIURL) {
+		return errors.New("the Sable API listener is still running; run `sablectl down` before reset (nothing was removed)")
+	}
+	pid, err := readServerPID()
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cannot verify the managed server is stopped: %w", err)
+	}
+	if err := waitForProcessExit(pid, 50*time.Millisecond); err != nil {
+		return fmt.Errorf("managed Sable server process %d is still running; run `sablectl down` before reset (nothing was removed)", pid)
+	}
+	removeServerPID()
 	return nil
 }
 
@@ -1451,12 +1686,14 @@ func defaultResetTargets(goos string, keepState bool) []string {
 		"config.env",
 		"server.crt",
 		"server.key",
+		serverPIDPath,
+		defaultStateKeyPath,
 		"agents",
 		"builds",
 		serverBinary(goos),
 	}
 	if !keepState {
-		targets = append(targets, defaultStatePath)
+		targets = append(targets, defaultStatePath, defaultStatePath+".artifacts")
 	}
 	return targets
 }
@@ -1574,6 +1811,9 @@ func buildAgent(runner commandRunner, agent agentConfig, target string, stdout, 
 }
 
 func startServer(runner commandRunner, binary, passwordFile, password, statePath, stateKeyPath, logPath string) error {
+	if err := validatePersistentState(statePath, stateKeyPath); err != nil {
+		return fmt.Errorf("persisted state is unreadable with the configured key: %w; restore the matching key or run `sablectl setup` to preserve the unreadable state as a recovery backup and start empty", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
 		return err
 	}
@@ -1589,9 +1829,68 @@ func startServer(runner commandRunner, binary, passwordFile, password, statePath
 	} else {
 		env = append(env, "SABLE_OPERATOR_PASSWORD="+password)
 	}
-	if _, err := runner.Start("./"+binary, args, env, logFile, logFile); err != nil {
+	process, err := runner.Start("./"+binary, args, env, logFile, logFile)
+	if err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+	if process == nil {
+		return errors.New("start server: process handle was not returned")
+	}
+	if err := recordServerPID(process.Pid); err != nil {
+		_ = process.Kill()
+		return err
+	}
+	return nil
+}
+
+func recordServerPID(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("record server PID: invalid PID %d", pid)
+	}
+	if err := os.MkdirAll(filepath.Dir(serverPIDPath), 0700); err != nil {
+		return fmt.Errorf("create server PID directory: %w", err)
+	}
+	if err := securefile.WriteFile(serverPIDPath, []byte(fmt.Sprintf("%d\n", pid))); err != nil {
+		return fmt.Errorf("record server PID: %w", err)
+	}
+	return nil
+}
+
+func readServerPID() (int, error) {
+	data, err := os.ReadFile(serverPIDPath)
+	if err != nil {
+		return 0, err
+	}
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil || pid <= 0 {
+		return 0, errors.New("managed Sable PID file is invalid")
+	}
+	return pid, nil
+}
+
+func removeServerPID() {
+	_ = os.Remove(serverPIDPath)
+}
+
+func terminateManagedServer(apiURL string) error {
+	pid, err := readServerPID()
+	if err != nil {
+		return err
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find managed Sable server process %d: %w", pid, err)
+	}
+	if err := process.Kill(); err != nil {
+		return fmt.Errorf("stop managed Sable server process %d: %w", pid, err)
+	}
+	if err := waitForServerStop(apiURL, 10*time.Second); err != nil {
+		return err
+	}
+	if err := waitForProcessExit(pid, 15*time.Second); err != nil {
+		return fmt.Errorf("wait for managed Sable server process %d: %w", pid, err)
+	}
+	removeServerPID()
 	return nil
 }
 
@@ -1608,10 +1907,6 @@ func registerEnvFiles(apiURL, password string, paths []string) error {
 	if err != nil {
 		return err
 	}
-	seen := map[string]bool{}
-	for _, id := range registered {
-		seen[id] = true
-	}
 	unique := make(map[string]bool)
 	for _, path := range paths {
 		if unique[path] {
@@ -1622,10 +1917,10 @@ func registerEnvFiles(apiURL, password string, paths []string) error {
 		if err != nil {
 			return err
 		}
-		if seen[agent.ID] {
+		if displayName, exists := registered[agent.ID]; exists && displayName != "" {
 			continue
 		}
-		if err := registerAgent(client, apiURL, token, agent.ID, agent.SecretHex); err != nil {
+		if err := registerAgent(client, apiURL, token, agent.ID, agent.SecretHex, agent.Label); err != nil {
 			return err
 		}
 	}
@@ -1661,7 +1956,7 @@ func login(client *http.Client, apiURL, password string) (string, error) {
 	return result.Token, nil
 }
 
-func listAgents(client *http.Client, apiURL, token string) ([]string, error) {
+func listAgents(client *http.Client, apiURL, token string) (map[string]string, error) {
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(apiURL, "/")+"/api/agents", nil)
 	if err != nil {
 		return nil, err
@@ -1676,20 +1971,21 @@ func listAgents(client *http.Client, apiURL, token string) ([]string, error) {
 		return nil, fmt.Errorf("list agents failed (HTTP %d)", resp.StatusCode)
 	}
 	var agents []struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&agents); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(agents))
+	ids := make(map[string]string, len(agents))
 	for _, agent := range agents {
-		ids = append(ids, agent.ID)
+		ids[agent.ID] = agent.DisplayName
 	}
 	return ids, nil
 }
 
-func registerAgent(client *http.Client, apiURL, token, agentID, secretHex string) error {
-	body, _ := json.Marshal(map[string]string{"id": agentID, "secret_hex": secretHex})
+func registerAgent(client *http.Client, apiURL, token, agentID, secretHex, displayName string) error {
+	body, _ := json.Marshal(map[string]string{"id": agentID, "secret_hex": secretHex, "display_name": displayName})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(apiURL, "/")+"/api/agents", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -1801,6 +2097,64 @@ func ensureStateKeyFile(path string) error {
 	return nil
 }
 
+func validatePersistentState(statePath, stateKeyPath string) error {
+	if !statePersistenceEnabled(statePath) {
+		return nil
+	}
+	var key []byte
+	stateKeyPath = normalizeStateKeyPath(stateKeyPath)
+	if stateKeyPath != "" {
+		data, err := os.ReadFile(stateKeyPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return session.ValidatePersistentState(statePath, nil)
+			}
+			return fmt.Errorf("read state key file: %w", err)
+		}
+		key, err = decodeStateKeyData(data)
+		if err != nil {
+			return fmt.Errorf("read state key file: %w", err)
+		}
+	}
+	return session.ValidatePersistentState(statePath, key)
+}
+
+func decodeStateKeyData(data []byte) ([]byte, error) {
+	if len(data) == 32 {
+		return append([]byte(nil), data...), nil
+	}
+	decoded, err := hex.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil || len(decoded) != 32 {
+		return nil, errors.New("state key must contain 32 raw bytes or 64 hexadecimal characters")
+	}
+	return decoded, nil
+}
+
+func archivePersistentState(statePath string, now time.Time) ([]string, error) {
+	if !statePersistenceEnabled(statePath) || !pathExists(statePath) {
+		return nil, nil
+	}
+	suffix := ".recovery-" + now.UTC().Format("20060102T150405Z")
+	stateBackup := statePath + suffix
+	for counter := 2; pathExists(stateBackup) || pathExists(stateBackup+".artifacts"); counter++ {
+		stateBackup = fmt.Sprintf("%s%s-%d", statePath, suffix, counter)
+	}
+	if err := os.Rename(statePath, stateBackup); err != nil {
+		return nil, fmt.Errorf("preserve unreadable state: %w", err)
+	}
+	archived := []string{stateBackup}
+	artifactPath := statePath + ".artifacts"
+	if pathExists(artifactPath) {
+		artifactBackup := stateBackup + ".artifacts"
+		if err := os.Rename(artifactPath, artifactBackup); err != nil {
+			_ = os.Rename(stateBackup, statePath)
+			return nil, fmt.Errorf("preserve unreadable state artifacts: %w", err)
+		}
+		archived = append(archived, artifactBackup)
+	}
+	return archived, nil
+}
+
 func normalizeStateKeyPath(path string) string {
 	path = strings.TrimSpace(path)
 	switch strings.ToLower(path) {
@@ -1835,11 +2189,8 @@ func validateAndRestrictStateKey(path string, data []byte) error {
 }
 
 func validStateKeyData(data []byte) bool {
-	if len(data) == 32 {
-		return true
-	}
-	decoded, err := hex.DecodeString(strings.TrimSpace(string(data)))
-	return err == nil && len(decoded) == 32
+	_, err := decodeStateKeyData(data)
+	return err == nil
 }
 
 func waitForAPI(apiURL string, timeout time.Duration) {

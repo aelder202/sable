@@ -22,6 +22,7 @@ func TestBeaconRoundTrip(t *testing.T) {
 		Hostname:  "victim",
 		OS:        "linux",
 		Arch:      "amd64",
+		HostIP:    "10.10.20.25",
 	}
 
 	encoded, err := protocol.EncodeBeacon(b, testSecret)
@@ -39,6 +40,9 @@ func TestBeaconRoundTrip(t *testing.T) {
 	}
 	if decoded.Hostname != b.Hostname {
 		t.Fatalf("Hostname mismatch: got %q want %q", decoded.Hostname, b.Hostname)
+	}
+	if decoded.HostIP != b.HostIP {
+		t.Fatalf("HostIP mismatch: got %q want %q", decoded.HostIP, b.HostIP)
 	}
 }
 

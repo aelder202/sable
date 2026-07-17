@@ -23,7 +23,7 @@ const (
 	maxShellOutputBytes    = 512 * 1024       // 512 KB
 	maxDownloadBytes       = 50 * 1024 * 1024 // 50 MB
 	maxUploadBytes         = protocol.MaxUploadFileBytes
-	downloadProgressEvery  = 30 * time.Second
+	downloadProgressEvery  = time.Second
 	maxPathCompletionItems = 200
 	defaultDirectoryPage   = 250
 	maxDirectoryPage       = 500
@@ -48,6 +48,8 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		}
 	case "download":
 		return startDownloadTask(t.ID, t.Payload)
+	case "download_archive":
+		return startArchiveTask(t.ID, t.Payload)
 	case "ps":
 		output, taskErr = listProcesses()
 	case "screenshot":
@@ -200,8 +202,8 @@ func startDownloadTask(taskID, path string) *protocol.TaskResult {
 	go func() {
 		defer backgroundTasks.Delete(taskID)
 		defer atomic.AddInt32(&backgroundTaskCount, -1)
-		output, taskErr := downloadFileWithProgress(ctx, path, func(message string) {
-			queueAsyncTypedProgress(taskID, "download_progress", "download", message)
+		output, taskErr := downloadFileWithProgress(ctx, path, func(progress transferProgress) {
+			queueAsyncTypedProgress(taskID, "download_progress", "download", encodeTransferProgress(progress))
 		})
 		queueAsyncResult(&protocol.TaskResult{TaskID: taskID, Type: "download", Output: output, Error: taskErr})
 	}()
@@ -209,7 +211,12 @@ func startDownloadTask(taskID, path string) *protocol.TaskResult {
 	return &protocol.TaskResult{
 		TaskID: taskID + "-download-started",
 		Type:   "download_progress",
-		Output: "[download] reading " + path,
+		Output: encodeTransferProgress(transferProgress{
+			Kind:    "file",
+			Phase:   "preparing",
+			Path:    path,
+			Message: "Preparing file download",
+		}),
 	}
 }
 
@@ -220,7 +227,7 @@ func downloadFile(path string) (string, string) {
 // downloadFileWithProgress reads a file from the agent filesystem and returns
 // its base64-encoded contents. Files larger than maxDownloadBytes are rejected
 // to prevent memory exhaustion.
-func downloadFileWithProgress(ctx context.Context, path string, progress func(string)) (string, string) {
+func downloadFileWithProgress(ctx context.Context, path string, progress func(transferProgress)) (string, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err.Error()
@@ -256,7 +263,14 @@ func downloadFileWithProgress(ctx context.Context, path string, progress func(st
 			read += int64(n)
 			buf.Write(tmp[:n]) //nolint:errcheck
 			if progress != nil && time.Since(lastProgress) >= downloadProgressEvery {
-				progress(fmt.Sprintf("[download] read %s of %s from %s", formatByteCount(read), formatByteCount(info.Size()), path))
+				progress(transferProgress{
+					Kind:       "file",
+					Phase:      "transferring",
+					Path:       path,
+					Bytes:      read,
+					TotalBytes: info.Size(),
+					Message:    fmt.Sprintf("Read %s of %s", formatByteCount(read), formatByteCount(info.Size())),
+				})
 				lastProgress = time.Now()
 			}
 		}
@@ -268,7 +282,14 @@ func downloadFileWithProgress(ctx context.Context, path string, progress func(st
 		}
 	}
 	if progress != nil {
-		progress(fmt.Sprintf("[download] read complete: %s from %s", formatByteCount(read), path))
+		progress(transferProgress{
+			Kind:       "file",
+			Phase:      "ready",
+			Path:       path,
+			Bytes:      read,
+			TotalBytes: info.Size(),
+			Message:    fmt.Sprintf("File ready: %s", formatByteCount(read)),
+		})
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), ""
 }

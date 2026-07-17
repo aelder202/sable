@@ -235,6 +235,108 @@ func TestListAgentsWithAuth(t *testing.T) {
 	}
 }
 
+func TestOverviewReturnsFleetSummaries(t *testing.T) {
+	router, _ := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	w := doRequest(t, router, http.MethodGet, "/api/overview", nil, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("overview status = %d: %s", w.Code, w.Body.String())
+	}
+	var overview session.FleetOverview
+	if err := json.NewDecoder(w.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.Total != 1 || len(overview.Agents) != 1 || overview.Agents[0].ID != "agent-1" {
+		t.Fatalf("unexpected overview: %#v", overview)
+	}
+	if len(overview.TaskOutcomes24Hours) != 24 || len(overview.TaskOutcomes7Days) != 7 {
+		t.Fatalf("overview omitted task outcome buckets: %#v", overview)
+	}
+}
+
+func TestResolveOverviewFailureAlertRetainsOutputAndHistory(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	headers := map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	}
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "failed-task", Type: "shell", Payload: "exit 1"}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered := store.DeliverTask("agent-1"); delivered == nil || delivered.ID != "failed-task" {
+		t.Fatalf("failed task was not delivered: %+v", delivered)
+	}
+	if !store.RecordOutput("agent-1", &protocol.TaskResult{
+		TaskID: "failed-task",
+		Type:   "shell",
+		Error:  "exit status 1",
+	}) {
+		t.Fatal("failed task result was not recorded")
+	}
+
+	before := store.Overview()
+	if before.FailedLast24Hours != 1 || len(before.FailureAlerts) != 1 {
+		t.Fatalf("failure alert was not exposed: %+v", before)
+	}
+	body, _ := json.Marshal(map[string]string{"disposition": "acknowledged"})
+	w := doRequest(
+		t,
+		router,
+		http.MethodPut,
+		"/api/overview/alerts/"+before.FailureAlerts[0].ID,
+		body,
+		headers,
+	)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("resolve alert status = %d: %s", w.Code, w.Body.String())
+	}
+
+	after := store.Overview()
+	if after.FailedLast24Hours != 0 || len(after.FailureAlerts) != 0 {
+		t.Fatalf("resolved alert remained actionable: %+v", after.FailureAlerts)
+	}
+	outputs := store.GetOutputs("agent-1")
+	if len(outputs) != 1 || outputs[0].TaskID != "failed-task" || outputs[0].Error == "" {
+		t.Fatalf("resolving Overview alert changed task output: %+v", outputs)
+	}
+	failed := 0
+	for _, bucket := range after.TaskOutcomes24Hours {
+		failed += bucket.Failed
+	}
+	if failed != 1 {
+		t.Fatalf("resolving Overview alert changed chart history: %+v", after.TaskOutcomes24Hours)
+	}
+}
+
+func TestResolveOverviewFailureAlertValidatesRequest(t *testing.T) {
+	router, _ := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	headers := map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	}
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+		want int
+	}{
+		{name: "bad id", path: "/api/overview/alerts/not-an-alert", body: `{"disposition":"acknowledged"}`, want: http.StatusBadRequest},
+		{name: "bad disposition", path: "/api/overview/alerts/0123456789abcdef0123456789abcdef", body: `{"disposition":"cleared"}`, want: http.StatusBadRequest},
+		{name: "missing alert", path: "/api/overview/alerts/0123456789abcdef0123456789abcdef", body: `{"disposition":"acknowledged"}`, want: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			w := doRequest(t, router, http.MethodPut, test.path, []byte(test.body), headers)
+			if w.Code != test.want {
+				t.Fatalf("status = %d, want %d: %s", w.Code, test.want, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestListAgentsRejectsWrongAudienceToken(t *testing.T) {
 	router, _ := setupAPI(t)
 	token := signToken(t, jwt.RegisteredClaims{
@@ -368,8 +470,9 @@ func TestUpdateAgentMetadata(t *testing.T) {
 	router, store := setupAPI(t)
 	token := loginAndGetToken(t, router)
 	body, _ := json.Marshal(map[string]interface{}{
-		"notes": "reviewed",
-		"tags":  []string{"lab", "windows", "lab"},
+		"display_name": "Web Server",
+		"notes":        "reviewed",
+		"tags":         []string{"lab", "windows", "lab"},
 	})
 	w := doRequest(t, router, http.MethodPut, "/api/agents/agent-1/metadata", body, map[string]string{
 		"Authorization": "Bearer " + token,
@@ -379,8 +482,69 @@ func TestUpdateAgentMetadata(t *testing.T) {
 		t.Fatalf("expected 200 updating metadata, got %d", w.Code)
 	}
 	agent, _ := store.Get("agent-1")
-	if agent.Notes != "reviewed" || len(agent.Tags) != 2 {
+	if agent.DisplayName != "Web Server" || agent.Notes != "reviewed" || len(agent.Tags) != 2 {
 		t.Fatalf("metadata not updated: %#v", agent)
+	}
+}
+
+func TestAgentLifecycleRetiresWithoutDeletingState(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	headers := map[string]string{"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+	w := doRequest(t, router, http.MethodPut, "/api/agents/agent-1/lifecycle", []byte(`{"retired":true}`), headers)
+	if w.Code != http.StatusOK {
+		t.Fatalf("retire status = %d: %s", w.Code, w.Body.String())
+	}
+	agent, ok := store.Get("agent-1")
+	if !ok || !agent.Retired || agent.Status != "retired" {
+		t.Fatalf("agent was not retired: %#v", agent)
+	}
+	if _, ok := store.Secret("agent-1"); !ok {
+		t.Fatal("retirement deleted the agent identity")
+	}
+	queueBody, _ := json.Marshal(map[string]string{"type": "shell", "payload": "id"})
+	w = doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", queueBody, headers)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 tasking retired agent, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterAgentAcceptsDisplayName(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	body, _ := json.Marshal(map[string]string{
+		"id":           "agent-2",
+		"secret_hex":   strings.Repeat("ab", 32),
+		"display_name": "Build Label",
+	})
+	w := doRequest(t, router, http.MethodPost, "/api/agents", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d: %s", w.Code, w.Body.String())
+	}
+	agent, ok := store.Get("agent-2")
+	if !ok || agent.DisplayName != "Build Label" {
+		t.Fatalf("display name was not registered: %#v", agent)
+	}
+}
+
+func TestQueueArchiveSelection(t *testing.T) {
+	router, store := setupAPI(t)
+	token := loginAndGetToken(t, router)
+	payload := `{"paths":["/tmp/one","/tmp/two"],"base":"/tmp"}`
+	body, _ := json.Marshal(map[string]string{"type": "download_archive", "payload": payload})
+	w := doRequest(t, router, http.MethodPost, "/api/agents/agent-1/task", body, map[string]string{
+		"Authorization": "Bearer " + token,
+		"Content-Type":  "application/json",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("archive queue status = %d: %s", w.Code, w.Body.String())
+	}
+	task := store.DequeueTask("agent-1")
+	if task == nil || task.Type != "download_archive" || task.Payload != payload {
+		t.Fatalf("unexpected archive task: %#v", task)
 	}
 }
 

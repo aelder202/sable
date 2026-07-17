@@ -18,19 +18,19 @@ Password-gated operator console on loopback HTTPS:
 
 ![Sable login screen](images/login.png)
 
-Active session view with command output, the Task Builder, and the full action menu:
+Agent workspace with command output, the Task Builder, and the full action menu:
 
 ![Sable web console with active session](images/landing_page.png)
 
-Bulk tasking across selected sessions:
+Bulk tasking across selected agents:
 
 ![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.png)
 
-Session details rail for jobs, artifacts, notes, and audit history:
+Agent details rail for jobs, artifacts, metadata, and audit history:
 
 ![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
 
-Remote file browser for selecting download paths:
+Remote file browser for navigating paths and downloading files or directory ZIPs:
 
 ![Download file browser modal](images/file_browser.png)
 
@@ -92,6 +92,17 @@ then creates the local configuration and TLS certificate, builds `sablectl`,
 the server, and selected agents, starts the server, registers local identities,
 and runs the health checks. The final summary includes each agent artifact's
 SHA-256 checksum and authorized Linux or Windows deployment command templates.
+
+Setup checks the operator API before asking any configuration questions. If a
+server is already running, guided setup first warns that a clean setup will
+stop it and permanently remove the current configuration, identities, state,
+artifacts, keys, credentials, logs, and builds. The default answer is **No**.
+Nothing is erased until the replacement is accepted and the final setup plan
+is confirmed. For unattended replacement, add the explicit `--replace` flag:
+
+```sh
+go run ./cmd/sablectl setup --yes --replace
+```
 
 For an unattended local lab setup using the secure defaults:
 
@@ -253,7 +264,7 @@ The agent shows up in the console within one beacon interval.
 
 `https://127.0.0.1:8443` on the server host (or through the tunnel). Accept the self-signed cert and log in with the operator password.
 
-After login the console lists registered sessions, last-seen status, output, and the Task Builder.
+After login the Overview dashboard summarizes the deployed fleet with sleep-aware status, activity, and health counters. Open Agents for task output, the Task Builder, metadata, artifacts, and Remote Files.
 
 ---
 

@@ -141,7 +141,16 @@ func (h *HTTPSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.UpdateInfoWithTransport(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch, "https")
+	h.store.UpdateInfoWithAddresses(
+		beacon.AgentID,
+		beacon.Hostname,
+		beacon.OS,
+		beacon.Arch,
+		"https",
+		remoteIPStr(r.RemoteAddr),
+		beacon.HostIP,
+		beacon.SleepSeconds,
+	)
 	outputComplete := true
 	if beacon.TaskOutput != nil {
 		outputComplete = h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)

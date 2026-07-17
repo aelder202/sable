@@ -298,7 +298,16 @@ func (h *DNSHandler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		return
 	}
 
-	h.store.UpdateInfoWithTransport(beacon.AgentID, beacon.Hostname, beacon.OS, beacon.Arch, "dns")
+	h.store.UpdateInfoWithAddresses(
+		beacon.AgentID,
+		beacon.Hostname,
+		beacon.OS,
+		beacon.Arch,
+		"dns",
+		sourceIP,
+		beacon.HostIP,
+		beacon.SleepSeconds,
+	)
 	outputComplete := true
 	if beacon.TaskOutput != nil {
 		outputComplete = h.store.RecordOutput(beacon.AgentID, beacon.TaskOutput)

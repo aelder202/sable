@@ -4,6 +4,7 @@ function beginSession(nextToken) {
   token = nextToken;
   selectedTaskType = 'shell';
   bulkSelectionMode = false;
+  taskTargetMode = 'current';
   clearKillConfirmation();
   hasHydratedOutputs = false;
   followOutput = true;
@@ -16,7 +17,9 @@ function beginSession(nextToken) {
   startAgentPolling();
   updateOutputControls();
   window.setTimeout(() => {
-    $('agent-filter').focus();
+    handlePrimaryRoute(true);
+    const target = activePrimaryView === 'overview' ? $('overview-filter') : $('agent-filter');
+    if (target) target.focus();
   }, 0);
 }
 
@@ -31,14 +34,20 @@ function setLoggedOutState(message) {
   activeAgentID = null;
   activeAgent = null;
   allAgents = [];
+  fleetOverview = null;
+  ignoredFailureAlertIDs = new Set();
+  failureAlertActionIDs = new Set();
+  agentsRequestInFlight = false;
   selectedAgentIDs = new Set();
   bulkSelectionMode = false;
+  taskTargetMode = 'current';
   seenTaskIDs = new Set();
   currentOutputs = [];
   outputsRequestID++;
   pendingUploadFile = null;
   taskHistory = [];
   taskHistoryIndex = -1;
+  taskMetadataByID = new Map();
   taskDrafts = new Map();
   interactiveHistory = [];
   interactiveHistoryIndex = -1;
@@ -57,7 +66,14 @@ function setLoggedOutState(message) {
   activeSessionPanel = 'timeline';
   fileBrowserPath = '';
   fileBrowserResult = null;
-  outputSearchExpanded = false;
+  fileBrowserStates = new Map();
+  deferredFileBrowserOutputs = new Map();
+  fileBrowserSubmissionCount = 0;
+  downloadTasks = new Map();
+  metadataDirty = false;
+  metadataDraftAgentID = '';
+  metadataEditAgentID = '';
+  outputSearchExpanded = true;
   setOutputTypeFilter('all', true);
   clearPathCompletionTimer();
   hidePathSuggestions();
@@ -80,13 +96,20 @@ function setLoggedOutState(message) {
   $('save-output-btn').disabled = false;
   $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
-  $('console-title').textContent = 'Select a session';
+  $('meta-state').hidden = true;
+  $('console-title').textContent = 'Select an agent';
   closeSessionDetailsModal();
+  closeActiveJobsModal();
   closeFileBrowserModal();
   closeClearConfirmModal();
   closeKillConfirmModal();
+  closeActionConfirm(false);
   $('output-resizer').hidden = true;
-  $('session-count').textContent = '0 sessions';
+  $('session-count').textContent = '0 agents';
+  $('active-job-count').textContent = '0';
+  $('active-transfer-count').textContent = '0';
+  $('active-jobs-btn').classList.remove('has-activity');
+  $('active-transfers-btn').classList.remove('has-activity');
   $('refresh-indicator').textContent = 'Signed out';
   $('count-online').textContent = '0';
   $('count-stale').textContent = '0';
@@ -99,15 +122,20 @@ function setLoggedOutState(message) {
   $('jobs-list').textContent = '';
   $('artifact-list').textContent = '';
   $('audit-list').textContent = '';
+  $('details-transfer-list').textContent = '';
   $('tag-input').value = '';
+  $('display-name-input').value = '';
   $('notes-input').value = '';
+  $('metadata-save-status').textContent = '';
   $('output-search').value = '';
-  updateOutputSearchUI(false);
+  updateOutputSearchUI(true);
   updateBulkSelectionUI();
   clearPendingUpload();
   closeClearConfirmModal();
   closeKillConfirmModal();
   setQueueBusy(false, '');
+  resetDashboard();
+  setPrimaryView('overview', false);
   updateOutputControls();
   updateOutputEmptyState();
   $('password').focus();
@@ -188,21 +216,29 @@ function loginThrottleMessage(resp) {
 }
 
 async function loadAgents() {
+  if (agentsRequestInFlight || !token) return;
+  agentsRequestInFlight = true;
   try {
-    const agents = await apiFetchAll('/api/agents');
-    allAgents = Array.isArray(agents) ? agents.slice() : [];
+    const resp = await apiFetch('/api/overview');
+    if (!resp.ok) throw new Error('request failed (' + resp.status + ')');
+    const overview = await resp.json();
+    fleetOverview = overview && typeof overview === 'object' ? overview : null;
+    allAgents = fleetOverview && Array.isArray(fleetOverview.agents) ? fleetOverview.agents.slice() : [];
     pruneSelectedAgents();
 
     updateAgentStats(allAgents);
     updateRefreshMeta(allAgents.length);
-    warmOnlinePathBrowsers(allAgents);
     syncActiveAgent();
     renderAgentList();
+    renderDashboard();
     updateBulkSelectionUI();
     renderSessionPanels();
-    loadAudit();
+    resolvePendingAgentRoute();
   } catch (_) {
     $('refresh-indicator').textContent = 'Refresh failed';
+    $('overview-updated').textContent = 'Refresh failed';
+  } finally {
+    agentsRequestInFlight = false;
   }
 
   await loadOutputs();
@@ -211,21 +247,33 @@ async function loadAgents() {
 function getAgentAgeMs(agent) {
   if (!agent || !agent.last_seen) return Number.POSITIVE_INFINITY;
   const ts = new Date(agent.last_seen).getTime();
-  if (!Number.isFinite(ts)) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(ts) || ts <= 0) return Number.POSITIVE_INFINITY;
   return Math.max(0, Date.now() - ts);
 }
 
 function getAgentState(agent) {
+  const reported = agent && String(agent.status || '');
+  if (['on_schedule', 'overdue', 'offline', 'never_seen', 'retired'].includes(reported)) return reported;
   const ageMs = getAgentAgeMs(agent);
-  if (ageMs <= 3 * 60 * 1000) return 'online';
-  if (ageMs <= 10 * 60 * 1000) return 'stale';
+  if (ageMs <= 3 * 60 * 1000) return 'on_schedule';
+  if (ageMs <= 10 * 60 * 1000) return 'overdue';
   return 'offline';
 }
 
 function getAgentStateLabel(state) {
-  if (state === 'online') return 'Online';
-  if (state === 'stale') return 'Stale';
+  if (state === 'on_schedule') return 'Active';
+  if (state === 'overdue') return 'Overdue';
+  if (state === 'never_seen') return 'Never seen';
+  if (state === 'retired') return 'Retired';
   return 'Offline';
+}
+
+function getAgentStateDescription(state) {
+  if (state === 'on_schedule') return 'Active and checking in within the expected sleep and jitter window.';
+  if (state === 'overdue') return 'Late beyond the expected check-in window.';
+  if (state === 'never_seen') return 'Registered, but has not completed its first check-in.';
+  if (state === 'retired') return 'Hidden from active fleet views while history and artifacts are retained.';
+  return 'No check-in within the offline threshold.';
 }
 
 function updateAgentStats(agents) {
@@ -235,9 +283,9 @@ function updateAgentStats(agents) {
 
   for (const agent of agents) {
     const state = getAgentState(agent);
-    if (state === 'online') online++;
-    else if (state === 'stale') stale++;
-    else offline++;
+    if (state === 'on_schedule') online++;
+    else if (state === 'overdue') stale++;
+    else if (state === 'offline') offline++;
   }
 
   $('count-online').textContent = String(online);
@@ -248,7 +296,8 @@ function updateAgentStats(agents) {
 function updateRefreshMeta(agentCount) {
   const timeLabel = new Date().toLocaleTimeString();
   $('refresh-indicator').textContent = 'Updated ' + timeLabel;
-  $('session-count').textContent = agentCount === 1 ? '1 session' : agentCount + ' sessions';
+  $('overview-updated').textContent = 'Updated ' + timeLabel;
+  $('session-count').textContent = agentCount === 1 ? '1 agent' : agentCount + ' agents';
 }
 
 function syncActiveAgent() {
@@ -263,24 +312,27 @@ function syncActiveAgent() {
     return;
   }
 
-  activeAgent = match;
-  ensurePathBrowserForAgent(activeAgent);
+  activeAgent = { ...(activeAgent || {}), ...match };
   updateSessionHeader();
 }
 
 function pruneSelectedAgents() {
   if (!selectedAgentIDs.size) return;
-  const available = new Set(allAgents.map(agent => agent.id));
+  const available = new Set(allAgents.filter(agent => getAgentState(agent) !== 'retired').map(agent => agent.id));
   selectedAgentIDs = new Set(Array.from(selectedAgentIDs).filter(id => available.has(id)));
 }
 
 function clearActiveSession() {
   saveActiveTaskDraft();
+  persistActiveFileBrowserState();
+  if (activeAgentID) resetPathBrowserState(activeAgentID, true);
   exitInteractiveMode(false);
   resetActivePathCompletion();
   stopSSEStream();
   activeAgentID = null;
   activeAgent = null;
+  metadataDirty = false;
+  metadataDraftAgentID = '';
   currentOutputs = [];
   seenTaskIDs = new Set();
   outputsRequestID++;
@@ -295,7 +347,12 @@ function clearActiveSession() {
   $('save-output-btn').hidden = true;
   $('session-details-btn').hidden = true;
   $('console-meta').hidden = true;
-  $('console-title').textContent = 'Select a session';
+  $('meta-state').hidden = true;
+  $('console-title').textContent = 'Select an agent';
+  $('display-name-input').value = '';
+  $('tag-input').value = '';
+  $('notes-input').value = '';
+  $('metadata-save-status').textContent = '';
   closeSessionDetailsModal();
   closeFileBrowserModal();
   closeClearConfirmModal();
@@ -318,14 +375,18 @@ function renderAgentList() {
   list.textContent = '';
 
   const query = $('agent-filter').value.trim().toLowerCase();
-  const filtered = allAgents.filter(agent => matchesAgentFilter(agent, query));
+  const statusFilter = $('agent-status-filter').value || 'all';
+  const filtered = allAgents
+    .filter(agent => matchesAgentFilter(agent, query))
+    .filter(agent => statusFilter === 'all' ? getAgentState(agent) !== 'retired' : getAgentState(agent) === statusFilter)
+    .sort(compareAgents);
 
   if (!filtered.length) {
     const empty = $('agent-filter-empty');
     empty.hidden = false;
     empty.textContent = allAgents.length
-      ? 'No sessions match the current filter.'
-      : 'No sessions have registered yet.';
+      ? 'No agents match the current filter.'
+      : 'No agents have registered yet.';
     return;
   }
 
@@ -336,15 +397,62 @@ function renderAgentList() {
   }
 }
 
+function initAgentSidebar() {
+  const button = $('sidebar-collapse-btn');
+  if (!button) return;
+  let collapsed = false;
+  try {
+    collapsed = window.localStorage.getItem('sable-agent-sidebar-collapsed') === 'true';
+  } catch (_) {
+    collapsed = false;
+  }
+  setAgentSidebarCollapsed(collapsed, false);
+  button.addEventListener('click', () => {
+    setAgentSidebarCollapsed(!$('content').classList.contains('sidebar-collapsed'), true);
+  });
+}
+
+function setAgentSidebarCollapsed(collapsed, persist) {
+  const content = $('content');
+  const button = $('sidebar-collapse-btn');
+  if (!content || !button) return;
+  content.classList.toggle('sidebar-collapsed', collapsed);
+  button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  button.setAttribute('aria-label', collapsed ? 'Expand agents sidebar' : 'Collapse agents sidebar');
+  button.title = collapsed ? 'Expand agents sidebar' : 'Collapse agents sidebar';
+  button.querySelector('span').textContent = collapsed ? '»' : '«';
+  if (persist) {
+    try {
+      window.localStorage.setItem('sable-agent-sidebar-collapsed', collapsed ? 'true' : 'false');
+    } catch (_) {
+      // Local storage may be unavailable in hardened browser contexts.
+    }
+  }
+}
+
 function matchesAgentFilter(agent, query) {
   if (!query) return true;
   const haystack = [
     agent.id || '',
+    agent.display_name || '',
     agent.hostname || '',
     agent.os || '',
     agent.arch || '',
+    agent.transport || '',
+    ...(Array.isArray(agent.tags) ? agent.tags : []),
   ].join(' ').toLowerCase();
   return haystack.includes(query);
+}
+
+function compareAgents(left, right) {
+  const order = { on_schedule: 0, overdue: 1, offline: 2, never_seen: 3, retired: 4 };
+  const stateDelta = (order[getAgentState(left)] ?? 9) - (order[getAgentState(right)] ?? 9);
+  if (stateDelta) return stateDelta;
+  return agentDisplayName(left).localeCompare(agentDisplayName(right), undefined, { sensitivity: 'base' });
+}
+
+function agentDisplayName(agent) {
+  return SableLogic.agentDisplayName(agent);
 }
 
 function buildAgentItem(agent) {
@@ -360,18 +468,13 @@ function buildAgentItem(agent) {
   card.classList.toggle('selected', isSelected);
   card.classList.toggle('selection-mode', bulkSelectionMode);
   card.title = agent.id;
-  card.tabIndex = taskRequestInFlight ? -1 : 0;
-  card.setAttribute('role', 'button');
-  card.setAttribute('aria-disabled', taskRequestInFlight ? 'true' : 'false');
-  if (bulkSelectionMode) card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
-  card.addEventListener('click', () => {
-    if (taskRequestInFlight) return;
-    if (bulkSelectionMode) toggleBulkSession(agent.id, !selectedAgentIDs.has(agent.id));
-    else selectAgent(agent);
-  });
-  card.addEventListener('keydown', e => {
-    if (taskRequestInFlight || (e.key !== 'Enter' && e.key !== ' ')) return;
-    e.preventDefault();
+
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'agent-card-main';
+  main.setAttribute('aria-label', (bulkSelectionMode ? 'Select ' : 'Open ') + agentDisplayName(agent));
+  if (bulkSelectionMode) main.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+  main.addEventListener('click', () => {
     if (bulkSelectionMode) toggleBulkSession(agent.id, !selectedAgentIDs.has(agent.id));
     else selectAgent(agent);
   });
@@ -381,32 +484,42 @@ function buildAgentItem(agent) {
 
   const host = document.createElement('span');
   host.className = 'agent-host';
-  host.textContent = agent.hostname || 'Unknown host';
+  host.textContent = agentDisplayName(agent);
 
   const stateLabel = document.createElement('span');
   stateLabel.className = 'agent-state state-' + state;
   stateLabel.textContent = getAgentStateLabel(state);
+  stateLabel.title = getAgentStateDescription(state);
 
   topRow.appendChild(host);
   topRow.appendChild(stateLabel);
 
-  const bottomRow = document.createElement('div');
-  bottomRow.className = 'agent-row-bottom';
+  const details = document.createElement('dl');
+  details.className = 'agent-card-details';
+  [
+    ['Platform', (agent.os || 'unknown') + ' / ' + (agent.arch || 'unknown')],
+    ['Transport', agent.transport ? String(agent.transport).toUpperCase() : 'Not seen'],
+    ['Last check-in', formatLastSeenCompact(agent)],
+    ['Hostname', agent.hostname || 'Unknown'],
+    ['ID', (agent.id || '').slice(0, 8) || 'Unknown'],
+  ].forEach(([label, value]) => {
+    const term = document.createElement('dt');
+    term.textContent = label;
+    const description = document.createElement('dd');
+    description.textContent = value;
+    details.appendChild(term);
+    details.appendChild(description);
+  });
 
-  const platform = document.createElement('span');
-  platform.className = 'agent-platform';
-  platform.textContent = formatAgentPlatform(agent);
+  main.appendChild(topRow);
+  main.appendChild(details);
 
-  const seen = document.createElement('span');
-  seen.className = 'agent-seen';
-  seen.textContent = formatLastSeenCompact(agent);
-
-  bottomRow.appendChild(platform);
-  bottomRow.appendChild(seen);
-
-  const idLabel = document.createElement('span');
-  idLabel.className = 'agent-id';
-  idLabel.textContent = 'ID ' + (agent.id || '').slice(0, 8);
+  if (Array.isArray(agent.tags) && agent.tags.length) {
+    const tags = document.createElement('span');
+    tags.className = 'agent-card-tags';
+    tags.textContent = agent.tags.slice(0, 3).map(tag => '#' + tag).join(' ');
+    main.appendChild(tags);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'agent-actions';
@@ -417,8 +530,7 @@ function buildAgentItem(agent) {
     const selectBox = document.createElement('input');
     selectBox.type = 'checkbox';
     selectBox.checked = isSelected;
-    selectBox.disabled = taskRequestInFlight;
-    selectBox.setAttribute('aria-label', 'Select ' + (agent.hostname || agent.id.slice(0, 8)) + ' for bulk task queueing');
+    selectBox.setAttribute('aria-label', 'Select ' + agentDisplayName(agent) + ' for bulk task queueing');
     selectBox.addEventListener('click', e => {
       e.stopPropagation();
     });
@@ -433,44 +545,114 @@ function buildAgentItem(agent) {
     actions.appendChild(selectLabel);
   }
 
-  const killButton = document.createElement('button');
-  killButton.type = 'button';
-  killButton.className = 'agent-kill-btn';
-  killButton.textContent = 'Kill';
-  killButton.disabled = taskRequestInFlight;
-  killButton.addEventListener('click', e => {
+  const menuWrap = document.createElement('div');
+  menuWrap.className = 'agent-menu-wrap';
+  const menuButton = document.createElement('button');
+  menuButton.type = 'button';
+  menuButton.className = 'agent-menu-button';
+  menuButton.textContent = 'More';
+  menuButton.setAttribute('aria-label', 'More actions for ' + agentDisplayName(agent));
+  menuButton.setAttribute('aria-haspopup', 'menu');
+  menuButton.setAttribute('aria-expanded', 'false');
+  const menu = document.createElement('div');
+  menu.className = 'agent-menu';
+  menu.setAttribute('role', 'menu');
+  const menuOpen = openAgentMenuID === agent.id;
+  menu.hidden = !menuOpen;
+  menuButton.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
+  menuButton.addEventListener('click', e => {
     e.stopPropagation();
-    openKillConfirmModal(agent);
+    const opening = menu.hidden;
+    closeAgentMenus();
+    openAgentMenuID = opening ? agent.id : '';
+    menu.hidden = !opening;
+    menuButton.setAttribute('aria-expanded', opening ? 'true' : 'false');
   });
-  actions.appendChild(killButton);
+  menu.appendChild(agentMenuButton('Open details', () => {
+    selectAgent(agent);
+    window.setTimeout(openSessionDetailsModal, 0);
+  }));
+  menu.appendChild(agentMenuButton('Edit info', () => {
+    selectAgent(agent);
+    window.setTimeout(openEditInfoModal, 0);
+  }));
+  menu.appendChild(agentMenuButton('Copy ID', async () => {
+    try {
+      await navigator.clipboard.writeText(agent.id);
+      showToast('Agent ID copied.');
+    } catch (_) {
+      showToast('Could not copy the agent ID.', 'error');
+    }
+  }));
+  menu.appendChild(agentMenuButton(agent.retired ? 'Restore' : 'Retire', () => {
+    if (agent.retired) {
+      updateAgentRetirement(false, agent.id);
+      return;
+    }
+    openActionConfirm({
+      title: 'Retire Agent',
+      copy: 'Retire ' + agentDisplayName(agent) + '? History and artifacts will be preserved.',
+      confirmLabel: 'Retire Agent',
+      onConfirm: () => updateAgentRetirement(true, agent.id),
+    });
+  }));
+  if (!agent.retired) {
+    const killButton = agentMenuButton('Kill agent', () => openKillConfirmModal(agent));
+    killButton.classList.add('danger-menu-item');
+    menu.appendChild(killButton);
+  }
+  menuWrap.appendChild(menuButton);
+  menuWrap.appendChild(menu);
+  actions.appendChild(menuWrap);
 
-  card.appendChild(topRow);
-  card.appendChild(bottomRow);
-  card.appendChild(idLabel);
+  card.appendChild(main);
   card.appendChild(actions);
   li.appendChild(card);
 
   return li;
 }
 
+function agentMenuButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.setAttribute('role', 'menuitem');
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    closeAgentMenus();
+    onClick();
+  });
+  return button;
+}
+
+function closeAgentMenus(except) {
+  if (!except) openAgentMenuID = '';
+  document.querySelectorAll('.agent-menu').forEach(menu => {
+    if (menu === except) return;
+    menu.hidden = true;
+    const button = menu.parentElement && menu.parentElement.querySelector('.agent-menu-button');
+    if (button) button.setAttribute('aria-expanded', 'false');
+  });
+}
+
 function setBulkSelectionMode(enabled) {
-  if (taskRequestInFlight && enabled) return;
   bulkSelectionMode = Boolean(enabled);
   renderAgentList();
   updateBulkSelectionUI();
 }
 
 function toggleBulkSession(agentID, selected) {
-  if (!agentID || taskRequestInFlight) return;
+  if (!agentID) return;
   if (selected) selectedAgentIDs.add(agentID);
   else selectedAgentIDs.delete(agentID);
   renderAgentList();
   updateBulkSelectionUI();
+  if (taskTargetMode === 'selected' && selectedAgents().length > 0) updateTaskContextStatus();
 }
 
 function selectedAgents() {
   const selected = new Set(selectedAgentIDs);
-  return allAgents.filter(agent => selected.has(agent.id));
+  return allAgents.filter(agent => selected.has(agent.id) && getAgentState(agent) !== 'retired');
 }
 
 function updateBulkSelectionUI() {
@@ -480,34 +662,38 @@ function updateBulkSelectionUI() {
   const modeButton = $('bulk-select-mode-btn');
   if (!bar || !count) return;
 
-  const total = selectedAgentIDs.size;
+  const total = selectedAgents().length;
   bar.hidden = !bulkSelectionMode && total === 0;
   count.textContent = total === 1 ? '1 selected' : total + ' selected';
-  if (clearButton) clearButton.disabled = taskRequestInFlight || total === 0;
+  if (clearButton) clearButton.disabled = total === 0;
   if (modeButton) {
-    modeButton.textContent = bulkSelectionMode ? 'Done' : 'Select';
+    modeButton.textContent = bulkSelectionMode ? 'Done selecting' : 'Select multiple';
     modeButton.classList.toggle('active', bulkSelectionMode);
-    modeButton.disabled = taskRequestInFlight;
+    modeButton.disabled = false;
     modeButton.setAttribute('aria-pressed', bulkSelectionMode ? 'true' : 'false');
     modeButton.title = bulkSelectionMode
-      ? 'Finish selecting sessions'
+      ? 'Finish selecting agents'
       : 'Enable multi-select for bulk task queueing';
   }
   updateBulkTaskButton();
+  updateComposerReadiness();
 }
 
 function updateBulkTaskButton() {
   const button = $('bulk-send-btn');
   if (!button) return;
 
-  const total = selectedAgentIDs.size;
+  const total = selectedAgents().length;
   const bulkAllowed = BULK_TASK_TYPES.has(selectedTaskType);
-  button.hidden = interactiveMode || total === 0;
-  button.textContent = total <= 1 ? 'Queue Selected' : 'Queue ' + total + ' Sessions';
+  // Bulk execution uses the visible target toggle; retain this legacy button
+  // only as a hidden compatibility hook for older event wiring.
+  button.hidden = true;
+  button.textContent = total <= 1 ? 'Queue Selected' : 'Queue ' + total + ' Agents';
   button.disabled = taskRequestInFlight || total === 0 || !bulkAllowed;
   button.title = bulkAllowed
-    ? 'Queue this task for every selected session'
-    : 'This action can only be queued for one session at a time';
+    ? 'Queue this task for every selected agent'
+    : 'This action can only be queued for one agent at a time';
+  updateTaskTargetUI();
 }
 
 function formatAgentPlatform(agent) {
@@ -519,15 +705,20 @@ function formatAgentPlatform(agent) {
 
 function formatLastSeenCompact(agent) {
   const age = getAgentAgeMs(agent);
-  if (!Number.isFinite(age)) return 'Never';
+  if (!Number.isFinite(age)) return 'Never seen';
   return formatRelativeAge(age);
 }
 
 function formatLastSeenDetailed(agent) {
-  if (!agent || !agent.last_seen) return 'Last seen never';
+  if (!agent || !Number.isFinite(getAgentAgeMs(agent))) return 'Last seen never';
   const date = new Date(agent.last_seen);
   if (!Number.isFinite(date.getTime())) return 'Last seen unknown';
-  return 'Last seen ' + date.toLocaleTimeString() + ' (' + formatRelativeAge(getAgentAgeMs(agent)) + ')';
+  let label = 'Last seen ' + date.toLocaleTimeString() + ' (' + formatRelativeAge(getAgentAgeMs(agent)) + ')';
+  if (agent.expected_next_seen) {
+    const expected = new Date(agent.expected_next_seen);
+    if (Number.isFinite(expected.getTime()) && expected.getTime() > 0) label += ' · expected ' + expected.toLocaleTimeString();
+  }
+  return label;
 }
 
 function updateSessionWarning() {
@@ -540,7 +731,7 @@ function updateSessionWarning() {
   }
 
   const state = getAgentState(activeAgent);
-  if (state === 'online') {
+  if (state === 'on_schedule') {
     warning.hidden = true;
     warning.textContent = '';
     warning.className = 'session-warning';
@@ -549,12 +740,22 @@ function updateSessionWarning() {
 
   warning.hidden = false;
   warning.className = 'session-warning state-' + state;
-  if (state === 'stale') {
-    warning.textContent = 'Session is stale. Verify recency before queueing follow-up tasks or starting interactive mode.';
+  if (state === 'overdue') {
+    warning.textContent = 'Agent is overdue for its expected check-in. Verify recency before queueing follow-up tasks or starting interactive mode.';
     return;
   }
 
-  warning.textContent = 'Session is offline. New tasks will remain queued until the host reconnects.';
+  if (state === 'never_seen') {
+    warning.textContent = 'This identity is registered but has never checked in. Tasks will remain queued until the deployed agent starts.';
+    return;
+  }
+
+  if (state === 'retired') {
+    warning.textContent = 'This agent is retired. Its history is preserved; restore it before resuming normal operations.';
+    return;
+  }
+
+  warning.textContent = 'Agent is offline. New tasks will remain queued until it checks in again.';
 }
 
 function formatRelativeAge(ageMs) {
@@ -575,12 +776,19 @@ function formatRelativeAge(ageMs) {
 }
 
 function selectAgent(agent) {
+  const previousAgentID = activeAgentID;
   saveActiveTaskDraft();
+  persistActiveFileBrowserState();
   exitInteractiveMode(false);
   resetActivePathCompletion();
+  if (previousAgentID && previousAgentID !== agent.id) resetPathBrowserState(previousAgentID, true);
   closeClearConfirmModal();
   activeAgentID = agent.id;
   activeAgent = agent;
+	rememberAgentTaskMetadata(agent);
+	metadataDirty = false;
+	metadataDraftAgentID = '';
+	activateFileBrowserState(agent.id);
 	$('rekey-secret-output').hidden = true;
 	$('rekey-secret-output').textContent = '';
 	$('copy-rekey-secret-btn').hidden = true;
@@ -594,9 +802,11 @@ function selectAgent(agent) {
   $('output').textContent = '';
   $('output-search').value = '';
   setOutputTypeFilter('all', true);
-  updateOutputSearchUI(false);
+  updateOutputSearchUI(true);
   clearPendingUpload();
   stopSSEStream();
+  setPrimaryView('agents');
+  setAgentRoute(agent.id);
   renderAgentList();
   updateSessionHeader();
   updateTaskContextStatus();
@@ -604,16 +814,18 @@ function selectAgent(agent) {
   updateOutputEmptyState();
   startSSEStream(agent.id, false);
   loadArtifacts(agent.id);
-  ensurePathBrowserForAgent(agent);
   loadOutputs();
+  loadAudit();
+  refreshActiveAgent();
   restoreActiveTaskDraft();
   focusPrimaryInput(false);
 }
 
 function updateSessionHeader() {
   if (!activeAgent) {
-    $('console-title').textContent = 'Select a session';
+    $('console-title').textContent = 'Select an agent';
     $('console-meta').hidden = true;
+    $('meta-state').hidden = true;
     $('input-area').hidden = true;
     $('clear-btn').hidden = true;
     $('save-output-btn').hidden = true;
@@ -630,24 +842,43 @@ function updateSessionHeader() {
   }
 
   const state = getAgentState(activeAgent);
+  const connectionState = state === 'on_schedule' ? 'on_schedule' : 'offline';
 
-  $('console-title').textContent = activeAgent.hostname || ('Session ' + activeAgent.id.slice(0, 8));
-  $('meta-state').textContent = getAgentStateLabel(state);
-  $('meta-state').className = 'meta-chip meta-state-chip state-' + state;
-  $('meta-hostname').textContent = activeAgent.hostname || 'Unknown host';
-  $('meta-platform').textContent = formatAgentPlatform(activeAgent);
-  $('meta-lastseen').textContent = formatLastSeenDetailed(activeAgent);
-  $('meta-id').textContent = 'ID ' + activeAgent.id.slice(0, 8);
+  $('console-title').textContent = agentDisplayName(activeAgent);
+  $('meta-state').textContent = connectionState === 'on_schedule' ? 'Active' : 'Offline';
+  $('meta-state').title = connectionState === 'on_schedule'
+    ? 'The agent is actively checking in.'
+    : 'The agent is not currently connected.';
+  $('meta-state').className = 'meta-chip meta-state-chip state-' + connectionState;
+  $('meta-platform').textContent = (activeAgent.os || 'unknown') + ' / ' + (activeAgent.arch || 'unknown');
+  $('meta-transport').textContent = activeAgent.transport ? String(activeAgent.transport).toUpperCase() : 'Transport not seen';
+  $('meta-lastseen').textContent = 'Last seen ' + formatLastSeenCompact(activeAgent);
+  const tags = $('meta-tags');
+  tags.textContent = '';
+  (activeAgent.tags || []).slice(0, 4).forEach(tag => {
+    const chip = document.createElement('span');
+    chip.className = 'meta-chip meta-tag-chip';
+    chip.textContent = '#' + tag;
+    tags.appendChild(chip);
+  });
   $('console-meta').hidden = false;
+  $('meta-state').hidden = false;
   $('input-area').hidden = false;
   $('clear-btn').hidden = false;
   $('save-output-btn').hidden = false;
-  $('session-details-btn').hidden = false;
+  $('session-details-btn').hidden = !$('session-details-modal').hidden;
   $('output-toolbar').hidden = false;
   $('output-resizer').hidden = false;
-  $('tag-input').value = (activeAgent.tags || []).join(', ');
-  $('notes-input').value = activeAgent.notes || '';
+	const metadataAgentChanged = metadataDraftAgentID !== activeAgent.id;
+	if (metadataAgentChanged || !metadataDirty) {
+		$('tag-input').value = (activeAgent.tags || []).join(', ');
+		$('display-name-input').value = activeAgent.display_name || '';
+		$('notes-input').value = activeAgent.notes || '';
+	}
+	if (metadataAgentChanged) $('metadata-save-status').textContent = '';
+	metadataDraftAgentID = activeAgent.id;
 	$('artifact-retention-input').value = String(activeAgent.artifact_retention || 256);
+  $('retire-agent-btn').textContent = activeAgent.retired ? 'Restore Agent' : 'Retire Agent';
   updateSessionWarning();
 
   if (!interactiveMode) applyTaskTypeUI();
@@ -656,10 +887,21 @@ function updateSessionHeader() {
 
 async function refreshActiveAgent() {
   if (!activeAgentID) return;
-  const resp = await apiFetch('/api/agents/' + activeAgentID);
-  if (!resp.ok) return;
-  activeAgent = await resp.json();
-  allAgents = allAgents.map(agent => agent.id === activeAgentID ? { ...agent, ...activeAgent } : agent);
-  renderAgentList();
-  renderSessionPanels();
+  const agentID = activeAgentID;
+  try {
+    const resp = await apiFetch('/api/agents/' + agentID);
+    if (!resp.ok || agentID !== activeAgentID) return;
+    const detail = await resp.json();
+    if (agentID !== activeAgentID) return;
+    const summary = allAgents.find(agent => agent.id === agentID) || {};
+    activeAgent = { ...summary, ...detail };
+    rememberAgentTaskMetadata(activeAgent);
+    allAgents = allAgents.map(agent => agent.id === agentID ? { ...agent, ...activeAgent } : agent);
+    updateSessionHeader();
+    renderAgentList();
+    renderDashboard();
+    renderSessionPanels();
+  } catch (_) {
+    // Keep the last known detail view on transient refresh failures.
+  }
 }

@@ -1,6 +1,7 @@
 package listener
 
 import (
+	"net"
 	"time"
 
 	"github.com/aelder202/sable/internal/protocol"
@@ -31,6 +32,9 @@ func validBeacon(beacon *protocol.Beacon, expectedAgentID string, now time.Time)
 		return false
 	}
 	if len(beacon.Nonce) != beaconNonceBytes || len(beacon.Hostname) > maxHostnameBytes || len(beacon.OS) > maxPlatformNameBytes || len(beacon.Arch) > maxPlatformNameBytes {
+		return false
+	}
+	if beacon.HostIP != "" && net.ParseIP(beacon.HostIP) == nil {
 		return false
 	}
 	slackSeconds := int64(timestampSlack / time.Second)

