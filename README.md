@@ -16,12 +16,12 @@ Sable is a C2 written in Go. The server takes encrypted beacons from agents over
 
 Password-gated operator console on loopback HTTPS:
 
-![Sable login screen](images/login.jpg)
+![Sable login screen](images/login.png)
 
 Fleet Overview with sleep-aware status, command outcomes, recent activity, and
 actionable failure alerts:
 
-![Sable fleet Overview with warning totals and Needs Attention guidance](images/overview.jpg)
+![Sable fleet Overview with warning totals and Needs Attention guidance](images/overview.png)
 
 Shell commands that reach the agent but return an OS or process error are shown
 as **Warnings**. **Failed** is reserved for delivery or agent communication
@@ -33,20 +33,20 @@ outcome history.
 Agent workspace with Success, Warning, and Failed output cards, the Task
 Builder, and the full action menu:
 
-![Sable web console with active session and warning output](images/landing_page.jpg)
+![Sable web console with active session and warning output](images/landing_page.png)
 
 Bulk tasking across selected agents:
 
-![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.jpg)
+![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.png)
 
 Agent details rail with outcome totals, jobs, artifacts, metadata, and audit
 history:
 
-![Session Details with success, warning, and failed totals](images/session_details.jpg)
+![Session Details with success, warning, and failed totals](images/session_details.png)
 
 Remote file browser for navigating paths and downloading files or directory ZIPs:
 
-![Download file browser modal](images/file_browser.jpg)
+![Download file browser modal](images/file_browser.png)
 
 ---
 
@@ -100,12 +100,20 @@ From a fresh clone, run one command:
 go run ./cmd/sablectl setup
 ```
 
-The guide asks for the agent callback URL, target platforms, labels, beacon
-profile, credential location, state encryption, and whether to start now. It
-then creates the local configuration and TLS certificate, builds `sablectl`,
-the server, and selected agents, starts the server, registers local identities,
-and runs the health checks. The final summary includes each agent artifact's
-SHA-256 checksum and authorized Linux or Windows deployment command templates.
+The guide first asks for the **agent beacon URL**: the HTTPS address every
+deployed agent will use to reach the Sable server, not the operator UI. Use an
+address reachable from every target machine; `127.0.0.1` only works when an
+agent runs on the server host itself. It then asks for the total number of Linux
+agents, the total number of Windows agents, and a label for each identity.
+Every requested agent receives a unique identity, registration, and binary.
+The remaining prompts select the beacon profile, credential location, state
+encryption, and whether to start now.
+
+Setup creates the local configuration and TLS certificate, builds `sablectl`,
+the server, and every requested agent, starts the server, registers the local
+identities, and runs the health checks. The final summary includes each agent
+artifact's SHA-256 checksum and authorized Linux or Windows deployment command
+templates.
 
 Setup checks the operator API before asking any configuration questions. If a
 server is already running, guided setup first warns that a clean setup will
@@ -118,21 +126,27 @@ is confirmed. For unattended replacement, add the explicit `--replace` flag:
 go run ./cmd/sablectl setup --yes --replace
 ```
 
-For an unattended local lab setup using the secure defaults:
+For an unattended local lab setup using the secure defaults (one Linux identity
+named `linux01`):
 
 ```sh
 go run ./cmd/sablectl setup --yes
 ```
 
-For an unattended setup with an externally reachable agent listener and both
-agent platforms:
+For an unattended setup that creates two Linux agents and one Windows agent:
 
 ```sh
 go run ./cmd/sablectl setup --yes \
   --url https://<your-server-ip>:443 \
-  --agents both \
-  --windows-label win01
+  --linux-agents 2 \
+  --windows-agents 1
 ```
+
+Unattended count-based setup assigns `linux01`, `linux02`, and `windows01`.
+Supplying only one count flag makes the omitted platform count zero. On an
+existing installation, the counts are desired totals: existing identities are
+reused and only missing agents are added. Setup refuses totals or label changes
+that would remove or rename an existing identity.
 
 After setup, use the generated control binary:
 
@@ -156,18 +170,25 @@ Build the unified helper, then let it create the local config, TLS certificate, 
 
 ```sh
 make sablectl
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 1 --windows-agents 0
 ```
 
 `--password-file` is optional but recommended: when supplied, `install` creates the file (with a random password if it doesn't already exist) and records its path in `.sable/install.json`. `sablectl start` and `sablectl agent register` reuse that path automatically, so you don't need to retype `--password-file` on every command.
 
-To build both Linux and Windows agents with separate identities:
+To build multiple Linux and Windows agents with separate identities:
 
 ```sh
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --agents both --windows-label win01
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 2 --windows-agents 1
 ```
 
-`SERVER_URL` is the address agents beacon to, not the operator UI. `sablectl install` writes `config.env`, `server.crt`, `server.key`, `.sable/install.json`, and builds artifacts under `builds/<label>/`. These files are gitignored and include secrets.
+The older `--agents`, `--label`, and `--windows-label` options remain supported
+for compatibility, but they cannot be mixed with `--linux-agents` or
+`--windows-agents` in the same command.
+
+`SERVER_URL` is the agent beacon URL, not the operator UI. `sablectl install`
+writes `config.env`, `server.crt`, `server.key`, `.sable/install.json`, and
+builds artifacts under `builds/<label>/`. These files are gitignored and
+include secrets.
 
 ### 3. Start
 
@@ -214,27 +235,29 @@ The operator API binds to loopback only. Reach it on the server host directly, o
 ssh -L 8443:127.0.0.1:8443 user@sable-host
 ```
 
-### 4. Register The Main Agent
+### 4. Register The Agents
 
-The first agent identity is `main`. `sablectl install` builds it at `builds/main/agent-linux`, but it can only be registered after the server API is running.
+Count-based install assigns labels such as `linux01` and `windows01`. Agents can
+only be registered after the server API is running.
 
 In a second terminal on the server host, run:
 
 ```sh
-./sablectl agent register main
+./sablectl agent register
 ```
 
-If you skipped `--password-file` during install, pass it here (the flag may go before or after the label):
+If you skipped `--password-file` during install, pass it here:
 
 ```sh
-./sablectl agent register main --password-file ./pw.txt
-./sablectl agent register --password-file ./pw.txt main   # same thing
+./sablectl agent register --password-file ./pw.txt
 ```
 
-`register` with no label registers every locally known identity. To start the server and register generated identities in one pass, run install with `--start`:
+`register` with no label registers every locally known identity. To register
+just one, append its label. To start the server and register all generated
+identities in one pass, run install with `--start`:
 
 ```sh
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --start
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 1 --windows-agents 0 --start
 ```
 
 ### 5. Add Or Rebuild Agents
@@ -260,7 +283,7 @@ After source changes, rebuild without remembering which target changed:
 Linux:
 
 ```sh
-scp builds/main/agent-linux user@target:/tmp/agent
+scp builds/linux01/agent-linux user@target:/tmp/agent
 ssh user@target "chmod +x /tmp/agent && /tmp/agent &"
 ```
 

@@ -681,6 +681,210 @@ func TestRunSetupUnattendedCreatesSecureLocalInstall(t *testing.T) {
 	}
 }
 
+func TestRunSetupGuidedCreatesCountedAgentsWithSymmetricLabels(t *testing.T) {
+	t.Chdir(t.TempDir())
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		if name != "go" {
+			return nil
+		}
+		if len(args) == 1 && args[0] == "version" {
+			_, _ = io.WriteString(stdout, "go version go1.26.5 test/amd64\n")
+			return nil
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				return os.WriteFile(args[i+1], []byte("artifact"), 0600)
+			}
+		}
+		return nil
+	}}
+
+	input := strings.Join([]string{
+		"https://10.0.0.5:443",
+		"2",
+		"1",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"n",
+		"",
+	}, "\n")
+	var out strings.Builder
+	err := runSetup([]string{
+		"--api=https://127.0.0.1:65534",
+	}, runner, strings.NewReader(input), &out, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		filepath.FromSlash("builds/linux01/agent-linux"),
+		filepath.FromSlash("builds/linux02/agent-linux"),
+		filepath.FromSlash("builds/windows01/agent.exe"),
+		filepath.FromSlash("agents/linux02.env"),
+		filepath.FromSlash("agents/windows01.env"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+	primary, err := loadAgentConfig("config.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.Label != "linux01" || primary.Target != "linux" {
+		t.Fatalf("primary = label %q target %q, want linux01/linux", primary.Label, primary.Target)
+	}
+
+	output := out.String()
+	prompts := []string{
+		"Agent beacon URL",
+		"Total Linux agents",
+		"Total Windows agents",
+		"Linux agent 1 label",
+		"Linux agent 2 label",
+		"Windows agent 1 label",
+	}
+	previous := -1
+	for _, prompt := range prompts {
+		index := strings.Index(output, prompt)
+		if index <= previous {
+			t.Fatalf("prompt %q missing or out of order in output: %s", prompt, output)
+		}
+		previous = index
+	}
+	if strings.Contains(output, "Primary agent label") || strings.Contains(output, "Agent targets") || strings.Contains(output, "callback") {
+		t.Fatalf("legacy setup terminology remained in guided output: %s", output)
+	}
+	if !strings.Contains(output, "Linux agents (2): linux01, linux02") ||
+		!strings.Contains(output, "Windows agents (1): windows01") {
+		t.Fatalf("counted setup plan missing labels: %s", output)
+	}
+}
+
+func TestRunInstallCountFlagsCreateUniqueArtifacts(t *testing.T) {
+	t.Chdir(t.TempDir())
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				return os.WriteFile(args[i+1], []byte("artifact"), 0600)
+			}
+		}
+		return nil
+	}}
+	var out strings.Builder
+	err := runInstall([]string{
+		"--url=https://10.0.0.5:443",
+		"--linux-agents=2",
+		"--windows-agents=1",
+		"--server=false",
+		"--register=false",
+	}, runner, &out, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		label  string
+		target string
+		path   string
+	}{
+		{label: "linux01", target: "linux", path: "config.env"},
+		{label: "linux02", target: "linux", path: filepath.FromSlash("agents/linux02.env")},
+		{label: "windows01", target: "windows", path: filepath.FromSlash("agents/windows01.env")},
+	} {
+		agent, err := loadAgentConfig(test.path)
+		if err != nil {
+			t.Fatalf("load %s: %v", test.path, err)
+		}
+		if agent.Label != test.label || agent.Target != test.target {
+			t.Fatalf("%s = label %q target %q, want %s/%s", test.path, agent.Label, agent.Target, test.label, test.target)
+		}
+		if _, err := os.Stat(agentOutputPath(test.label, test.target)); err != nil {
+			t.Fatalf("missing artifact for %s: %v", test.label, err)
+		}
+	}
+}
+
+func TestRunInstallRejectsMixedCountAndLegacyAgentFlags(t *testing.T) {
+	err := runInstall([]string{
+		"--linux-agents=1",
+		"--agents=linux",
+	}, testRunner{}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("error = %v, want mixed flag rejection", err)
+	}
+}
+
+func TestRunInstallCountFlagsPreserveWindowsPrimaryWhenAddingLinux(t *testing.T) {
+	t.Chdir(t.TempDir())
+	runner := testRunner{run: func(name string, args []string, env []string, stdout, stderr io.Writer) error {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				return os.WriteFile(args[i+1], []byte("artifact"), 0600)
+			}
+		}
+		return nil
+	}}
+	if err := runInstall([]string{
+		"--url=https://10.0.0.5:443",
+		"--agents=windows",
+		"--server=false",
+		"--register=false",
+	}, runner, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstall([]string{
+		"--linux-agents=1",
+		"--windows-agents=1",
+		"--server=false",
+		"--register=false",
+	}, runner, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	primary, err := loadAgentConfig("config.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.Label != "main" || primary.Target != "windows" {
+		t.Fatalf("primary changed: label %q target %q", primary.Label, primary.Target)
+	}
+	linux, err := loadAgentConfig(filepath.FromSlash("agents/linux01.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linux.Label != "linux01" || linux.Target != "linux" {
+		t.Fatalf("added agent = label %q target %q", linux.Label, linux.Target)
+	}
+}
+
+func TestRunInstallCountFlagsCannotReduceExistingTotals(t *testing.T) {
+	t.Chdir(t.TempDir())
+	primary := strings.Join([]string{
+		"AGENT_ID=12345678-1234-1234-1234-123456789abc",
+		"AGENT_SECRET_HEX=" + strings.Repeat("a", 64),
+		"CERT_FP_HEX=" + strings.Repeat("b", 64),
+		"SERVER_URL=https://10.0.0.5:443",
+		"AGENT_LABEL=main",
+		"AGENT_TARGET=linux",
+		"",
+	}, "\n")
+	if err := os.WriteFile("config.env", []byte(primary), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := runInstall([]string{
+		"--windows-agents=1",
+		"--server=false",
+		"--register=false",
+	}, testRunner{}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot remove existing agent identities") {
+		t.Fatalf("error = %v, want non-destructive count rejection", err)
+	}
+}
+
 func TestRunSetupChecksRunningListenerBeforeGuidedQuestions(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile("config.env", []byte("keep-current-config"), 0600); err != nil {
@@ -715,7 +919,7 @@ func TestRunSetupChecksRunningListenerBeforeGuidedQuestions(t *testing.T) {
 	if !strings.Contains(output, "were not changed") {
 		t.Fatalf("missing safe-cancellation confirmation: %q", output)
 	}
-	if strings.Contains(output, "Agent callback URL") {
+	if strings.Contains(output, "Agent beacon URL") {
 		t.Fatalf("guided configuration started before replacement approval: %q", output)
 	}
 }
@@ -786,7 +990,7 @@ func TestRunSetupPreservesUnreadableStateUnlessExplicitlyApproved(t *testing.T) 
 		!strings.Contains(out.String(), "were not changed") {
 		t.Fatalf("missing unreadable-state safety warning: %q", out.String())
 	}
-	if strings.Contains(out.String(), "Agent callback URL") {
+	if strings.Contains(out.String(), "Agent beacon URL") {
 		t.Fatalf("guided setup continued before state recovery approval: %q", out.String())
 	}
 	if _, err := os.Stat(defaultStatePath); err != nil {

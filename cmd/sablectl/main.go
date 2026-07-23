@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,20 +213,25 @@ func printUsage(out io.Writer) {
 }
 
 type installConfig struct {
-	ServerURL    string
-	Label        string
-	WindowsLabel string
-	Profile      string
-	DNSDomain    string
-	Agents       string
-	BuildServer  bool
-	Start        bool
-	Register     bool
-	Password     string
-	PasswordFile string
-	APIURL       string
-	StatePath    string
-	StateKeyPath string
+	ServerURL      string
+	Label          string
+	WindowsLabel   string
+	Profile        string
+	DNSDomain      string
+	Agents         string
+	LinuxAgents    int
+	WindowsAgents  int
+	LinuxLabels    []string
+	WindowsLabels  []string
+	UseAgentCounts bool
+	BuildServer    bool
+	Start          bool
+	Register       bool
+	Password       string
+	PasswordFile   string
+	APIURL         string
+	StatePath      string
+	StateKeyPath   string
 }
 
 type setupConfig struct {
@@ -240,7 +246,14 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	m := loadManifestOrDefault()
 	statePath := defaultString(m.State, defaultStatePath)
 	existingInstall := pathExists(manifestPath) || pathExists("config.env")
-	agents, windowsLabel := setupAgentDefaults(m)
+	existingAgentDefaults := setupAgentDefaults(m)
+	agentDefaults := setupAgentSelection{
+		LinuxLabels:   append([]string(nil), existingAgentDefaults.LinuxLabels...),
+		WindowsLabels: append([]string(nil), existingAgentDefaults.WindowsLabels...),
+	}
+	if len(agentDefaults.LinuxLabels)+len(agentDefaults.WindowsLabels) == 0 {
+		agentDefaults.LinuxLabels = []string{numberedAgentLabel("linux", 1)}
+	}
 	serverURL := defaultServerURL
 	label := defaultAgentLabel
 	profile := "default"
@@ -251,22 +264,30 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 		profile = existing.Profile
 		dnsDomain = existing.DNSDomain
 	}
+	windowsLabel := "win01"
+	if len(agentDefaults.WindowsLabels) > 0 {
+		windowsLabel = agentDefaults.WindowsLabels[0]
+	}
 
 	cfg := setupConfig{
 		installConfig: installConfig{
-			ServerURL:    serverURL,
-			Label:        label,
-			WindowsLabel: windowsLabel,
-			Profile:      profile,
-			DNSDomain:    dnsDomain,
-			Agents:       agents,
-			BuildServer:  true,
-			Start:        true,
-			Register:     true,
-			PasswordFile: defaultString(m.PasswordFile, filepath.FromSlash(".sable/operator-password")),
-			APIURL:       defaultAPIURL,
-			StatePath:    statePath,
-			StateKeyPath: manifestStateKeyDefault(m),
+			ServerURL:     serverURL,
+			Label:         label,
+			WindowsLabel:  windowsLabel,
+			Profile:       profile,
+			DNSDomain:     dnsDomain,
+			Agents:        setupLegacyAgentTarget(agentDefaults),
+			LinuxAgents:   len(agentDefaults.LinuxLabels),
+			WindowsAgents: len(agentDefaults.WindowsLabels),
+			LinuxLabels:   append([]string(nil), agentDefaults.LinuxLabels...),
+			WindowsLabels: append([]string(nil), agentDefaults.WindowsLabels...),
+			BuildServer:   true,
+			Start:         true,
+			Register:      true,
+			PasswordFile:  defaultString(m.PasswordFile, filepath.FromSlash(".sable/operator-password")),
+			APIURL:        defaultAPIURL,
+			StatePath:     statePath,
+			StateKeyPath:  manifestStateKeyDefault(m),
 		},
 		EncryptState: !m.StateEncryptionDisabled,
 	}
@@ -277,12 +298,14 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stdout, "Run without --yes for a guided setup, or provide flags with --yes for unattended setup.")
 		fs.PrintDefaults()
 	}
-	fs.StringVar(&cfg.ServerURL, "url", cfg.ServerURL, "agent listener URL")
+	fs.StringVar(&cfg.ServerURL, "url", cfg.ServerURL, "agent beacon URL reachable from target machines")
 	fs.StringVar(&cfg.Label, "label", cfg.Label, "primary agent label")
 	fs.StringVar(&cfg.WindowsLabel, "windows-label", cfg.WindowsLabel, "Windows agent label when --agents=both")
 	fs.StringVar(&cfg.Profile, "profile", cfg.Profile, "agent profile: default, fast, quiet, dns")
 	fs.StringVar(&cfg.DNSDomain, "dns-domain", cfg.DNSDomain, "DNS fallback domain when --profile=dns")
 	fs.StringVar(&cfg.Agents, "agents", cfg.Agents, "agent artifacts to build: linux, windows, both, none")
+	fs.IntVar(&cfg.LinuxAgents, "linux-agents", cfg.LinuxAgents, "total unique Linux agents to create")
+	fs.IntVar(&cfg.WindowsAgents, "windows-agents", cfg.WindowsAgents, "total unique Windows agents to create")
 	fs.StringVar(&cfg.PasswordFile, "password-file", cfg.PasswordFile, "operator password file to create or reuse")
 	fs.StringVar(&cfg.APIURL, "api", cfg.APIURL, "loopback operator API URL")
 	fs.StringVar(&cfg.StatePath, "state-file", cfg.StatePath, "server state file")
@@ -300,6 +323,39 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	flagsSet := visitedFlags(fs)
+	countFlagsSet := flagsSet["linux-agents"] || flagsSet["windows-agents"]
+	legacyAgentFlagsSet := flagsSet["agents"] || flagsSet["label"] || flagsSet["windows-label"]
+	if countFlagsSet && legacyAgentFlagsSet {
+		return errors.New("--linux-agents/--windows-agents cannot be combined with legacy --agents, --label, or --windows-label")
+	}
+	if countFlagsSet {
+		if !flagsSet["linux-agents"] {
+			cfg.LinuxAgents = 0
+		}
+		if !flagsSet["windows-agents"] {
+			cfg.WindowsAgents = 0
+		}
+		cfg.UseAgentCounts = true
+		cfg.LinuxLabels = resizeAgentLabels(agentDefaults.LinuxLabels, "linux", cfg.LinuxAgents)
+		cfg.WindowsLabels = resizeAgentLabels(agentDefaults.WindowsLabels, "windows", cfg.WindowsAgents)
+	} else if !cfg.Yes || !legacyAgentFlagsSet {
+		if legacyAgentFlagsSet {
+			cfg.LinuxAgents, cfg.WindowsAgents = legacyAgentCounts(cfg.Agents)
+			cfg.LinuxLabels = nil
+			cfg.WindowsLabels = nil
+			switch strings.ToLower(strings.TrimSpace(cfg.Agents)) {
+			case "linux":
+				cfg.LinuxLabels = []string{cfg.Label}
+			case "windows":
+				cfg.WindowsLabels = []string{cfg.Label}
+			case "both":
+				cfg.LinuxLabels = []string{cfg.Label}
+				cfg.WindowsLabels = []string{cfg.WindowsLabel}
+			}
+		}
+		cfg.UseAgentCounts = true
 	}
 
 	serverStatus := detectSetupServer(cfg.APIURL)
@@ -342,20 +398,28 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 		}
 		fmt.Fprintln(stdout, "Sable guided setup")
 		fmt.Fprintln(stdout, "Press Enter to accept the value shown in brackets.")
+		fmt.Fprintln(stdout, "The agent beacon URL is the HTTPS address every target will use to reach this Sable server; it is not the operator UI.")
+		fmt.Fprintln(stdout, "Use an address reachable from the target machines. 127.0.0.1 only works for agents running on this machine.")
 		var err error
-		if cfg.ServerURL, err = promptValue(scanner, stdout, "Agent callback URL", cfg.ServerURL); err != nil {
+		if cfg.ServerURL, err = promptValue(scanner, stdout, "Agent beacon URL", cfg.ServerURL); err != nil {
 			return err
 		}
-		if cfg.Agents, err = promptChoice(scanner, stdout, "Agent targets", cfg.Agents, []string{"linux", "windows", "both", "none"}); err != nil {
+		if cfg.LinuxAgents, err = promptCount(scanner, stdout, "Total Linux agents", cfg.LinuxAgents); err != nil {
 			return err
 		}
-		if cfg.Label, err = promptValue(scanner, stdout, "Primary agent label", cfg.Label); err != nil {
+		if cfg.WindowsAgents, err = promptCount(scanner, stdout, "Total Windows agents", cfg.WindowsAgents); err != nil {
 			return err
 		}
-		if cfg.Agents == "both" {
-			if cfg.WindowsLabel, err = promptValue(scanner, stdout, "Windows agent label", cfg.WindowsLabel); err != nil {
-				return err
-			}
+		if cfg.LinuxAgents+cfg.WindowsAgents == 0 {
+			return errors.New("setup requires at least one Linux or Windows agent")
+		}
+		if !replaceExisting && (cfg.LinuxAgents < len(existingAgentDefaults.LinuxLabels) || cfg.WindowsAgents < len(existingAgentDefaults.WindowsLabels)) {
+			return fmt.Errorf("setup cannot remove existing agent identities; requested totals must be at least %d Linux and %d Windows", len(existingAgentDefaults.LinuxLabels), len(existingAgentDefaults.WindowsLabels))
+		}
+		cfg.LinuxLabels = resizeAgentLabels(cfg.LinuxLabels, "linux", cfg.LinuxAgents)
+		cfg.WindowsLabels = resizeAgentLabels(cfg.WindowsLabels, "windows", cfg.WindowsAgents)
+		if cfg.LinuxLabels, cfg.WindowsLabels, err = promptAgentLabels(scanner, stdout, cfg.LinuxLabels, cfg.WindowsLabels); err != nil {
+			return err
 		}
 		if cfg.Profile, err = promptChoice(scanner, stdout, "Beacon profile", cfg.Profile, []string{"default", "fast", "quiet", "dns"}); err != nil {
 			return err
@@ -401,6 +465,11 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	if !cfg.EncryptState {
 		cfg.StateKeyPath = ""
 	}
+	if cfg.UseAgentCounts && !replaceExisting {
+		if err := validateExistingAgentSelection(existingAgentDefaults, cfg.installConfig); err != nil {
+			return err
+		}
+	}
 	if err := validateSetupConfig(cfg); err != nil {
 		return err
 	}
@@ -420,12 +489,24 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 			}
 		}
 	} else if existing, err := loadAgentConfig("config.env"); err == nil {
-		if cfg.ServerURL != existing.ServerURL || cfg.Label != existing.Label || cfg.Profile != existing.Profile || cfg.DNSDomain != existing.DNSDomain {
+		primaryMatches := cfg.Label == existing.Label
+		if cfg.UseAgentCounts {
+			target := existing.Target
+			if target == "" {
+				target = m.AgentTargets["config.env"]
+			}
+			if target == "" {
+				target = "linux"
+			}
+			primaryMatches = (target == "linux" && containsString(cfg.LinuxLabels, existing.Label)) ||
+				(target == "windows" && containsString(cfg.WindowsLabels, existing.Label))
+		}
+		if cfg.ServerURL != existing.ServerURL || !primaryMatches || cfg.Profile != existing.Profile || cfg.DNSDomain != existing.DNSDomain {
 			return errors.New("setup cannot change an existing agent identity's URL, label, or profile; run sablectl reset first")
 		}
 	}
 	installCfg := cfg.installConfig
-	if err := runInstall(installArgs(installCfg), runner, stdout, stderr); err != nil {
+	if err := runInstallConfig(installCfg, runner, stdout, stderr); err != nil {
 		return err
 	}
 	controlBinary := sablectlBinary(runtime.GOOS)
@@ -442,10 +523,13 @@ func runSetup(args []string, runner commandRunner, stdin io.Reader, stdout, stde
 	return nil
 }
 
-func setupAgentDefaults(m manifest) (string, string) {
-	hasLinux := false
-	hasWindows := false
-	windowsLabel := "win01"
+type setupAgentSelection struct {
+	LinuxLabels   []string
+	WindowsLabels []string
+}
+
+func setupAgentDefaults(m manifest) setupAgentSelection {
+	var defaults setupAgentSelection
 	envs, _ := knownAgentEnvPaths(m, "")
 	for _, envPath := range envs {
 		agent, err := loadAgentConfig(envPath)
@@ -456,39 +540,74 @@ func setupAgentDefaults(m manifest) (string, string) {
 		if target == "" {
 			target = m.AgentTargets[filepath.ToSlash(envPath)]
 		}
+		if target == "" && filepath.Clean(envPath) == filepath.Clean("config.env") {
+			target = "linux"
+		}
+		isPrimary := filepath.Clean(envPath) == filepath.Clean("config.env")
 		switch target {
 		case "windows":
-			hasWindows = true
-			if filepath.Clean(envPath) != filepath.Clean("config.env") {
-				windowsLabel = agent.Label
+			if isPrimary {
+				defaults.WindowsLabels = append([]string{agent.Label}, defaults.WindowsLabels...)
+			} else {
+				defaults.WindowsLabels = append(defaults.WindowsLabels, agent.Label)
 			}
 		case "linux":
-			hasLinux = true
+			if isPrimary {
+				defaults.LinuxLabels = append([]string{agent.Label}, defaults.LinuxLabels...)
+			} else {
+				defaults.LinuxLabels = append(defaults.LinuxLabels, agent.Label)
+			}
 		}
 	}
+	return defaults
+}
+
+func setupLegacyAgentTarget(selection setupAgentSelection) string {
 	switch {
-	case hasLinux && hasWindows:
-		return "both", windowsLabel
-	case hasWindows:
-		return "windows", windowsLabel
+	case len(selection.LinuxLabels) > 0 && len(selection.WindowsLabels) > 0:
+		return "both"
+	case len(selection.WindowsLabels) > 0:
+		return "windows"
+	case len(selection.LinuxLabels) > 0:
+		return "linux"
 	default:
-		return "linux", windowsLabel
+		return "none"
 	}
+}
+
+func validateExistingAgentSelection(existing setupAgentSelection, cfg installConfig) error {
+	for _, label := range existing.LinuxLabels {
+		if !containsString(cfg.LinuxLabels, label) {
+			return fmt.Errorf("setup cannot rename or remove existing Linux agent %q; keep its label or run sablectl reset first", label)
+		}
+	}
+	for _, label := range existing.WindowsLabels {
+		if !containsString(cfg.WindowsLabels, label) {
+			return fmt.Errorf("setup cannot rename or remove existing Windows agent %q; keep its label or run sablectl reset first", label)
+		}
+	}
+	return nil
 }
 
 func validateSetupConfig(cfg setupConfig) error {
 	if err := validateAgentServerURL(cfg.ServerURL); err != nil {
 		return fmt.Errorf("invalid --url: %w", err)
 	}
-	if !validAgentTarget(cfg.Agents) {
-		return fmt.Errorf("invalid --agents %q", cfg.Agents)
-	}
-	if err := agentlabel.Validate(cfg.Label); err != nil {
-		return err
-	}
-	if cfg.Agents == "both" {
-		if err := agentlabel.Validate(cfg.WindowsLabel); err != nil {
+	if cfg.UseAgentCounts {
+		if err := validateCountedAgents(cfg.installConfig); err != nil {
 			return err
+		}
+	} else {
+		if !validAgentTarget(cfg.Agents) {
+			return fmt.Errorf("invalid --agents %q", cfg.Agents)
+		}
+		if err := agentlabel.Validate(cfg.Label); err != nil {
+			return err
+		}
+		if cfg.Agents == "both" {
+			if err := agentlabel.Validate(cfg.WindowsLabel); err != nil {
+				return err
+			}
 		}
 	}
 	if _, _, err := resolveProfile(cfg.Profile); err != nil {
@@ -503,22 +622,62 @@ func validateSetupConfig(cfg setupConfig) error {
 	return requireLoopbackAPIURL(cfg.APIURL)
 }
 
-func installArgs(cfg installConfig) []string {
-	return []string{
-		"--url", cfg.ServerURL,
-		"--label", cfg.Label,
-		"--windows-label", cfg.WindowsLabel,
-		"--profile", cfg.Profile,
-		"--dns-domain", cfg.DNSDomain,
-		"--agents", cfg.Agents,
-		"--server=" + fmt.Sprint(cfg.BuildServer),
-		"--start=" + fmt.Sprint(cfg.Start),
-		"--register=" + fmt.Sprint(cfg.Register),
-		"--password-file", cfg.PasswordFile,
-		"--api", cfg.APIURL,
-		"--state-file", cfg.StatePath,
-		"--state-key-file", cfg.StateKeyPath,
+func promptCount(scanner *bufio.Scanner, out io.Writer, label string, defaultValue int) (int, error) {
+	for {
+		fmt.Fprintf(out, "%s [%d]: ", label, defaultValue)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return 0, err
+			}
+			return defaultValue, nil
+		}
+		value := strings.TrimSpace(scanner.Text())
+		if value == "" {
+			return defaultValue, nil
+		}
+		count, err := strconv.Atoi(value)
+		if err == nil && count >= 0 {
+			return count, nil
+		}
+		fmt.Fprintln(out, "Enter a whole number of 0 or greater.")
 	}
+}
+
+func promptAgentLabels(scanner *bufio.Scanner, out io.Writer, linuxDefaults, windowsDefaults []string) ([]string, []string, error) {
+	used := make(map[string]bool, len(linuxDefaults)+len(windowsDefaults))
+	promptPlatform := func(platform string, defaults []string) ([]string, error) {
+		labels := make([]string, 0, len(defaults))
+		for i, defaultLabel := range defaults {
+			for {
+				label, err := promptValue(scanner, out, fmt.Sprintf("%s agent %d label", platform, i+1), defaultLabel)
+				if err != nil {
+					return nil, err
+				}
+				if err := agentlabel.Validate(label); err != nil {
+					fmt.Fprintf(out, "%v\n", err)
+					continue
+				}
+				if used[label] {
+					fmt.Fprintf(out, "Agent label %q is already used. Choose a unique label.\n", label)
+					continue
+				}
+				used[label] = true
+				labels = append(labels, label)
+				break
+			}
+		}
+		return labels, nil
+	}
+
+	linuxLabels, err := promptPlatform("Linux", linuxDefaults)
+	if err != nil {
+		return nil, nil, err
+	}
+	windowsLabels, err := promptPlatform("Windows", windowsDefaults)
+	if err != nil {
+		return nil, nil, err
+	}
+	return linuxLabels, windowsLabels, nil
 }
 
 func promptValue(scanner *bufio.Scanner, out io.Writer, label, defaultValue string) (string, error) {
@@ -608,8 +767,13 @@ func promptBool(scanner *bufio.Scanner, out io.Writer, label string, defaultValu
 
 func printSetupPlan(out io.Writer, cfg setupConfig) {
 	fmt.Fprintln(out, "Setup plan:")
-	fmt.Fprintf(out, "  callback: %s\n", cfg.ServerURL)
-	fmt.Fprintf(out, "  agents: %s\n", cfg.Agents)
+	fmt.Fprintf(out, "  agent beacon URL: %s\n", cfg.ServerURL)
+	if cfg.UseAgentCounts {
+		fmt.Fprintf(out, "  Linux agents (%d): %s\n", cfg.LinuxAgents, strings.Join(cfg.LinuxLabels, ", "))
+		fmt.Fprintf(out, "  Windows agents (%d): %s\n", cfg.WindowsAgents, strings.Join(cfg.WindowsLabels, ", "))
+	} else {
+		fmt.Fprintf(out, "  agents: %s\n", cfg.Agents)
+	}
 	fmt.Fprintf(out, "  profile: %s\n", cfg.Profile)
 	fmt.Fprintf(out, "  state encryption: %t\n", cfg.EncryptState)
 	if cfg.ArchiveUnreadableState {
@@ -810,13 +974,15 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 		StatePath:    statePath,
 		StateKeyPath: manifestStateKeyDefault(m),
 	}
-	fs.StringVar(&cfg.ServerURL, "url", "", "agent listener URL, for example https://10.0.0.5:443")
+	fs.StringVar(&cfg.ServerURL, "url", "", "agent beacon URL reachable from targets, for example https://10.0.0.5:443")
 	fs.StringVar(&cfg.ServerURL, "server-url", "", "alias for --url")
 	fs.StringVar(&cfg.Label, "label", cfg.Label, "primary agent label")
 	fs.StringVar(&cfg.WindowsLabel, "windows-label", "", "Windows agent label when --agents both")
 	fs.StringVar(&cfg.Profile, "profile", "", "agent profile: default, fast, quiet, dns")
 	fs.StringVar(&cfg.DNSDomain, "dns-domain", "", "DNS fallback domain when profile=dns")
 	fs.StringVar(&cfg.Agents, "agents", cfg.Agents, "agent artifacts to build: linux, windows, both, none")
+	fs.IntVar(&cfg.LinuxAgents, "linux-agents", 0, "total unique Linux agents to create")
+	fs.IntVar(&cfg.WindowsAgents, "windows-agents", 0, "total unique Windows agents to create")
 	fs.BoolVar(&cfg.BuildServer, "server", cfg.BuildServer, "build server binary")
 	fs.BoolVar(&cfg.Start, "start", false, "start server after building")
 	fs.BoolVar(&cfg.Register, "register", cfg.Register, "register generated agents when the server is reachable")
@@ -831,11 +997,41 @@ func runInstall(args []string, runner commandRunner, stdout, stderr io.Writer) e
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	flagsSet := visitedFlags(fs)
+	countFlagsSet := flagsSet["linux-agents"] || flagsSet["windows-agents"]
+	legacyAgentFlagsSet := flagsSet["agents"] || flagsSet["label"] || flagsSet["windows-label"]
+	if countFlagsSet && legacyAgentFlagsSet {
+		return errors.New("--linux-agents/--windows-agents cannot be combined with legacy --agents, --label, or --windows-label")
+	}
+	if countFlagsSet {
+		cfg.UseAgentCounts = true
+		if cfg.LinuxAgents < 0 {
+			return errors.New("--linux-agents must be 0 or greater")
+		}
+		if cfg.WindowsAgents < 0 {
+			return errors.New("--windows-agents must be 0 or greater")
+		}
+		defaults := setupAgentDefaults(m)
+		if cfg.LinuxAgents < len(defaults.LinuxLabels) || cfg.WindowsAgents < len(defaults.WindowsLabels) {
+			return fmt.Errorf("install cannot remove existing agent identities; requested totals must be at least %d Linux and %d Windows", len(defaults.LinuxLabels), len(defaults.WindowsLabels))
+		}
+		cfg.LinuxLabels = resizeAgentLabels(defaults.LinuxLabels, "linux", cfg.LinuxAgents)
+		cfg.WindowsLabels = resizeAgentLabels(defaults.WindowsLabels, "windows", cfg.WindowsAgents)
+	}
+	return runInstallConfig(cfg, runner, stdout, stderr)
+}
+
+func runInstallConfig(cfg installConfig, runner commandRunner, stdout, stderr io.Writer) error {
+	m := loadManifestOrDefault()
 	cfg.StateKeyPath = normalizeStateKeyPath(cfg.StateKeyPath)
 	if !statePersistenceEnabled(cfg.StatePath) {
 		cfg.StateKeyPath = ""
 	}
-	if !validAgentTarget(cfg.Agents) {
+	if cfg.UseAgentCounts {
+		if err := validateCountedAgents(cfg); err != nil {
+			return err
+		}
+	} else if !validAgentTarget(cfg.Agents) {
 		return fmt.Errorf("invalid --agents %q", cfg.Agents)
 	}
 	if err := requireLoopbackAPIURL(cfg.APIURL); err != nil {
@@ -956,6 +1152,10 @@ func ensurePrimaryConfig(cfg installConfig) (agentConfig, bool, error) {
 	if err := agentlabel.Validate(label); err != nil {
 		return agentConfig{}, false, err
 	}
+	target := primaryTarget(cfg.Agents)
+	if cfg.UseAgentCounts {
+		label, target = configuredPrimaryAgent(cfg)
+	}
 	profile, sleep, err := resolveProfile(cfg.Profile)
 	if err != nil {
 		return agentConfig{}, false, err
@@ -981,7 +1181,7 @@ func ensurePrimaryConfig(cfg installConfig) (agentConfig, bool, error) {
 		Profile:      profile,
 		SleepSeconds: sleep,
 		DNSDomain:    dnsDomain,
-		Target:       primaryTarget(cfg.Agents),
+		Target:       target,
 	}
 	if err := securefile.WriteFile("config.env", buildConfigEnv(agent)); err != nil {
 		return agentConfig{}, false, fmt.Errorf("write config.env: %w", err)
@@ -990,6 +1190,34 @@ func ensurePrimaryConfig(cfg installConfig) (agentConfig, bool, error) {
 }
 
 func ensureInstallAgents(primary agentConfig, cfg installConfig) ([]plannedAgentBuild, error) {
+	if cfg.UseAgentCounts {
+		builds := make([]plannedAgentBuild, 0, cfg.LinuxAgents+cfg.WindowsAgents)
+		addPlatform := func(labels []string, target string) error {
+			for _, label := range labels {
+				if label == primary.Label {
+					if primary.Target != "" && primary.Target != target {
+						return fmt.Errorf("agent %q already targets %s", label, primary.Target)
+					}
+					primary.Target = target
+					builds = append(builds, plannedAgentBuild{agent: primary, envPath: "config.env"})
+					continue
+				}
+				agent, path, err := ensureAdditionalAgent(primary, label, target)
+				if err != nil {
+					return err
+				}
+				builds = append(builds, plannedAgentBuild{agent: agent, envPath: path})
+			}
+			return nil
+		}
+		if err := addPlatform(cfg.LinuxLabels, "linux"); err != nil {
+			return nil, err
+		}
+		if err := addPlatform(cfg.WindowsLabels, "windows"); err != nil {
+			return nil, err
+		}
+		return builds, nil
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Agents)) {
 	case "none":
 		return nil, nil
@@ -2062,10 +2290,10 @@ func validateAgentServerURL(raw string) error {
 		return err
 	}
 	if u.Scheme != "https" || u.Hostname() == "" {
-		return errors.New("agent URL must be an absolute https:// origin")
+		return errors.New("agent beacon URL must be an absolute https:// origin")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return errors.New("agent URL must not include credentials, a path, query, or fragment")
+		return errors.New("agent beacon URL must not include credentials, a path, query, or fragment")
 	}
 	return nil
 }
@@ -2634,6 +2862,114 @@ func randomHex(size int) (string, error) {
 		return "", fmt.Errorf("generate secret: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	visited := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+	return visited
+}
+
+func legacyAgentCounts(agentTargets string) (int, int) {
+	switch strings.ToLower(strings.TrimSpace(agentTargets)) {
+	case "linux":
+		return 1, 0
+	case "windows":
+		return 0, 1
+	case "both":
+		return 1, 1
+	default:
+		return 0, 0
+	}
+}
+
+func numberedAgentLabel(target string, index int) string {
+	return fmt.Sprintf("%s%02d", target, index)
+}
+
+func resizeAgentLabels(existing []string, target string, count int) []string {
+	if count <= 0 {
+		return nil
+	}
+	labels := append([]string(nil), existing...)
+	if len(labels) > count {
+		return labels[:count]
+	}
+	used := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		used[label] = true
+	}
+	for index := len(labels) + 1; len(labels) < count; index++ {
+		candidate := numberedAgentLabel(target, index)
+		for used[candidate] || agentEnvPathExists(candidate) {
+			index++
+			candidate = numberedAgentLabel(target, index)
+		}
+		used[candidate] = true
+		labels = append(labels, candidate)
+	}
+	return labels
+}
+
+func agentEnvPathExists(label string) bool {
+	_, err := os.Stat(filepath.Join("agents", label+".env"))
+	return err == nil
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func configuredPrimaryAgent(cfg installConfig) (string, string) {
+	if len(cfg.LinuxLabels) > 0 {
+		return cfg.LinuxLabels[0], "linux"
+	}
+	if len(cfg.WindowsLabels) > 0 {
+		return cfg.WindowsLabels[0], "windows"
+	}
+	return "", ""
+}
+
+func validateCountedAgents(cfg installConfig) error {
+	if cfg.LinuxAgents < 0 {
+		return errors.New("--linux-agents must be 0 or greater")
+	}
+	if cfg.WindowsAgents < 0 {
+		return errors.New("--windows-agents must be 0 or greater")
+	}
+	if cfg.LinuxAgents+cfg.WindowsAgents == 0 {
+		return errors.New("at least one Linux or Windows agent is required")
+	}
+	if len(cfg.LinuxLabels) != cfg.LinuxAgents {
+		return fmt.Errorf("expected %d Linux agent labels, got %d", cfg.LinuxAgents, len(cfg.LinuxLabels))
+	}
+	if len(cfg.WindowsLabels) != cfg.WindowsAgents {
+		return fmt.Errorf("expected %d Windows agent labels, got %d", cfg.WindowsAgents, len(cfg.WindowsLabels))
+	}
+	used := make(map[string]string, cfg.LinuxAgents+cfg.WindowsAgents)
+	validateLabels := func(labels []string, target string) error {
+		for _, label := range labels {
+			if err := agentlabel.Validate(label); err != nil {
+				return err
+			}
+			if previousTarget, exists := used[label]; exists {
+				return fmt.Errorf("agent label %q is used more than once (%s and %s)", label, previousTarget, target)
+			}
+			used[label] = target
+		}
+		return nil
+	}
+	if err := validateLabels(cfg.LinuxLabels, "linux"); err != nil {
+		return err
+	}
+	return validateLabels(cfg.WindowsLabels, "windows")
 }
 
 func validAgentTarget(value string) bool {

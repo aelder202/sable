@@ -73,15 +73,29 @@ The CLI is queue-oriented and does not live-stream output or auto-decode downloa
 
 ## Adding More Agents
 
-`sablectl install` creates the first identity in `config.env` with label `main`. Register it after the server is running:
+Guided setup asks for the total Linux count, then the total Windows count, and
+then a label for each requested agent. Each agent receives a unique identity
+and binary. The first identity is stored in `config.env`; additional identities
+are stored under `agents/<label>.env`.
+
+For unattended setup or install, provide the desired totals:
 
 ```sh
-./sablectl agent register main
+./sablectl install --url https://<server-ip>:443 --linux-agents 2 --windows-agents 1
 ```
 
-If you didn't pass `--password-file` during install, add it explicitly: `./sablectl agent register main --password-file ./pw.txt`.
+This creates `linux01`, `linux02`, and `windows01` by default. Existing
+identities count toward the totals and are reused; lowering a count below the
+existing total is refused. The legacy `--agents`, `--label`, and
+`--windows-label` install flags remain available for compatibility.
 
-Every additional agent gets its own env file under `agents/<label>.env`:
+Register every known identity after the server is running:
+
+```sh
+./sablectl agent register --password-file ./pw.txt
+```
+
+To add one agent after setup, provide its platform and label explicitly:
 
 ```sh
 ./sablectl agent create linux --label web01
