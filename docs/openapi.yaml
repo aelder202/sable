@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Sable Operator API
-  version: 1.0.0
+  version: 1.2.0
   description: |
     Loopback-only operator API for the Sable C2 server. Bound to
     `127.0.0.1:8443` by default. All endpoints except `POST /api/auth/login`
@@ -28,8 +28,12 @@ security:
 tags:
   - name: Auth
     description: Operator authentication.
+  - name: Admin
+    description: Local server lifecycle operations.
   - name: Agents
     description: Registered agent sessions and metadata.
+  - name: Fleet
+    description: Lightweight fleet-wide status and activity summaries.
   - name: Tasks
     description: Queue, list, and clear tasks for an agent.
   - name: Artifacts
@@ -87,6 +91,9 @@ paths:
       tags: [Audit]
       operationId: listAuditEvents
       summary: Recent operator and session audit events
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
       responses:
         '200':
           description: Up to 512 most recent events.
@@ -98,6 +105,70 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
 
+  /api/admin/shutdown:
+    post:
+      tags: [Admin]
+      operationId: shutdownServer
+      summary: Gracefully stop the local Sable server
+      description: |
+        Requests the same graceful shutdown path used for an operating-system
+        termination signal. The operator API is loopback-only and this route
+        requires a valid operator JWT.
+      responses:
+        '202':
+          description: Shutdown accepted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '503':
+          description: The host process did not configure lifecycle control.
+
+  /api/overview:
+    get:
+      tags: [Fleet]
+      operationId: getFleetOverview
+      summary: Lightweight fleet status and activity summary
+      description: Returns dashboard counters, one summary row per registered agent, bounded task-outcome buckets, and recent semantic activity without output or artifact payloads.
+      responses:
+        '200':
+          description: Current fleet overview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetOverview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/overview/alerts/{alertID}:
+    put:
+      tags: [Fleet]
+      operationId: resolveOverviewFailureAlert
+      summary: Resolve a failed-task alert on the Overview dashboard
+      description: |
+        Acknowledges only the Overview notification. The retained
+        agent task output, recent activity, and task-outcome history are not
+        changed.
+      parameters:
+        - name: alertID
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{32}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OverviewAlertResolutionRequest'
+      responses:
+        '204':
+          description: The Overview alert was resolved.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
   /api/agents:
     get:
       tags: [Agents]
@@ -107,6 +178,9 @@ paths:
         Returns the full agent list. Each entry omits `outputs` (use
         `GET /api/agents/{id}` to fetch task output history) and never
         includes the agent's pre-shared secret.
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
       responses:
         '200':
           description: Agent list.
@@ -123,7 +197,7 @@ paths:
       operationId: registerAgent
       summary: Pre-register an agent session
       description: |
-        Creates the server-side session record so an implant built with the
+        Creates the server-side agent record so an implant built with the
         same `id` and `secret_hex` can begin beaconing. Idempotent: re-registering
         an existing ID preserves notes, tags, queued tasks, outputs, and artifacts.
       requestBody:
@@ -163,6 +237,33 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
+    delete:
+      tags: [Agents]
+      operationId: revokeAgent
+      summary: Revoke an agent and delete its retained server-side state
+      responses:
+        '204': { description: Agent revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/rekey:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    post:
+      tags: [Agents]
+      operationId: rekeyAgent
+      summary: Generate and install a new 32-byte agent secret
+      description: The new secret is returned once and the currently deployed agent must be rebuilt or reconfigured.
+      responses:
+        '200':
+          description: Secret rotated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RekeyAgentResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
 
   /api/agents/{id}/metadata:
     parameters:
@@ -170,7 +271,7 @@ paths:
     put:
       tags: [Agents]
       operationId: updateAgentMetadata
-      summary: Update operator notes and tags for a session
+      summary: Update an agent display name, notes, and tags
       requestBody:
         required: true
         content:
@@ -189,6 +290,28 @@ paths:
         '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
+  /api/agents/{id}/lifecycle:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    put:
+      tags: [Agents]
+      operationId: updateAgentLifecycle
+      summary: Retire or restore an agent without deleting retained state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentLifecycleRequest' }
+      responses:
+        '200':
+          description: Updated agent record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
   /api/agents/{id}/task:
     parameters:
       - $ref: '#/components/parameters/AgentIdParam'
@@ -204,14 +327,16 @@ paths:
         |------|---------|
         | `shell` | Required. Command line, no null bytes. Max ~48 KB. |
         | `download`, `complete`, `ls` | Required. Remote path, no null/CR/LF, max 4096 bytes. |
+        | `download_archive` | One directory path or `{paths:[...],base:"..."}` for up to 100 selected entries. The agent returns a bounded ZIP artifact. |
         | `pathbrowse` | `start` or `stop`. |
         | `interactive` | `start` or `stop`. |
-        | `upload` | `<remote-path>:<base64-data>`. Max payload ~67 MB; raw file max 50 MB. Cannot be queued for an agent currently using the DNS transport when payload exceeds 8 KB. |
+        | `upload` | `<remote-path>:<base64-data>`. Max payload ~53.4 MiB; raw file max 40 MiB. Cannot be queued for an agent currently using the DNS transport when payload exceeds 8 KiB. |
         | `sleep` | Integer seconds, 1–86400. |
         | `cancel` | Task ID to cancel, max 64 chars. |
         | `kill`, `ps`, `screenshot`, `persistence`, `peas`, `snapshot` | Must be empty. |
 
         Per-agent queue is capped at 64 pending tasks (`429` once full).
+        Retired agents reject new work with `409` until restored.
       requestBody:
         required: true
         content:
@@ -224,6 +349,8 @@ paths:
                 value: { type: sleep, payload: "60" }
               download:
                 value: { type: download, payload: /etc/passwd }
+              directoryArchive:
+                value: { type: download_archive, payload: /var/log }
               upload:
                 summary: Upload a file (base64-encoded after the colon)
                 value: { type: upload, payload: "/tmp/agent:dGVzdAo=" }
@@ -243,6 +370,12 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '409':
+          description: The agent is retired and must be restored before tasking.
+          content:
+            text/plain:
+              schema: { type: string }
+              example: "agent is retired\n"
         '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429':
@@ -278,6 +411,9 @@ paths:
       tags: [Tasks]
       operationId: listTaskOutputs
       summary: Get task output history
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
       responses:
         '200':
           description: Up to 256 most recent task outputs.
@@ -324,6 +460,9 @@ paths:
       operationId: listArtifacts
       summary: List server-side artifact summaries
       description: Response items omit `data`; fetch a single artifact to retrieve its base64 contents.
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
       responses:
         '200':
           description: Artifact summaries (no `data`).
@@ -378,6 +517,36 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
+    delete:
+      tags: [Artifacts]
+      operationId: deleteArtifact
+      summary: Delete a retained artifact and its data blob
+      responses:
+        '204': { description: Artifact deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+
+  /api/agents/{id}/artifacts/retention:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdParam'
+    put:
+      tags: [Artifacts]
+      operationId: setArtifactRetention
+      summary: Retain only the newest configured number of artifacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ArtifactRetentionRequest' }
+      responses:
+        '204': { description: Retention updated and oldest excess artifacts removed. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '413': { $ref: '#/components/responses/RequestEntityTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/agents/{id}/terminal/stream:
     parameters:
@@ -430,6 +599,16 @@ components:
         audience `sable-web`, subject `operator`, 1-hour TTL.
 
   parameters:
+    LimitParam:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 500, default: 500 }
+      description: Maximum number of collection items to return.
+    OffsetParam:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: Zero-based collection offset. Responses include X-Total-Count, X-Limit, and X-Offset headers.
     AgentIdParam:
       name: id
       in: path
@@ -496,10 +675,32 @@ components:
           pattern: '^[0-9a-fA-F]{64}$'
           minLength: 64
           maxLength: 64
+        display_name:
+          type: string
+          maxLength: 64
+          description: Initial operator-facing name, normally seeded from the local build label.
+
+    RekeyAgentResponse:
+      type: object
+      required: [id, secret_hex]
+      properties:
+        id: { type: string }
+        secret_hex:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+
+    ArtifactRetentionRequest:
+      type: object
+      required: [max_items]
+      properties:
+        max_items: { type: integer, minimum: 1, maximum: 256 }
 
     UpdateMetadataRequest:
       type: object
       properties:
+        display_name:
+          type: string
+          maxLength: 64
         notes:
           type: string
           maxLength: 4096
@@ -508,6 +709,12 @@ components:
           maxItems: 32
           items:
             type: string
+
+    AgentLifecycleRequest:
+      type: object
+      required: [retired]
+      properties:
+        retired: { type: boolean }
 
     Agent:
       type: object
@@ -521,6 +728,7 @@ components:
         id:
           type: string
           pattern: '^[a-zA-Z0-9-]{1,64}$'
+        display_name: { type: string, maxLength: 64 }
         hostname: { type: string }
         os: { type: string }
         arch: { type: string }
@@ -528,9 +736,32 @@ components:
           type: string
           enum: [https, dns]
           description: Transport used on the most recent check-in. Empty until first beacon.
+        last_ip:
+          type: string
+          description: Authenticated network source used for the most recent check-in.
+        host_ip:
+          type: string
+          description: Route-selected local address reported by the authenticated agent.
         last_seen:
           type: string
           format: date-time
+        registered_at: { type: string, format: date-time }
+        first_seen: { type: string, format: date-time }
+        expected_next_seen: { type: string, format: date-time }
+        sleep_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        status:
+          type: string
+          enum: [never_seen, on_schedule, overdue, offline, retired]
+        retired: { type: boolean }
+        retired_at: { type: string, format: date-time }
+        queued_count: { type: integer, minimum: 0 }
+        running_count: { type: integer, minimum: 0 }
+        active_transfers: { type: integer, minimum: 0 }
+        artifact_count: { type: integer, minimum: 0 }
+        last_result_at: { type: string, format: date-time }
+        last_result_status:
+          type: string
+          enum: [success, progress, warning, failed]
         notes: { type: string }
         tags:
           type: array
@@ -544,6 +775,10 @@ components:
         artifacts:
           type: array
           items: { $ref: '#/components/schemas/Artifact' }
+        artifact_retention:
+          type: integer
+          minimum: 1
+          maximum: 256
 
     TaskRequest:
       type: object
@@ -555,6 +790,7 @@ components:
             - shell
             - upload
             - download
+            - download_archive
             - sleep
             - kill
             - interactive
@@ -571,15 +807,157 @@ components:
           type: string
           description: |
             Per-type rules and limits are listed on the operation. Standard
-            payloads are capped at ~48 KB; `upload` payloads are capped at
-            ~67 MB (raw file max 50 MB).
+            payloads are capped at ~48 KB; archive selections at 512 KiB;
+            `upload` payloads at ~53.4 MiB (raw file max 40 MiB).
+
+    AgentSummary:
+      type: object
+      required: [id, status, queued_count, running_count, active_transfers, artifact_count]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        hostname: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        transport: { type: string, enum: [https, dns] }
+        last_ip: { type: string }
+        host_ip: { type: string }
+        registered_at: { type: string, format: date-time }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        expected_next_seen: { type: string, format: date-time }
+        sleep_seconds: { type: integer }
+        status: { type: string, enum: [never_seen, on_schedule, overdue, offline, retired] }
+        retired: { type: boolean }
+        retired_at: { type: string, format: date-time }
+        tags: { type: array, items: { type: string } }
+        queued_count: { type: integer, minimum: 0 }
+        running_count: { type: integer, minimum: 0 }
+        active_transfers: { type: integer, minimum: 0 }
+        artifact_count: { type: integer, minimum: 0 }
+        last_result_at: { type: string, format: date-time }
+        last_result_status: { type: string, enum: [success, progress, warning, failed] }
+
+    ActiveJob:
+      type: object
+      required: [id, agent_id, agent_name, type]
+      description: A task that the host has received and has not completed.
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        agent_name: { type: string }
+        type: { type: string }
+        payload:
+          type: string
+          maxLength: 512
+          description: Sanitized, display-oriented task payload summary.
+        received_at: { type: string, format: date-time }
+
+    FleetOverview:
+      type: object
+      required: [generated_at, total, never_seen, on_schedule, overdue, offline, retired, queued_tasks, running_tasks, active_jobs, active_transfers, failed_last_24_hours, agents, task_outcomes_24h, task_outcomes_7d, recent_activity, failure_alerts]
+      properties:
+        generated_at: { type: string, format: date-time }
+        total: { type: integer, minimum: 0 }
+        never_seen: { type: integer, minimum: 0 }
+        on_schedule: { type: integer, minimum: 0 }
+        overdue: { type: integer, minimum: 0 }
+        offline: { type: integer, minimum: 0 }
+        retired: { type: integer, minimum: 0 }
+        queued_tasks:
+          type: integer
+          minimum: 0
+          description: Tasks waiting for first delivery to a host.
+        running_tasks:
+          type: integer
+          minimum: 0
+          description: Tasks delivered to a host and awaiting a terminal result.
+        active_jobs:
+          type: array
+          items: { $ref: '#/components/schemas/ActiveJob' }
+        active_transfers: { type: integer, minimum: 0 }
+        failed_last_24_hours: { type: integer, minimum: 0 }
+        agents:
+          type: array
+          items: { $ref: '#/components/schemas/AgentSummary' }
+        task_outcomes_24h:
+          type: array
+          description: Twenty-four hourly buckets, oldest first.
+          minItems: 24
+          maxItems: 24
+          items: { $ref: '#/components/schemas/TaskOutcomeBucket' }
+        task_outcomes_7d:
+          type: array
+          description: Seven daily buckets, oldest first.
+          minItems: 7
+          maxItems: 7
+          items: { $ref: '#/components/schemas/TaskOutcomeBucket' }
+        recent_activity:
+          type: array
+          maxItems: 32
+          items: { $ref: '#/components/schemas/FleetActivityEvent' }
+        failure_alerts:
+          type: array
+          maxItems: 64
+          description: Unresolved failed-task notifications from the last 24 hours.
+          items: { $ref: '#/components/schemas/FailureAlert' }
+
+    OverviewAlertResolutionRequest:
+      type: object
+      required: [disposition]
+      additionalProperties: false
+      properties:
+        disposition:
+          type: string
+          enum: [acknowledged]
+
+    FailureAlert:
+      type: object
+      required: [id, timestamp, agent_id, agent_name, task_id]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+        timestamp: { type: string, format: date-time }
+        agent_id: { type: string }
+        agent_name: { type: string }
+        task_id: { type: string }
+        task_type: { type: string }
+        detail: { type: string }
+
+    TaskOutcomeBucket:
+      type: object
+      required: [start, successful, warnings, failed]
+      properties:
+        start: { type: string, format: date-time }
+        successful: { type: integer, minimum: 0 }
+        warnings: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+
+    FleetActivityEvent:
+      type: object
+      required: [timestamp, agent_id, agent_name, kind]
+      properties:
+        timestamp: { type: string, format: date-time }
+        agent_id: { type: string }
+        agent_name: { type: string }
+        kind:
+          type: string
+          enum: [task_success, task_warning, task_failed, artifact_received, agent_overdue, agent_offline]
+        task_type: { type: string }
+        detail: { type: string }
 
     TaskSummary:
       type: object
-      required: [id, type, queued_at]
+      required: [id, type, status, queued_at]
       properties:
         id: { type: string }
         type: { type: string }
+        status:
+          type: string
+          enum: [queued, in_flight]
+        delivery_attempts: { type: integer, minimum: 0 }
+        last_delivered_at: { type: string, format: date-time }
         payload:
           type: string
           description: |
@@ -595,8 +973,19 @@ components:
       properties:
         task_id: { type: string }
         type: { type: string }
+        payload:
+          type: string
+          description: Sanitized task payload retained for operator-facing command labels.
         output: { type: string }
+        warning:
+          type: string
+          description: A shell command outcome returned by the agent that did not indicate a communication failure.
         error: { type: string }
+        queued_at: { type: string, format: date-time }
+        last_delivered_at:
+          type: string
+          format: date-time
+          description: Last server-to-agent delivery time used to calculate response duration.
         timestamp:
           type: string
           format: date-time
@@ -637,6 +1026,11 @@ components:
           type: string
           format: byte
           description: Base64-encoded artifact contents. Omitted from list and create responses; present on single-artifact GET.
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Decoded artifact size when known.
         compress: { type: boolean }
         created_at:
           type: string

@@ -22,7 +22,8 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 		ID:     "agent-1",
 		Secret: testSecret,
 	})
-	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "dns-task", Type: "shell", Payload: "whoami"}); err != nil {
+	largePayload := strings.Repeat("whoami", 1000)
+	if err := store.EnqueueTask("agent-1", &protocol.Task{ID: "dns-task", Type: "shell", Payload: largePayload}); err != nil {
 		t.Fatalf("EnqueueTask: %v", err)
 	}
 
@@ -55,10 +56,32 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 	chunks := listener.ChunkForDNS(body)
 	client := &mdns.Client{Net: "udp", Timeout: time.Second, UDPSize: 4096}
 
-	var finalResp *mdns.Msg
+	// A complete set of chunks with tags from the wrong secret must not create
+	// reassembly state or process the beacon.
+	wrongSecret := []byte("00000000000000000000000000000000")
 	for i, chunk := range chunks {
 		msg := new(mdns.Msg)
-		msg.SetQuestion(dnsBeaconQName(chunk, i, len(chunks), "0123456789abcdef", "agent-1", domain), mdns.TypeA)
+		qname := dnsBeaconQName(chunk, i, len(chunks), "1111111111111111", "agent-1", wrongSecret, domain)
+		msg.SetQuestion(qname, mdns.TypeA)
+		msg.SetEdns0(4096, false)
+		resp, _, err := client.Exchange(msg, pc.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("invalid DNS exchange chunk %d: %v", i, err)
+		}
+		if len(resp.Answer) != 0 {
+			t.Fatalf("invalid chunk %d received an answer", i)
+		}
+	}
+	if agent, _ := store.Get("agent-1"); !agent.LastSeen.IsZero() {
+		t.Fatal("invalid DNS chunk tags mutated the agent session")
+	}
+
+	var finalResp *mdns.Msg
+	var finalQName string
+	for i, chunk := range chunks {
+		msg := new(mdns.Msg)
+		finalQName = dnsBeaconQName(chunk, i, len(chunks), "0000000000000000", "agent-1", testSecret, domain)
+		msg.SetQuestion(finalQName, mdns.TypeA)
 		msg.SetEdns0(4096, false)
 		msg.RecursionDesired = false
 
@@ -73,17 +96,26 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 		t.Fatal("expected final DNS chunk response to include a TXT answer")
 	}
 
-	var encodedTask []byte
-	for _, rr := range finalResp.Answer {
-		txt, ok := rr.(*mdns.TXT)
-		if !ok {
-			continue
-		}
-		decoded, err := hex.DecodeString(strings.Join(txt.Txt, ""))
+	first, totalResponses := decodeDNSFrame(t, finalResp)
+	if totalResponses <= 1 {
+		t.Fatalf("expected a multi-frame DNS response, got %d frame", totalResponses)
+	}
+	encodedTask := append([]byte(nil), first...)
+	for index := 1; index < totalResponses; index++ {
+		msg := new(mdns.Msg)
+		authTag := protocol.DNSResponseAuthTag(testSecret, "0000000000000000", "agent-1", index)
+		qname := "r." + padDNSNumber(index) + ".0000000000000000.agent-1." + authTag + "." + domain
+		msg.SetQuestion(qname, mdns.TypeTXT)
+		msg.SetEdns0(4096, false)
+		resp, _, err := client.Exchange(msg, pc.LocalAddr().String())
 		if err != nil {
-			t.Fatalf("decode TXT response: %v", err)
+			t.Fatalf("retrieve response chunk %d: %v", index, err)
 		}
-		encodedTask = append(encodedTask, decoded...)
+		chunk, gotTotal := decodeDNSFrame(t, resp)
+		if gotTotal != totalResponses {
+			t.Fatalf("response total changed from %d to %d", totalResponses, gotTotal)
+		}
+		encodedTask = append(encodedTask, chunk...)
 	}
 	if len(encodedTask) == 0 {
 		t.Fatal("expected TXT answer to contain encoded task bytes")
@@ -93,7 +125,7 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeTask: %v", err)
 	}
-	if task.ID != "dns-task" || task.Type != "shell" || task.Payload != "whoami" {
+	if task.ID != "dns-task" || task.Type != "shell" || task.Payload != largePayload {
 		t.Fatalf("unexpected DNS task: %+v", task)
 	}
 
@@ -104,15 +136,62 @@ func TestDNSHandlerDeliversQueuedTask(t *testing.T) {
 	if agent.Hostname != "victim" || agent.OS != "linux" || agent.Arch != "amd64" || agent.LastSeen.IsZero() {
 		t.Fatalf("agent metadata was not updated from DNS beacon: %+v", agent)
 	}
+
+	// Repeating the final query models a lost UDP response. The retained frame
+	// must be returned without replaying or consuming the task again.
+	retry := new(mdns.Msg)
+	retry.SetQuestion(finalQName, mdns.TypeA)
+	retry.SetEdns0(4096, false)
+	retryResp, _, err := client.Exchange(retry, pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryChunk, retryTotal := decodeDNSFrame(t, retryResp)
+	if retryTotal != totalResponses || !strings.EqualFold(hex.EncodeToString(retryChunk), hex.EncodeToString(first)) {
+		t.Fatal("lost-response retry did not return the retained first frame")
+	}
 }
 
-func dnsBeaconQName(chunk []byte, idx, total int, sessionID, agentID, domain string) string {
+func decodeDNSFrame(t *testing.T, message *mdns.Msg) ([]byte, int) {
+	t.Helper()
+	for _, answer := range message.Answer {
+		txt, ok := answer.(*mdns.TXT)
+		if !ok {
+			continue
+		}
+		payload := strings.Join(txt.Txt, "")
+		total := 1
+		if strings.HasPrefix(payload, "v1:") {
+			parts := strings.SplitN(payload, ":", 4)
+			if len(parts) != 4 {
+				t.Fatalf("invalid DNS frame %q", payload)
+			}
+			var err error
+			total, err = strconv.Atoi(parts[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = parts[3]
+		}
+		data, err := hex.DecodeString(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data, total
+	}
+	t.Fatal("DNS response did not contain TXT data")
+	return nil, 0
+}
+
+func dnsBeaconQName(chunk []byte, idx, total int, sessionID, agentID string, secret []byte, domain string) string {
 	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(chunk))
+	authTag := protocol.DNSChunkAuthTag(secret, sessionID, agentID, idx, total, chunk)
 	return encoded + "." +
 		padDNSNumber(idx) + "." +
 		padDNSNumber(total) + "." +
 		sessionID + "." +
 		agentID + "." +
+		authTag + "." +
 		domain
 }
 

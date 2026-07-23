@@ -14,4 +14,6 @@ Build agents with the same domain:
 make build-agent-linux DNS_DOMAIN=c2.example.com
 ```
 
-The agent tries HTTPS first and falls back to DNS if HTTPS is unreachable. UDP 53 has to be reachable and the NS record needs to point to the Sable server. DNS is fine for check-ins and small responses; uploads should stay on HTTPS.
+The agent tries HTTPS first and falls back to DNS if HTTPS is unreachable. UDP 53 has to be reachable and the NS record needs to point to the Sable server. A fresh nonce is used for the fallback attempt so a lost HTTPS response cannot make the DNS retry look like a replay.
+
+Beacon requests are capped at 15 KiB and task responses are split into retrievable 1,200-byte frames, keeping each UDP response under the advertised 4,096-byte EDNS size. Every beacon chunk and response-retrieval query carries a secret-derived authentication tag that is verified before the server allocates limiter, session, or response state. Reassembly is capped globally and to eight sessions per source. The server retains response frames briefly so an authenticated agent can recover a lost final response without re-executing a task. Large uploads and results should stay on HTTPS; if a result cannot fit the DNS request limit, the agent returns an explicit transport error instead of permanently blocking its queue.

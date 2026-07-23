@@ -11,6 +11,19 @@ func restrictPlatform(string) error {
 	return nil
 }
 
+func replaceFilePlatform(from, to string) error {
+	return os.Rename(from, to)
+}
+
+func syncParentDirPlatform(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
 func permissionWarningPlatform(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {

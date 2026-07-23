@@ -16,6 +16,8 @@ let taskHistory = [];
 
 let taskHistoryIndex = -1;
 
+let taskMetadataByID = new Map();
+
 let taskDrafts = new Map();
 
 let interactiveHistory = [];
@@ -38,9 +40,23 @@ let authExpiryTimer = null;
 
 let allAgents = [];
 
+let fleetOverview = null;
+
+let ignoredFailureAlertIDs = new Set();
+
+let failureAlertActionIDs = new Set();
+
+let activePrimaryView = 'overview';
+
+let pendingRouteAgentID = '';
+
+let agentsRequestInFlight = false;
+
 let selectedAgentIDs = new Set();
 
 let bulkSelectionMode = false;
+
+let taskTargetMode = 'current';
 
 let selectedTaskType = 'shell';
 
@@ -80,9 +96,15 @@ let fileBrowserResult = null;
 
 let fileBrowserMode = 'browse';
 
+let fileBrowserStates = new Map();
+
+let deferredFileBrowserOutputs = new Map();
+
+let fileBrowserSubmissionCount = 0;
+
 let pendingKillAgentID = '';
 
-let outputSearchExpanded = false;
+let outputSearchExpanded = true;
 
 let outputTypeFilter = 'all';
 
@@ -92,13 +114,31 @@ let outputRowSeq = 0;
 
 let taskTypeSearchInput = null;
 
+let actionConfirmCallback = null;
+
+let actionConfirmOrigin = null;
+
+let modalFocusOrigins = new Map();
+
+let toastTimer = null;
+
+let metadataDirty = false;
+
+let metadataDraftAgentID = '';
+
+let metadataEditAgentID = '';
+
+let openAgentMenuID = '';
+
 const MAX_LOGIN_BODY_BYTES = 4096;
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
 
 const MAX_SLEEP_SECONDS = 24 * 60 * 60;
 
 const MAX_REMOTE_PATH = 4096;
+
+const MAX_ARCHIVE_SELECTION = 100;
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -118,46 +158,46 @@ const TASK_GROUPS = [
   { label: 'Command', types: ['shell', 'interactive'] },
   { label: 'Situational', types: ['ps', 'snapshot', 'persistence', 'screenshot', 'peas'] },
   { label: 'Files', types: ['download', 'upload'] },
-  { label: 'Session', types: ['sleep', 'kill'] },
+  { label: 'Agent Control', types: ['sleep', 'kill'] },
 ];
 
 const BULK_TASK_TYPES = new Set(['shell', 'ps', 'screenshot', 'snapshot', 'persistence', 'peas', 'sleep']);
 
 const TASK_TYPES = {
   shell: {
-    buttonLabel: 'Queue Shell',
-    help: 'Queue a single shell command for the selected session.',
+    buttonLabel: 'Run shell command',
+    help: 'Queue a single shell command for the selected agent.',
     note: 'Shell payloads stay in memory only and are still server-side validated before queueing.',
     placeholder: 'Enter a shell command',
     requiresPayload: true,
     inputMode: 'text',
   },
   ps: {
-    buttonLabel: 'Queue PS',
-    help: 'List running processes for the selected session.',
+    buttonLabel: 'Run process listing',
+    help: 'List running processes for the selected agent.',
     note: 'Process listing is a read-only, one-shot situational awareness task.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
   },
   screenshot: {
-    buttonLabel: 'Take Screenshot',
-    help: 'Capture one bounded screenshot from the selected session.',
+    buttonLabel: 'Capture screenshot',
+    help: 'Capture one bounded screenshot from the selected agent.',
     note: 'Screenshots are operator-initiated, downsampled, and delivered as bounded chunks.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
   },
   snapshot: {
-    buttonLabel: 'Queue Host Info',
-    help: 'Collect a host information report from the selected session.',
+    buttonLabel: 'Collect host info',
+    help: 'Collect a host information report from the selected agent.',
     note: 'Host Info returns identity, network, route, disk, and environment basics as a text artifact.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
   },
   persistence: {
-    buttonLabel: 'Check Persistence',
+    buttonLabel: 'Check persistence',
     help: 'List common persistence locations for defensive review.',
     note: 'Persistence detection reads common autorun locations and does not modify them.',
     placeholder: 'No additional value required',
@@ -165,15 +205,15 @@ const TASK_TYPES = {
     inputMode: 'text',
   },
   peas: {
-    buttonLabel: 'Run PEAS',
-    help: 'Run LinPEAS or winPEAS based on the selected session OS.',
+    buttonLabel: 'Run PEAS scan',
+    help: 'Run LinPEAS or winPEAS based on the selected agent OS.',
     note: 'PEAS output is captured as a text artifact and returned through chunked results.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
   },
   download: {
-    buttonLabel: 'Queue Download',
+    buttonLabel: 'Download file',
     help: 'Request a remote file path and receive the result as a browser download.',
     note: 'Path suggestions are prepared automatically. Use Browse to open the remote file browser and download files directly.',
     placeholder: 'Enter a remote file path',
@@ -181,15 +221,15 @@ const TASK_TYPES = {
     inputMode: 'text',
   },
   upload: {
-    buttonLabel: 'Queue Upload',
-    help: 'Send a local file to a remote destination path on the selected session.',
+    buttonLabel: 'Upload file',
+    help: 'Send a local file to a remote destination path on the selected agent.',
     note: 'Path suggestions are prepared automatically. Pick a file with Choose File or Browse remote directories to set the destination.',
     placeholder: 'Enter a remote destination path',
     requiresPayload: true,
     inputMode: 'text',
   },
   sleep: {
-    buttonLabel: 'Queue Sleep',
+    buttonLabel: 'Update sleep interval',
     help: 'Update the beacon interval in seconds.',
     note: 'Sleep values must be whole seconds between 1 and 86400.',
     placeholder: 'Enter seconds between 1 and 86400',
@@ -197,16 +237,16 @@ const TASK_TYPES = {
     inputMode: 'numeric',
   },
   kill: {
-    buttonLabel: 'Queue Kill',
-    help: 'Terminate the selected session after it processes the task.',
+    buttonLabel: 'Terminate agent',
+    help: 'Terminate the selected agent after it processes the task.',
     note: 'Kill requires a second confirmation click and does not accept an additional payload.',
     placeholder: 'No additional value required',
     requiresPayload: false,
     inputMode: 'text',
   },
   interactive: {
-    buttonLabel: 'Start Interactive',
-    help: 'Open a near-real-time shell view for the selected session.',
+    buttonLabel: 'Start interactive shell',
+    help: 'Open a near-real-time shell view for the selected agent.',
     note: 'Interactive mode temporarily increases beacon frequency while it is active.',
     placeholder: 'No additional value required',
     requiresPayload: false,
@@ -301,11 +341,47 @@ $('logout-btn').addEventListener('click', () => {
   setLoggedOutState('');
 });
 
+$('overview-nav-btn').addEventListener('click', () => setPrimaryView('overview'));
+
+$('agents-nav-btn').addEventListener('click', () => setPrimaryView('agents'));
+
+$('active-jobs-btn').addEventListener('click', openActiveJobsModal);
+
+$('active-transfers-btn').addEventListener('click', () => setPrimaryView('agents'));
+
+$('overview-filter').addEventListener('input', renderDashboard);
+$('overview-status-filter').addEventListener('change', renderDashboard);
+$('overview-platform-filter').addEventListener('change', renderDashboard);
+$('overview-transport-filter').addEventListener('change', renderDashboard);
+$('overview-show-retired').addEventListener('change', renderDashboard);
+$('outcome-range-24h').addEventListener('click', () => setOverviewOutcomeRange('24h'));
+$('outcome-range-7d').addEventListener('click', () => setOverviewOutcomeRange('7d'));
+
+document.querySelectorAll('[data-overview-status]').forEach(button => {
+  button.addEventListener('click', () => {
+    const status = button.dataset.overviewStatus || 'all';
+    $('overview-status-filter').value = status;
+    if (status === 'retired') $('overview-show-retired').checked = true;
+    renderDashboard();
+  });
+});
+
 $('agent-filter').addEventListener('input', renderAgentList);
+
+$('agent-status-filter').addEventListener('change', renderAgentList);
+
+document.querySelectorAll('[data-agent-status]').forEach(button => {
+  button.addEventListener('click', () => {
+    $('agent-status-filter').value = button.dataset.agentStatus || 'all';
+    renderAgentList();
+  });
+});
 
 $('bulk-select-mode-btn').addEventListener('click', () => {
   setBulkSelectionMode(!bulkSelectionMode);
 });
+
+initAgentSidebar();
 
 taskTypeButtons.forEach(button => {
   button.addEventListener('click', () => setTaskType(button.dataset.taskType));
@@ -341,6 +417,14 @@ $('session-details-close-btn').addEventListener('click', closeSessionDetailsModa
 
 document.querySelector('[data-close-session-details]').addEventListener('click', closeSessionDetailsModal);
 
+$('edit-info-close-btn').addEventListener('click', closeEditInfoModal);
+
+document.querySelector('[data-close-edit-info]').addEventListener('click', closeEditInfoModal);
+
+$('active-jobs-close-btn').addEventListener('click', closeActiveJobsModal);
+
+document.querySelector('[data-close-active-jobs]').addEventListener('click', closeActiveJobsModal);
+
 $('file-browser-close-btn').addEventListener('click', closeFileBrowserModal);
 
 document.querySelector('[data-close-file-browser]').addEventListener('click', closeFileBrowserModal);
@@ -357,11 +441,18 @@ document.querySelector('[data-close-kill-confirm]').addEventListener('click', cl
 
 $('kill-confirm-btn').addEventListener('click', confirmKillSession);
 
+$('action-confirm-cancel-btn').addEventListener('click', closeActionConfirm);
+
+document.querySelector('[data-close-action-confirm]').addEventListener('click', closeActionConfirm);
+
+$('action-confirm-btn').addEventListener('click', confirmAction);
+
 initDraggableModals();
 
 $('task-input').addEventListener('input', () => {
   clearTaskInputError();
   saveActiveTaskDraft();
+  updateComposerReadiness();
   if (pathSuggestionTaskSelected() && !interactiveMode) {
     schedulePathCompletion();
   } else {
@@ -369,9 +460,19 @@ $('task-input').addEventListener('input', () => {
   }
 });
 
-$('send-btn').addEventListener('click', sendTask);
+$('send-btn').addEventListener('click', runComposerTask);
 
 $('bulk-send-btn').addEventListener('click', sendBulkTask);
+
+$('target-current-btn').addEventListener('click', () => setTaskTargetMode('current'));
+
+$('target-selected-btn').addEventListener('click', () => setTaskTargetMode('selected'));
+
+$('details-open-files-btn').addEventListener('click', () => {
+  if (!activeAgentID || taskRequestInFlight) return;
+  closeSessionDetailsModal();
+  openFileBrowserModal('browse');
+});
 
 $('bulk-clear-btn').addEventListener('click', () => {
   selectedAgentIDs.clear();
@@ -387,32 +488,180 @@ $('cancel-task-btn').addEventListener('click', () => {
 $('cancel-task-select').addEventListener('change', updateCancellationControls);
 
 $('save-metadata-btn').addEventListener('click', async () => {
-  if (!activeAgentID) return;
+  const targetAgentID = metadataEditAgentID || activeAgentID;
+  if (!targetAgentID) return;
   const tags = $('tag-input').value.split(',').map(tag => tag.trim()).filter(Boolean);
+  const button = $('save-metadata-btn');
+  const status = $('metadata-save-status');
+  button.disabled = true;
+  status.textContent = 'Saving...';
   try {
-    const resp = await apiFetch('/api/agents/' + activeAgentID + '/metadata', {
+    const resp = await apiFetch('/api/agents/' + targetAgentID + '/metadata', {
       method: 'PUT',
-      body: JSON.stringify({ notes: $('notes-input').value, tags }),
+      body: JSON.stringify({
+        display_name: $('display-name-input').value.trim(),
+        notes: $('notes-input').value,
+        tags,
+      }),
     });
     if (!resp.ok) {
-      appendOutput('[-] save notes failed (' + resp.status + ')');
+      status.textContent = await readResponseMessage(resp, 'Save failed (' + resp.status + ')');
       return;
     }
-    activeAgent = await resp.json();
-    allAgents = allAgents.map(agent => agent.id === activeAgentID ? { ...agent, ...activeAgent } : agent);
-    appendOutput('[>] notes saved');
+    const updated = await resp.json();
+    if (targetAgentID === activeAgentID) activeAgent = { ...(activeAgent || {}), ...updated };
+    allAgents = allAgents.map(agent => agent.id === targetAgentID ? { ...agent, ...updated } : agent);
+    metadataDirty = false;
+    if (targetAgentID === activeAgentID) updateSessionHeader();
+    status.textContent = 'Saved';
+    showToast('Agent metadata saved.');
     renderAgentList();
+    renderDashboard();
     renderSessionPanels();
+    closeEditInfoModal();
   } catch (err) {
-    appendOutput('[-] save notes error: ' + err.message);
+    status.textContent = 'Save failed: ' + err.message;
+  } finally {
+    button.disabled = false;
   }
+});
+
+['display-name-input', 'tag-input', 'notes-input'].forEach(id => {
+  $(id).addEventListener('input', () => {
+    metadataDirty = true;
+    if ($('metadata-save-status').textContent !== 'Saving...') $('metadata-save-status').textContent = 'Unsaved changes';
+  });
+});
+
+$('save-artifact-retention-btn').addEventListener('click', async () => {
+	if (!activeAgentID) return;
+	const maxItems = Number.parseInt($('artifact-retention-input').value, 10);
+	if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 256) {
+		appendOutput('[-] artifact retention must be between 1 and 256', '', activeAgentID, 'error');
+		return;
+	}
+	try {
+		const resp = await apiFetch('/api/agents/' + activeAgentID + '/artifacts/retention', {
+			method: 'PUT', body: JSON.stringify({ max_items: maxItems }),
+		});
+		if (!resp.ok) throw new Error('request failed (' + resp.status + ')');
+		activeAgent.artifact_retention = maxItems;
+		artifactLibrary = artifactLibrary.slice(0, maxItems);
+		appendOutput('[>] artifact retention set to ' + maxItems, '', activeAgentID, 'operator');
+		renderSessionPanels();
+	} catch (err) {
+		appendOutput('[-] artifact retention error: ' + err.message, '', activeAgentID, 'error');
+	}
+});
+
+$('rekey-agent-btn').addEventListener('click', async () => {
+	if (!activeAgentID) return;
+  openActionConfirm({
+    title: 'Rotate Agent Secret',
+    copy: 'The deployed agent will stop authenticating until it is rebuilt or reconfigured with the new secret.',
+    confirmLabel: 'Rotate Secret',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const resp = await apiFetch('/api/agents/' + activeAgentID + '/rekey', { method: 'POST' });
+        if (!resp.ok) throw new Error(await readResponseMessage(resp, 'request failed (' + resp.status + ')'));
+        const data = await resp.json();
+        $('rekey-secret-output').textContent = data.secret_hex || '';
+        $('rekey-secret-output').hidden = false;
+        $('copy-rekey-secret-btn').hidden = false;
+        showToast('Agent secret rotated. Copy the new secret now.');
+      } catch (err) {
+        showToast('Secret rotation failed: ' + err.message, 'error');
+      }
+    },
+  });
+});
+
+$('copy-rekey-secret-btn').addEventListener('click', async () => {
+	const secret = $('rekey-secret-output').textContent || '';
+	if (!secret) return;
+	try {
+		await navigator.clipboard.writeText(secret);
+		$('copy-rekey-secret-btn').textContent = 'Copied';
+		window.setTimeout(() => { $('copy-rekey-secret-btn').textContent = 'Copy New Secret'; }, 1200);
+	} catch (_) {
+		appendOutput('[-] copy secret failed', '', activeAgentID, 'error');
+	}
+});
+
+$('copy-agent-id-btn').addEventListener('click', async () => {
+  if (!activeAgentID) return;
+  try {
+    await navigator.clipboard.writeText(activeAgentID);
+    showToast('Agent ID copied.');
+  } catch (_) {
+    showToast('Could not copy the agent ID.', 'error');
+  }
+});
+
+$('retire-agent-btn').addEventListener('click', () => {
+  if (!activeAgentID || !activeAgent) return;
+  const retiring = !activeAgent.retired;
+  if (!retiring) {
+    updateAgentRetirement(false);
+    return;
+  }
+  openActionConfirm({
+    title: 'Retire Agent',
+    copy: 'Retire ' + agentDisplayName(activeAgent) + '? Its history and artifacts will be preserved and it can be restored later.',
+    confirmLabel: 'Retire Agent',
+    onConfirm: () => updateAgentRetirement(true),
+  });
+});
+
+async function updateAgentRetirement(retired, targetAgentID = activeAgentID) {
+  if (!targetAgentID) return;
+  try {
+    const resp = await apiFetch('/api/agents/' + targetAgentID + '/lifecycle', {
+      method: 'PUT',
+      body: JSON.stringify({ retired }),
+    });
+    if (!resp.ok) throw new Error(await readResponseMessage(resp, 'request failed (' + resp.status + ')'));
+    const updated = await resp.json();
+    if (targetAgentID === activeAgentID) activeAgent = updated;
+    allAgents = allAgents.map(agent => agent.id === targetAgentID ? { ...agent, ...updated } : agent);
+    showToast(retired ? 'Agent retired.' : 'Agent restored to active fleet views.');
+    updateSessionHeader();
+    renderAgentList();
+    await loadAgents();
+  } catch (err) {
+    showToast('Lifecycle update failed: ' + err.message, 'error');
+  }
+}
+
+$('revoke-agent-btn').addEventListener('click', async () => {
+	if (!activeAgentID) return;
+  const agentID = activeAgentID;
+  openActionConfirm({
+    title: 'Permanently Revoke Agent',
+    copy: 'Permanently delete this identity, queued work, output history, and retained artifacts? This cannot be undone.',
+    confirmLabel: 'Revoke Permanently',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const resp = await apiFetch('/api/agents/' + agentID, { method: 'DELETE' });
+        if (!resp.ok) throw new Error(await readResponseMessage(resp, 'request failed (' + resp.status + ')'));
+        closeSessionDetailsModal();
+        clearActiveSession();
+        await loadAgents();
+        showToast('Agent revoked and retained state deleted.');
+      } catch (err) {
+        showToast('Agent revocation failed: ' + err.message, 'error');
+      }
+    },
+  });
 });
 
 $('output-search').addEventListener('input', applyOutputSearch);
 
 $('task-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') {
-    sendTask();
+    runComposerTask();
     return;
   }
 
@@ -433,10 +682,13 @@ $('task-input').addEventListener('keydown', e => {
 document.addEventListener('keydown', e => {
   if (e.defaultPrevented) return;
 
+  if (e.key === 'Tab' && trapModalFocus(e)) return;
+
   if (e.key === '/' && !$('main-view').hidden && !isTypingTarget(document.activeElement)) {
     e.preventDefault();
-    $('agent-filter').focus();
-    $('agent-filter').select();
+    const filter = activePrimaryView === 'overview' ? $('overview-filter') : $('agent-filter');
+    filter.focus();
+    filter.select();
     return;
   }
 
@@ -447,6 +699,12 @@ document.addEventListener('keydown', e => {
   }
 
   if (e.key !== 'Escape') return;
+
+  if (!$('action-confirm-modal').hidden) {
+    e.preventDefault();
+    closeActionConfirm();
+    return;
+  }
 
   if (!$('clear-confirm-modal').hidden) {
     e.preventDefault();
@@ -464,6 +722,18 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     closeSessionDetailsModal();
     $('session-details-btn').focus();
+    return;
+  }
+
+  if (!$('active-jobs-modal').hidden) {
+    e.preventDefault();
+    closeActiveJobsModal();
+    return;
+  }
+
+  if (!$('edit-info-modal').hidden) {
+    e.preventDefault();
+    closeEditInfoModal();
     return;
   }
 
@@ -495,6 +765,10 @@ document.addEventListener('keydown', e => {
   }
 });
 
+document.addEventListener('click', event => {
+  if (!event.target.closest('.agent-menu-wrap')) closeAgentMenus();
+});
+
 $('save-output-btn').addEventListener('click', saveRenderedOutputArtifact);
 
 $('clear-btn').addEventListener('click', openClearConfirmModal);
@@ -519,16 +793,23 @@ $('browse-path-btn').addEventListener('click', () => {
     return;
   }
   if (!activePathBrowseReady()) {
-    setTaskInputError('The remote path browser is still preparing. Try again when the session confirms readiness.');
+    setTaskInputError('The remote path browser is still preparing. Try again when the agent confirms readiness.');
     return;
   }
   openFileBrowserModal(selectedTaskType === 'upload' ? 'select-upload' : 'browse');
 });
 
 const outputEl = $('output');
+const outputFollowToggle = $('output-follow-toggle');
 
 $('jump-latest-btn').addEventListener('click', () => {
   scrollOutputToBottom();
+});
+
+outputFollowToggle.addEventListener('change', () => {
+  followOutput = outputFollowToggle.checked;
+  if (followOutput) scrollOutputToBottom();
+  else updateOutputControls();
 });
 
 if (outputResizerEl) {

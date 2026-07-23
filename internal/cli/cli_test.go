@@ -6,16 +6,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aelder202/sable/internal/listener"
 )
 
 func TestNewRejectsNonLoopbackAPI(t *testing.T) {
-	if _, err := New("https://example.com:8443", "token"); err == nil {
+	if _, err := New("https://example.com:8443", "token", "missing.crt"); err == nil {
 		t.Fatal("expected non-loopback API URL to be rejected")
 	}
 }
 
 func TestNewAllowsLoopbackAPI(t *testing.T) {
-	if _, err := New("https://127.0.0.1:8443", "token"); err != nil {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "server.crt")
+	if _, _, err := listener.LoadOrCreateCert(certPath, filepath.Join(dir, "server.key")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New("https://127.0.0.1:8443", "token", certPath); err != nil {
 		t.Fatalf("expected loopback API URL to be allowed: %v", err)
 	}
 }

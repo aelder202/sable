@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
   <title>Sable Operator</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,8 +13,16 @@
     <section id="login-view" class="login-layout">
       <form id="login-form" class="login-panel" novalidate>
         <div class="login-header">
-          <p class="eyebrow">Sable Console</p>
-          <h1>Sable</h1>
+          <div class="login-brand">
+            <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+              <path class="brand-mark-shield" d="M12 2.5 20 5v6.2c0 5.1-3.1 9.6-8 11.3-4.9-1.7-8-6.2-8-11.3V5l8-2.5Z"/>
+              <path class="brand-mark-bolt" d="m13.2 6-4.1 6h3l-1.3 6 4.3-7h-3L13.2 6Z"/>
+            </svg>
+            <div>
+              <p class="eyebrow">Operator Console</p>
+              <h1>Sable</h1>
+            </div>
+          </div>
           <p id="login-copy" class="login-copy">Enter operator password.</p>
         </div>
         <label class="field-label" for="password">Password</label>
@@ -39,57 +48,217 @@
     <div id="main-view" hidden>
       <nav class="topbar">
         <div class="brand-block">
-          <div>
-            <p class="eyebrow">Operator Console</p>
+          <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+            <path class="brand-mark-shield" d="M12 2.5 20 5v6.2c0 5.1-3.1 9.6-8 11.3-4.9-1.7-8-6.2-8-11.3V5l8-2.5Z"/>
+            <path class="brand-mark-bolt" d="m13.2 6-4.1 6h3l-1.3 6 4.3-7h-3L13.2 6Z"/>
+          </svg>
+          <div class="brand-copy">
             <h2 class="brand-title">Sable</h2>
-            <p class="brand-subtitle">Session Control</p>
+            <span class="brand-subtitle">Fleet Control</span>
           </div>
+        </div>
+
+        <div id="primary-nav" class="primary-nav" role="navigation" aria-label="Primary">
+          <button id="overview-nav-btn" class="primary-nav-button active" type="button" aria-current="page">Overview</button>
+          <button id="agents-nav-btn" class="primary-nav-button" type="button">Agents</button>
         </div>
 
         <div class="topbar-meta">
           <span id="refresh-indicator" class="status-pill" aria-live="polite">Waiting for data</span>
-          <span id="session-count" class="status-pill">0 sessions</span>
+          <button id="active-jobs-btn" class="topbar-activity" type="button" title="View active jobs">
+            <span class="activity-dot" aria-hidden="true"></span>
+            <strong id="active-job-count">0</strong>
+            <span>active jobs</span>
+          </button>
+          <button id="active-transfers-btn" class="topbar-activity" type="button" title="Open the Agents workspace">
+            <span class="activity-transfer" aria-hidden="true">&#8645;</span>
+            <strong id="active-transfer-count">0</strong>
+            <span>transfers</span>
+          </button>
+          <span id="session-count" class="status-pill">0 agents</span>
           <button id="logout-btn">Logout</button>
         </div>
       </nav>
 
-      <div id="content">
+      <section id="overview-view" class="fleet-overview" aria-labelledby="overview-title">
+        <header class="overview-header">
+          <div>
+            <p class="eyebrow">Fleet health</p>
+            <h2 id="overview-title">Agent Overview</h2>
+            <p id="overview-health-summary" class="overview-health-summary state-healthy" aria-live="polite">
+              <span class="overview-health-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></svg>
+              </span>
+              <span id="overview-health-copy">Waiting for fleet data.</span>
+            </p>
+          </div>
+          <span id="overview-updated" hidden>Waiting for data</span>
+        </header>
+
+        <div class="overview-filters" aria-label="Agent filters">
+          <label class="sr-only" for="overview-filter">Search agents</label>
+          <input id="overview-filter" type="search" placeholder="Search name, host, tag, OS, or ID" autocomplete="off">
+          <label class="sr-only" for="overview-status-filter">Agent status</label>
+          <select id="overview-status-filter">
+            <option value="all">All active states</option>
+            <option value="on_schedule">Active</option>
+            <option value="overdue">Overdue</option>
+            <option value="offline">Offline</option>
+            <option value="never_seen">Never seen</option>
+            <option value="retired">Retired</option>
+          </select>
+          <label class="sr-only" for="overview-platform-filter">Operating system</label>
+          <select id="overview-platform-filter"><option value="all">All platforms</option></select>
+          <label class="sr-only" for="overview-transport-filter">Transport</label>
+          <select id="overview-transport-filter">
+            <option value="all">All transports</option>
+            <option value="https">HTTPS</option>
+            <option value="dns">DNS</option>
+            <option value="unknown">Not seen</option>
+          </select>
+          <label class="overview-check"><input id="overview-show-retired" type="checkbox"> Include retired</label>
+        </div>
+
+        <div id="overview-stats" class="overview-stat-grid" aria-label="Fleet summary">
+          <div class="overview-primary-stats">
+            <button class="overview-stat overview-stat-primary" type="button" data-overview-status="all">
+              <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg></span>
+              <span class="summary-copy"><span>Registered</span><strong id="overview-total">0</strong><small>agents</small></span>
+            </button>
+            <button class="overview-stat overview-stat-primary state-on_schedule" type="button" data-overview-status="on_schedule">
+              <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 2v4M17 2v4M3 9h18M5 4h14a2 2 0 0 1 2 2v14H3V6a2 2 0 0 1 2-2Z"/></svg></span>
+              <span class="summary-copy"><span>Active</span><strong id="overview-schedule">0</strong><small>agents</small></span>
+            </button>
+            <button class="overview-stat overview-stat-primary state-overdue" type="button" data-overview-status="overdue">
+              <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+              <span class="summary-copy"><span>Overdue</span><strong id="overview-overdue">0</strong><small>agents</small></span>
+            </button>
+            <button class="overview-stat overview-stat-primary state-offline" type="button" data-overview-status="offline">
+              <span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v10M18.4 5.6a9 9 0 1 1-12.8 0"/></svg></span>
+              <span class="summary-copy"><span>Offline</span><strong id="overview-offline">0</strong><small>agents</small></span>
+            </button>
+          </div>
+          <div class="overview-secondary-stats">
+            <button class="overview-stat overview-stat-secondary" type="button" data-overview-status="never_seen"><span>Never seen</span><strong id="overview-never">0</strong></button>
+            <article class="overview-stat overview-stat-secondary"><span>Queued / Running</span><strong><span id="overview-queued">0</span> / <span id="overview-running">0</span></strong></article>
+            <article class="overview-stat overview-stat-secondary"><span>Transfers</span><strong id="overview-transfers">0</strong></article>
+            <article class="overview-stat overview-stat-secondary"><span>Failures &middot; 24h</span><strong id="overview-failures">0</strong></article>
+          </div>
+        </div>
+
+        <div class="overview-layout">
+          <div class="overview-main-column">
+            <section class="overview-panel fleet-table-panel" aria-labelledby="fleet-table-title">
+            <div class="overview-panel-heading">
+              <div>
+                <p class="eyebrow">Inventory</p>
+                <h3 id="fleet-table-title">Agent inventory</h3>
+              </div>
+              <span id="overview-result-count" class="status-pill">0 shown</span>
+            </div>
+            <div class="fleet-table-wrap">
+              <table class="fleet-table">
+                <thead><tr><th>Agent</th><th>State</th><th>Platform</th><th>Transport</th><th>Last check-in</th><th>Work</th><th>Artifacts</th><th>Tags</th><th><span class="sr-only">Open</span></th></tr></thead>
+                <tbody id="overview-agent-list"></tbody>
+              </table>
+              <p id="overview-filter-empty" class="overview-empty" hidden>No agents match these filters.</p>
+            </div>
+            </section>
+
+            <section class="overview-panel outcome-panel" aria-labelledby="outcome-chart-title">
+              <div class="overview-panel-heading outcome-panel-heading">
+                <div>
+                  <p class="eyebrow">Activity</p>
+                  <h3 id="outcome-chart-title">Task outcomes</h3>
+                </div>
+                <div class="outcome-range" role="group" aria-label="Task outcome range">
+                  <button id="outcome-range-24h" class="active" type="button" aria-pressed="true">24h</button>
+                  <button id="outcome-range-7d" type="button" aria-pressed="false">7d</button>
+                </div>
+              </div>
+              <div class="outcome-chart-layout">
+                <div id="outcome-chart" class="outcome-chart" role="img" aria-label="No completed task outcomes in this range."></div>
+                <div class="outcome-legend" aria-label="Task outcome totals">
+                  <div><span class="outcome-legend-swatch successful"></span><span>Successful</span><strong id="outcome-successful-total">0</strong></div>
+                  <div><span class="outcome-legend-swatch warning"></span><span>Warnings</span><strong id="outcome-warning-total">0</strong></div>
+                  <div><span class="outcome-legend-swatch failed"></span><span>Failed</span><strong id="outcome-failed-total">0</strong></div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <aside class="overview-insights" aria-label="Fleet insights">
+            <section class="overview-panel attention-panel">
+              <div class="overview-panel-heading">
+                <div>
+                  <h3>Needs attention</h3>
+                  <p class="attention-guidance">Clear each failed task here with Ignore or Acknowledge.</p>
+                </div>
+              </div>
+              <div id="overview-attention" class="attention-list"></div>
+            </section>
+            <section class="overview-panel recent-activity-panel">
+              <div class="overview-panel-heading"><h3>Recent activity</h3></div>
+              <div id="overview-recent-activity" class="recent-activity-list"></div>
+            </section>
+            <section class="overview-panel fleet-mix-panel">
+              <div class="overview-panel-heading"><h3>Fleet mix</h3></div>
+              <div id="overview-fleet-mix" class="fleet-mix-list"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <div id="content" hidden>
         <aside id="sidebar">
           <div class="sidebar-heading">
             <div>
-              <p class="eyebrow">Sessions</p>
-              <h3>Connected Hosts</h3>
+              <p class="eyebrow">Agent workspace</p>
+              <h3>Agents</h3>
             </div>
+            <button id="sidebar-collapse-btn" class="sidebar-collapse-button" type="button" aria-expanded="true" aria-label="Collapse agents sidebar" title="Collapse agents sidebar">
+              <span aria-hidden="true">&laquo;</span>
+            </button>
           </div>
 
-          <div id="agent-stats" class="stat-grid" aria-label="Session status summary">
-            <article class="stat-card">
-              <span class="stat-label">Online</span>
+          <div id="agent-stats" class="stat-grid" aria-label="Agent status summary">
+            <button class="stat-card" type="button" data-agent-status="on_schedule">
+              <span class="stat-label">Active</span>
               <strong id="count-online">0</strong>
-            </article>
-            <article class="stat-card">
-              <span class="stat-label">Stale</span>
+            </button>
+            <button class="stat-card" type="button" data-agent-status="overdue">
+              <span class="stat-label">Overdue</span>
               <strong id="count-stale">0</strong>
-            </article>
-            <article class="stat-card">
+            </button>
+            <button class="stat-card" type="button" data-agent-status="offline">
               <span class="stat-label">Offline</span>
               <strong id="count-offline">0</strong>
-            </article>
+            </button>
           </div>
 
           <div class="session-filter-row">
-            <label class="sr-only" for="agent-filter">Filter sessions</label>
+            <label class="sr-only" for="agent-filter">Filter agents</label>
             <input
               type="search"
               id="agent-filter"
-              placeholder="Filter hostname, OS, or ID"
+              placeholder="Search agents"
               autocomplete="off"
               spellcheck="false"
               autocapitalize="off"
               autocorrect="off"
             >
-            <button id="bulk-select-mode-btn" type="button" aria-pressed="false">Select</button>
+            <button id="bulk-select-mode-btn" type="button" aria-pressed="false">Select multiple</button>
           </div>
+
+          <label class="sr-only" for="agent-status-filter">Filter agent state</label>
+          <select id="agent-status-filter" class="sidebar-state-filter">
+            <option value="all">All active agents</option>
+            <option value="on_schedule">Active</option>
+            <option value="overdue">Overdue</option>
+            <option value="offline">Offline</option>
+            <option value="never_seen">Never seen</option>
+            <option value="retired">Retired</option>
+          </select>
 
           <p id="agent-filter-empty" class="sidebar-empty" hidden></p>
           <div id="bulk-session-bar" class="bulk-session-bar" hidden>
@@ -101,24 +270,34 @@
 
         <main id="console">
           <header id="console-header">
-            <div>
-              <p class="eyebrow">Active Session</p>
-              <h3 id="console-title">Select a session</h3>
+            <div class="console-heading">
+              <div class="console-title-row">
+                <span id="console-agent-icon" class="console-agent-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="13" rx="2"></rect><path d="M8 21h8M12 16.5V21"></path></svg>
+                </span>
+                <h3 id="console-title">Select an agent</h3>
+                <span id="meta-state" class="meta-chip meta-state-chip" hidden></span>
+              </div>
+              <div id="console-meta" hidden>
+                <span id="meta-platform" class="meta-chip"></span>
+                <span id="meta-transport" class="meta-chip"></span>
+                <span id="meta-lastseen" class="meta-chip"></span>
+                <span id="meta-tags" class="meta-tags"></span>
+              </div>
             </div>
 
             <div class="console-tools">
-              <div id="console-meta" hidden>
-                <span id="meta-state" class="meta-chip meta-state-chip"></span>
-                <span id="meta-hostname" class="meta-chip"></span>
-                <span id="meta-platform" class="meta-chip"></span>
-                <span id="meta-lastseen" class="meta-chip"></span>
-                <span id="meta-id" class="meta-chip"></span>
-              </div>
               <div class="console-actions">
                 <button id="jump-latest-btn" hidden>Jump To Latest</button>
-                <button id="session-details-btn" hidden>Session Details</button>
-                <button id="save-output-btn" hidden>Save Output</button>
-                <button id="clear-btn" hidden>Clear Output</button>
+                <button id="session-details-btn" hidden>Agent Details</button>
+                <button id="save-output-btn" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"></path><path d="M4 17v3h16v-3"></path></svg>
+                  <span>Save output</span>
+                </button>
+                <button id="clear-btn" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg>
+                  <span>Clear output</span>
+                </button>
               </div>
             </div>
           </header>
@@ -136,6 +315,7 @@
                     <option value="operator">Operator</option>
                     <option value="shell">Shell</option>
                     <option value="artifact">Artifacts</option>
+                    <option value="warning">Warnings</option>
                     <option value="error">Errors</option>
                     <option value="progress">Progress</option>
                   </select>
@@ -155,12 +335,17 @@
                   </div>
                   <div id="output-search-panel" hidden>
                     <label class="sr-only" for="output-search">Search output</label>
-                    <input id="output-search" type="search" placeholder="Filter rendered output">
+                    <input id="output-search" type="search" placeholder="Search output">
                   </div>
+                  <label class="output-follow-control" for="output-follow-toggle">
+                    <span>Autoscroll</span>
+                    <input id="output-follow-toggle" type="checkbox" checked>
+                    <span class="toggle-track" aria-hidden="true"><span></span></span>
+                  </label>
                 </div>
                 <div id="output-empty" class="empty-state">
-                  <h3>No session selected</h3>
-                  <p>Choose a session to inspect activity and queue tasks. Output is rendered as plain text only.</p>
+                  <h3>No agent selected</h3>
+                  <p>Choose an agent to inspect activity and queue tasks. Output is rendered as plain text only.</p>
                 </div>
                 <div id="output"></div>
               </div>
@@ -170,7 +355,7 @@
               <section id="input-area" hidden>
                 <div class="composer-header">
                   <div>
-                    <p class="eyebrow">Task Builder</p>
+                    <p class="eyebrow">Task builder</p>
                     <p id="task-help" class="composer-copy">Choose an action and provide the required value.</p>
                   </div>
                   <p id="composer-note" class="composer-note">Tasks are validated before they are queued.</p>
@@ -213,13 +398,18 @@
                         aria-expanded="false"
                         aria-controls="task-type-list"
                       >
+                        <span class="task-type-leading-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect><path d="m7 9 3 3-3 3M12.5 15H17"></path></svg>
+                        </span>
                         <span id="task-type-button-label">Shell</span>
                       </button>
                       <div id="task-type-list" class="task-type-list" role="listbox" aria-label="Task action" hidden></div>
                     </div>
-                    <button id="send-btn">Queue Task</button>
+                    <div id="send-action-group" class="send-action-group">
+                      <button id="send-btn">Run shell command</button>
+                    </div>
                     <button id="bulk-send-btn" type="button" hidden>Queue Selected</button>
-                    <button id="exit-interactive-btn" hidden>Exit</button>
+                    <button id="exit-interactive-btn" type="button" hidden>Exit</button>
                   </div>
                   <div class="command-line">
                     <span id="interactive-prompt" hidden>$</span>
@@ -238,6 +428,14 @@
                     <button id="browse-path-btn" type="button" hidden title="Browse remote directories to choose a destination">Browse</button>
                   </div>
                 </div>
+                <div id="composer-footer" class="composer-footer">
+                  <span id="composer-target">Select an agent to run this action.</span>
+                  <div id="task-target-toggle" class="task-target-toggle" role="group" aria-label="Task targets">
+                    <button id="target-current-btn" class="active" type="button" aria-pressed="true">Current agent</button>
+                    <button id="target-selected-btn" type="button" aria-pressed="false">Selected agents (0)</button>
+                  </div>
+                  <span id="composer-shortcut" class="composer-shortcut">Press Enter to run</span>
+                </div>
                 <div id="path-suggestions" class="path-suggestions" hidden></div>
               </section>
             </section>
@@ -248,31 +446,51 @@
             <aside id="session-rail" class="session-details-panel">
               <div class="rail-header">
                 <div>
-                  <p class="eyebrow">Session Details</p>
+                  <p class="eyebrow">Agent Details</p>
                   <h4 id="session-details-title">Manage</h4>
                 </div>
                 <div class="modal-controls">
                   <label class="sr-only" for="session-panel-filter">Detail filter</label>
                   <select id="session-panel-filter" aria-label="Detail filter">
-                    <option value="timeline">Timeline</option>
+                    <option value="timeline">Summary</option>
+                    <option value="activity">Activity</option>
                     <option value="jobs">Jobs</option>
                     <option value="artifacts">Artifacts</option>
-                    <option value="notes">Notes</option>
+                    <option value="files">Files</option>
                     <option value="audit">Audit</option>
                   </select>
-                  <button id="session-details-close-btn" type="button" aria-label="Close session details">Close</button>
+                  <button id="session-details-close-btn" class="icon-close-button" type="button" aria-label="Close agent details"><span aria-hidden="true">&times;</span></button>
                 </div>
               </div>
-              <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Session details">
-                <button class="session-tab active" type="button" role="tab" aria-selected="true" aria-controls="timeline-panel" data-panel="timeline">Timeline <span id="timeline-count">0</span></button>
-                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-panel="jobs">Jobs <span id="jobs-count">0</span></button>
-                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="artifacts-panel" data-panel="artifacts">Artifacts <span id="artifacts-count">0</span></button>
-                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="notes-panel" data-panel="notes">Notes</button>
-                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-panel="audit">Audit <span id="audit-count">0</span></button>
+              <div id="session-tabs" class="session-tabs" role="tablist" aria-label="Agent details">
+                <button class="session-tab active" type="button" role="tab" aria-selected="true" aria-controls="timeline-panel" data-panel="timeline"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"></rect><path d="M8 8h8M8 12h8M8 16h5"></path></svg><span>Summary</span></span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-panel" data-panel="activity"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"></path></svg><span>Activity</span></span><span id="timeline-count" class="session-tab-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="jobs-panel" data-panel="jobs"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"></path><path d="M3 6h.01M3 12h.01M3 18h.01"></path></svg><span>Jobs</span></span><span id="jobs-count" class="session-tab-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="artifacts-panel" data-panel="artifacts"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"></path><path d="M14 3v5h5"></path></svg><span>Artifacts</span></span><span id="artifacts-count" class="session-tab-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="files-panel" data-panel="files"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"></path></svg><span>Files</span></span><span id="files-count" class="session-tab-count">0</span></button>
+                <button class="session-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-panel="audit"><span class="session-tab-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"></path></svg><span>Audit</span></span><span id="audit-count" class="session-tab-count">0</span></button>
               </div>
               <div id="session-panels" class="session-panels">
                 <section id="timeline-panel" class="session-panel active" role="tabpanel">
-                  <div id="timeline-summary" class="timeline-summary" aria-label="Session summary"></div>
+                  <div id="timeline-summary" class="timeline-summary" aria-label="Agent summary"></div>
+                  <details class="summary-danger-zone">
+                    <summary>Danger zone</summary>
+                    <div class="panel-form compact danger-zone-panel">
+                      <p class="panel-hint">Retirement hides historical agents without deleting evidence. Rotating the secret requires rebuilding or reconfiguring the agent; revocation permanently removes server-side state.</p>
+                      <div class="inline-row">
+                        <button id="copy-agent-id-btn" type="button">Copy Agent ID</button>
+                        <button id="retire-agent-btn" type="button">Retire Agent</button>
+                        <button id="rekey-agent-btn" type="button">Rotate Secret</button>
+                        <button id="revoke-agent-btn" class="danger-button" type="button">Revoke Agent</button>
+                      </div>
+                      <code id="rekey-secret-output" class="rekey-secret-output" hidden></code>
+                      <button id="copy-rekey-secret-btn" type="button" hidden>Copy New Secret</button>
+                    </div>
+                  </details>
+                </section>
+                <section id="activity-panel" class="session-panel" role="tabpanel" hidden>
+                  <div class="panel-heading-row"><div><h5>Recent activity</h5><p class="panel-hint">Task delivery, results, and agent events in chronological order.</p></div></div>
+                  <div id="activity-schedule-summary" class="activity-schedule-summary"></div>
                   <div id="timeline-list" class="timeline-list"></div>
                 </section>
                 <section id="jobs-panel" class="session-panel" role="tabpanel" hidden>
@@ -281,17 +499,19 @@
                 </section>
                 <section id="artifacts-panel" class="session-panel" role="tabpanel" hidden>
                   <h5>Artifacts</h5>
+				  <div class="panel-form compact artifact-retention-controls">
+					<label class="field-label" for="artifact-retention-input">Retain newest artifacts</label>
+					<div class="inline-row">
+					  <input id="artifact-retention-input" type="number" min="1" max="256" value="256">
+					  <button id="save-artifact-retention-btn" type="button">Apply</button>
+					</div>
+                  </div>
                   <div id="artifact-list" class="panel-list"></div>
                 </section>
-                <section id="notes-panel" class="session-panel" role="tabpanel" hidden>
-                  <h5>Notes</h5>
-                  <div class="panel-form">
-                    <label class="field-label" for="tag-input">Tags</label>
-                    <input id="tag-input" type="text" placeholder="lab, windows, review">
-                    <label class="field-label" for="notes-input">Notes</label>
-                    <textarea id="notes-input" placeholder="Session notes"></textarea>
-                    <button id="save-metadata-btn" type="button">Save Notes</button>
-                  </div>
+                <section id="files-panel" class="session-panel" role="tabpanel" hidden>
+                  <div class="panel-heading-row"><div><h5>Remote Files</h5><p class="panel-hint">Browse the selected agent's filesystem and monitor active transfers.</p></div></div>
+                  <button id="details-open-files-btn" class="details-primary-action" type="button">Open remote file browser</button>
+                  <div id="details-transfer-list" class="panel-list"></div>
                 </section>
                 <section id="audit-panel" class="session-panel" role="tabpanel" hidden>
                   <h5>Audit</h5>
@@ -330,7 +550,7 @@
                 </div>
               </div>
               <div class="confirm-body">
-                <p id="clear-confirm-copy">Clear output history for this session?</p>
+                <p id="clear-confirm-copy">Clear output history for this agent?</p>
                 <div class="confirm-actions">
                   <button id="clear-confirm-btn" type="button">Clear Output</button>
                 </div>
@@ -344,28 +564,95 @@
               <div class="rail-header">
                 <div>
                   <p class="eyebrow">Confirm Action</p>
-                  <h4 id="kill-confirm-title">Kill Session</h4>
+                  <h4 id="kill-confirm-title">Kill Agent</h4>
                 </div>
                 <div class="modal-controls">
                   <button id="kill-cancel-btn" type="button">Cancel</button>
                 </div>
               </div>
               <div class="confirm-body">
-                <p id="kill-confirm-copy">Queue a kill task for this session?</p>
+                <p id="kill-confirm-copy">Queue a kill task for this agent?</p>
                 <div class="confirm-actions">
-                  <button id="kill-confirm-btn" type="button">Kill Session</button>
+                  <button id="kill-confirm-btn" type="button">Kill Agent</button>
                 </div>
               </div>
             </aside>
           </div>
+
         </main>
       </div>
     </div>
   </div>
 
+  <div id="active-jobs-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="active-jobs-title" hidden>
+    <div class="modal-backdrop" data-close-active-jobs></div>
+    <section class="active-jobs-panel">
+      <div class="rail-header">
+        <div>
+          <p class="eyebrow">Fleet activity</p>
+          <h4 id="active-jobs-title">Active jobs</h4>
+        </div>
+        <div class="modal-controls">
+          <span id="active-jobs-modal-count" class="status-pill">0 jobs</span>
+          <button id="active-jobs-close-btn" class="icon-close-button" type="button" aria-label="Close active jobs"><span aria-hidden="true">&times;</span></button>
+        </div>
+      </div>
+      <p class="active-jobs-definition">Active jobs have been received by a host and are still processing. Tasks waiting for delivery are not included.</p>
+      <div id="active-jobs-list" class="active-jobs-list"></div>
+    </section>
+  </div>
+
+  <div id="edit-info-modal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="edit-info-title" hidden>
+    <div class="modal-backdrop" data-close-edit-info></div>
+    <section class="edit-info-panel">
+      <div class="rail-header">
+        <div>
+          <p class="eyebrow">Agent profile</p>
+          <h4 id="edit-info-title">Edit info</h4>
+        </div>
+        <button id="edit-info-close-btn" class="icon-close-button" type="button" aria-label="Close edit info"><span aria-hidden="true">&times;</span></button>
+      </div>
+      <div class="panel-form edit-info-form">
+        <label class="field-label" for="display-name-input">Display name</label>
+        <input id="display-name-input" type="text" maxlength="64" placeholder="Human-readable agent name">
+        <label class="field-label" for="tag-input">Tags</label>
+        <input id="tag-input" type="text" placeholder="lab, windows, review">
+        <p class="field-help">Separate tags with commas.</p>
+        <label class="field-label" for="notes-input">Notes</label>
+        <textarea id="notes-input" placeholder="Agent notes"></textarea>
+        <div class="inline-row metadata-actions">
+          <button id="save-metadata-btn" type="button">Save info</button>
+          <span id="metadata-save-status" class="panel-hint" aria-live="polite"></span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="action-confirm-modal" class="modal-shell" role="alertdialog" aria-modal="true" aria-labelledby="action-confirm-title" aria-describedby="action-confirm-copy" hidden>
+    <div class="modal-backdrop" data-close-action-confirm></div>
+    <aside id="action-confirm-panel" class="confirm-panel">
+      <div class="rail-header">
+        <div><p class="eyebrow">Confirm Action</p><h4 id="action-confirm-title">Confirm</h4></div>
+        <div class="modal-controls"><button id="action-confirm-cancel-btn" type="button">Cancel</button></div>
+      </div>
+      <div class="confirm-body">
+        <p id="action-confirm-copy"></p>
+        <label id="action-confirm-preference" class="confirm-preference" hidden>
+          <input id="action-confirm-show-next" type="checkbox" checked>
+          <span id="action-confirm-preference-label">Show this warning next time</span>
+        </label>
+        <div class="confirm-actions"><button id="action-confirm-btn" type="button">Confirm</button></div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="app-toast" class="app-toast" role="status" aria-live="polite" hidden></div>
+
   <input type="file" id="upload-file-input">
-  <script src="/api.js"></script>
+	<script src="/logic.js"></script>
+	<script src="/api.js"></script>
   <script src="/sessions.js"></script>
+  <script src="/dashboard.js"></script>
   <script src="/tasks.js"></script>
   <script src="/artifacts.js"></script>
   <script src="/modals.js"></script>

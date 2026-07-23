@@ -18,19 +18,33 @@ Password-gated operator console on loopback HTTPS:
 
 ![Sable login screen](images/login.png)
 
-Active session view with command output, the Task Builder, and the full action menu:
+Fleet Overview with sleep-aware status, command outcomes, recent activity, and
+actionable failure alerts:
 
-![Sable web console with active session](images/landing_page.png)
+![Sable fleet Overview with warning totals and Needs Attention guidance](images/overview.png)
 
-Bulk tasking across selected sessions:
+Shell commands that reach the agent but return an OS or process error are shown
+as **Warnings**. **Failed** is reserved for delivery or agent communication
+failures. A failed-task banner remains until every item under **Needs
+Attention** is cleared with **Ignore** (for the current session) or
+**Acknowledge** (persistently); either choice retains the task output and
+outcome history.
+
+Agent workspace with Success, Warning, and Failed output cards, the Task
+Builder, and the full action menu:
+
+![Sable web console with active session and warning output](images/landing_page.png)
+
+Bulk tasking across selected agents:
 
 ![Sable bulk tasking across Linux and Windows sessions](images/bulk_tasking.png)
 
-Session details rail for jobs, artifacts, notes, and audit history:
+Agent details rail with outcome totals, jobs, artifacts, metadata, and audit
+history:
 
-![Session Details with artifacts, jobs, notes, and audit panels](images/session_details.png)
+![Session Details with success, warning, and failed totals](images/session_details.png)
 
-Remote file browser for selecting download paths:
+Remote file browser for navigating paths and downloading files or directory ZIPs:
 
 ![Download file browser modal](images/file_browser.png)
 
@@ -61,9 +75,9 @@ See [docs/architecture.md](docs/architecture.md) for the crypto details, network
 
 ## Prerequisites
 
-- Go 1.26.2 or later (matches `go.mod`)
+- Go 1.26.5 or later (matches `go.mod` and includes the current security fixes)
 - `make` (Linux, macOS, or Windows; PowerShell or cmd)
-- Root / admin on the server host if binding `443` (and `53` when DNS fallback is on)
+- Permission to bind `443` (and `53/udp` when DNS fallback is on). Prefer a dedicated unprivileged account with only the bind capability, or use high ports and an OS-level redirect.
 
 Agents cross-compile through `GOOS`/`GOARCH`, so you can build from any host OS.
 
@@ -78,26 +92,103 @@ git clone https://github.com/aelder202/sable
 cd sable
 ```
 
+### Guided Setup (Recommended)
+
+From a fresh clone, run one command:
+
+```sh
+go run ./cmd/sablectl setup
+```
+
+The guide first asks for the **agent beacon URL**: the HTTPS address every
+deployed agent will use to reach the Sable server, not the operator UI. Use an
+address reachable from every target machine; `127.0.0.1` only works when an
+agent runs on the server host itself. It then asks for the total number of Linux
+agents, the total number of Windows agents, and a label for each identity.
+Every requested agent receives a unique identity, registration, and binary.
+The remaining prompts select the beacon profile, credential location, state
+encryption, and whether to start now.
+
+Setup creates the local configuration and TLS certificate, builds `sablectl`,
+the server, and every requested agent, starts the server, registers the local
+identities, and runs the health checks. The final summary includes each agent
+artifact's SHA-256 checksum and authorized Linux or Windows deployment command
+templates.
+
+Setup checks the operator API before asking any configuration questions. If a
+server is already running, guided setup first warns that a clean setup will
+stop it and permanently remove the current configuration, identities, state,
+artifacts, keys, credentials, logs, and builds. The default answer is **No**.
+Nothing is erased until the replacement is accepted and the final setup plan
+is confirmed. For unattended replacement, add the explicit `--replace` flag:
+
+```sh
+go run ./cmd/sablectl setup --yes --replace
+```
+
+For an unattended local lab setup using the secure defaults (one Linux identity
+named `linux01`):
+
+```sh
+go run ./cmd/sablectl setup --yes
+```
+
+For an unattended setup that creates two Linux agents and one Windows agent:
+
+```sh
+go run ./cmd/sablectl setup --yes \
+  --url https://<your-server-ip>:443 \
+  --linux-agents 2 \
+  --windows-agents 1
+```
+
+Unattended count-based setup assigns `linux01`, `linux02`, and `windows01`.
+Supplying only one count flag makes the omitted platform count zero. On an
+existing installation, the counts are desired totals: existing identities are
+reused and only missing agents are added. Setup refuses totals or label changes
+that would remove or rename an existing identity.
+
+After setup, use the generated control binary:
+
+```sh
+./sablectl status
+./sablectl down
+./sablectl up
+```
+
+On Windows, use `.\sablectl.exe` in place of `./sablectl`. Setup stores the
+generated operator password at `.sable/operator-password`, the state encryption
+key at `.sable/state.key`, and server logs at `.sable/server.log` by default.
+
+The manual steps below remain available for custom or development installs.
+
 Modules pull on the first build. Run `go mod download` if you want to pre-warm the cache.
 
-### 2. Install
+### Manual Install
 
 Build the unified helper, then let it create the local config, TLS certificate, server binary, selected agent binaries, and `.sable/install.json` manifest.
 
 ```sh
 make sablectl
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 1 --windows-agents 0
 ```
 
 `--password-file` is optional but recommended: when supplied, `install` creates the file (with a random password if it doesn't already exist) and records its path in `.sable/install.json`. `sablectl start` and `sablectl agent register` reuse that path automatically, so you don't need to retype `--password-file` on every command.
 
-To build both Linux and Windows agents with separate identities:
+To build multiple Linux and Windows agents with separate identities:
 
 ```sh
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --agents both --windows-label win01
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 2 --windows-agents 1
 ```
 
-`SERVER_URL` is the address agents beacon to, not the operator UI. `sablectl install` writes `config.env`, `server.crt`, `server.key`, `.sable/install.json`, and builds artifacts under `builds/<label>/`. These files are gitignored and include secrets.
+The older `--agents`, `--label`, and `--windows-label` options remain supported
+for compatibility, but they cannot be mixed with `--linux-agents` or
+`--windows-agents` in the same command.
+
+`SERVER_URL` is the agent beacon URL, not the operator UI. `sablectl install`
+writes `config.env`, `server.crt`, `server.key`, `.sable/install.json`, and
+builds artifacts under `builds/<label>/`. These files are gitignored and
+include secrets.
 
 ### 3. Start
 
@@ -127,7 +218,7 @@ Set-Content -Encoding ascii -NoNewline .\pw.txt "yourpassword"
 
 `SABLE_OPERATOR_PASSWORD` and stdin both work too.
 
-By default the server persists operator state to `sable-state.json` in the working directory. That plaintext local file lets registered agents, queued tasks, output history, notes, tags, artifacts, and audit events survive a restart. It contains agent secrets and task output, so treat it like `config.env`. Sable tightens generated sensitive-file permissions; `sablectl doctor` warns about broad local ACLs/modes, and `sablectl doctor --fix-permissions` hardens existing generated files. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, or disable persistence with `--state-file none`.
+By default the server persists operator metadata to `sable-state.json`, stores large artifact bodies under `sable-state.json.artifacts/`, and encrypts both with AES-256-GCM using `.sable/state.key`. Registered agents, reliable queued/in-flight tasks, output history, notes, tags, artifacts, and audit events survive a restart. Sable creates the key when missing and writes sensitive files through restricted temporary files and atomic replacement. Back up the key separately: encrypted state cannot be recovered without it. Move state with `--state-file <path>` or `SABLE_STATE_FILE=<path>`, disable persistence with `--state-file none`, or explicitly opt out of encryption with `--state-key-file none`.
 
 The server prints its TLS fingerprint and listener status:
 
@@ -144,27 +235,29 @@ The operator API binds to loopback only. Reach it on the server host directly, o
 ssh -L 8443:127.0.0.1:8443 user@sable-host
 ```
 
-### 4. Register The Main Agent
+### 4. Register The Agents
 
-The first agent identity is `main`. `sablectl install` builds it at `builds/main/agent-linux`, but it can only be registered after the server API is running.
+Count-based install assigns labels such as `linux01` and `windows01`. Agents can
+only be registered after the server API is running.
 
 In a second terminal on the server host, run:
 
 ```sh
-./sablectl agent register main
+./sablectl agent register
 ```
 
-If you skipped `--password-file` during install, pass it here (the flag may go before or after the label):
+If you skipped `--password-file` during install, pass it here:
 
 ```sh
-./sablectl agent register main --password-file ./pw.txt
-./sablectl agent register --password-file ./pw.txt main   # same thing
+./sablectl agent register --password-file ./pw.txt
 ```
 
-`register` with no label registers every locally known identity. To start the server and register generated identities in one pass, run install with `--start`:
+`register` with no label registers every locally known identity. To register
+just one, append its label. To start the server and register all generated
+identities in one pass, run install with `--start`:
 
 ```sh
-./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --start
+./sablectl install --url https://<your-server-ip>:443 --password-file ./pw.txt --linux-agents 1 --windows-agents 0 --start
 ```
 
 ### 5. Add Or Rebuild Agents
@@ -172,10 +265,12 @@ If you skipped `--password-file` during install, pass it here (the flag may go b
 Create another local identity, then build it:
 
 ```sh
-./sablectl agent add windows --label win01
-./sablectl agent build win01
-./sablectl agent register win01
+./sablectl agent create windows --label win01
 ```
+
+`agent create` creates the identity, builds its artifact, and registers it when
+the local server is running. If the server is offline, registration is deferred
+until the next `sablectl up`.
 
 After source changes, rebuild without remembering which target changed:
 
@@ -188,7 +283,7 @@ After source changes, rebuild without remembering which target changed:
 Linux:
 
 ```sh
-scp builds/main/agent-linux user@target:/tmp/agent
+scp builds/linux01/agent-linux user@target:/tmp/agent
 ssh user@target "chmod +x /tmp/agent && /tmp/agent &"
 ```
 
@@ -206,7 +301,18 @@ The agent shows up in the console within one beacon interval.
 
 `https://127.0.0.1:8443` on the server host (or through the tunnel). Accept the self-signed cert and log in with the operator password.
 
-After login the console lists registered sessions, last-seen status, output, and the Task Builder.
+After login the Overview dashboard summarizes the deployed fleet with
+sleep-aware status, activity, and Success, Warning, and Failed outcome counters.
+A shell command that reaches an agent but is rejected by the OS or exits with an
+error is a Warning. A task becomes Failed when delivery or agent communication
+breaks down, including when an agent misses its sleep-aware offline check-in
+threshold.
+
+Failed tasks appear under **Needs Attention** and keep the red Overview banner
+active. Open each failed task there and choose **Ignore** to clear it for the
+current browser session or **Acknowledge** to clear it persistently. Both
+actions retain the output and outcome history. Open **Agents** for task output,
+the Task Builder, metadata, artifacts, and Remote Files.
 
 ---
 

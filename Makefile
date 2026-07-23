@@ -51,7 +51,7 @@ LDFLAGS := $(STRIP) \
            -X '$(MODULE)/internal/agent.SleepSecondsStr=$(SLEEP_SECONDS)' \
            -X '$(MODULE)/internal/agent.DNSDomainStr=$(DNS_DOMAIN)'
 
-.PHONY: sablectl build build-windows-server build-server build-agent-linux build-agent-windows update-peas test test-integration gen-secret validate-openapi
+.PHONY: sablectl build build-windows-server build-server build-agent-linux build-agent-windows update-peas test test-web test-integration gen-secret validate-openapi
 
 ## Build the unified sablectl installer/operator helper.
 sablectl:
@@ -107,6 +107,9 @@ update-peas:
 test:
 	go test ./...
 
+test-web:
+	node --test web/logic.test.cjs
+
 test-integration:
 	go test -tags integration -v ./...
 
@@ -115,4 +118,4 @@ gen-secret:
 
 ## Lint docs/openapi.yaml using Redocly CLI. Requires Node.js (uses npx; nothing committed).
 validate-openapi:
-	npx --yes @redocly/cli@latest lint docs/openapi.yaml
+	npx --yes @redocly/cli@2.39.0 lint docs/openapi.yaml

@@ -1,5 +1,57 @@
 'use strict';
 
+function rememberTaskMetadata(taskID, task, agentID) {
+  if (!taskID || !task) return;
+  const existing = taskMetadataByID.get(taskID) || {};
+  const queuedAt = task.queued_at || task.queuedAt || existing.queuedAt || '';
+  const deliveredAt = task.last_delivered_at || task.lastDeliveredAt || existing.deliveredAt || '';
+  taskMetadataByID.set(taskID, {
+    taskID,
+    agentID: agentID || existing.agentID || activeAgentID || '',
+    type: task.type || existing.type || '',
+    payload: typeof task.payload === 'string' ? task.payload : (existing.payload || ''),
+    queuedAt,
+    deliveredAt,
+  });
+
+  while (taskMetadataByID.size > 500) {
+    taskMetadataByID.delete(taskMetadataByID.keys().next().value);
+  }
+  if (typeof enrichRenderedTaskCard === 'function') enrichRenderedTaskCard(taskID);
+}
+
+function rememberAgentTaskMetadata(agent) {
+  if (!agent || !Array.isArray(agent.queued)) return;
+  agent.queued.forEach(task => rememberTaskMetadata(task.id, task, agent.id));
+}
+
+const TASK_ICON_PATHS = {
+  shell: ['M4 5h16v14H4z', 'm8 10 3 2-3 2', 'M13 15h4'],
+  ps: ['M8 6h12', 'M8 12h12', 'M8 18h12', 'M4 6h.01', 'M4 12h.01', 'M4 18h.01'],
+  screenshot: ['M4 7h3l1.5-2h7L17 7h3v11H4z', 'M12 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'],
+  snapshot: ['M4 4h16v16H4z', 'M9 9h.01', 'M9 13h6', 'M9 16h4'],
+  persistence: ['M12 3 20 6v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z', 'M9 12l2 2 4-4'],
+  peas: ['M5 19c1-6 4-10 7-14 3 4 6 8 7 14', 'M8 15h8', 'M10 11h4'],
+  download: ['M12 3v12', 'm7 10 5 5 5-5', 'M4 20h16'],
+  upload: ['M12 16V4', 'm7 9 5-5 5 5', 'M4 20h16'],
+  sleep: ['M12 7v5l3 2', 'M21 12a9 9 0 1 1-9-9'],
+  kill: ['M6 6l12 12', 'M18 6 6 18'],
+  interactive: ['M4 5h16v14H4z', 'm8 10 3 2-3 2', 'M13 15h4', 'M18 3v4'],
+};
+
+function createTaskIcon(type, className) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  if (className) svg.setAttribute('class', className);
+  (TASK_ICON_PATHS[type] || TASK_ICON_PATHS.shell).forEach(value => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', value);
+    svg.appendChild(path);
+  });
+  return svg;
+}
+
 function setTaskStatus(message, tone) {
   const status = $('task-status');
   status.hidden = !message;
@@ -62,7 +114,7 @@ function armKillConfirmation() {
 function updateTaskContextStatus() {
   if (taskRequestInFlight) return;
   if (selectedTaskType === 'kill' && killConfirmationActive()) {
-    setTaskStatus('Confirmation armed. Click Confirm Kill within 10 seconds to queue session termination.', 'status-warn');
+    setTaskStatus('Confirmation armed. Click Confirm Kill within 10 seconds to queue agent termination.', 'status-warn');
     return;
   }
   setTaskStatus('', '');
@@ -71,6 +123,7 @@ function updateTaskContextStatus() {
 function setQueueBusy(isBusy, message) {
   taskRequestInFlight = isBusy;
   const pathBrowserWaiting = pathBrowserTaskSelected() && !activePathBrowseReady();
+  const agentRetired = activeAgent && getAgentState(activeAgent) === 'retired';
 
   taskTypeButtons.forEach(button => {
     button.disabled = isBusy || interactiveMode;
@@ -79,9 +132,9 @@ function setQueueBusy(isBusy, message) {
   if (taskTypeButton) taskTypeButton.disabled = isBusy || interactiveMode;
   if (isBusy || interactiveMode) closeTaskTypeMenu();
 
-  $('send-btn').disabled = isBusy || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
-  $('choose-file-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting;
-  $('browse-path-btn').disabled = isBusy || !activeAgentID || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
+  $('send-btn').disabled = isBusy || agentRetired || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
+  $('choose-file-btn').disabled = isBusy || agentRetired || !activeAgentID || pathBrowserWaiting;
+  $('browse-path-btn').disabled = isBusy || agentRetired || !activeAgentID || pathBrowserWaiting || (selectedTaskType === 'upload' && !pendingUploadFile);
   $('cancel-task-select').disabled = isBusy;
   $('cancel-task-btn').disabled = isBusy;
   $('clear-btn').disabled = isBusy;
@@ -91,13 +144,117 @@ function setQueueBusy(isBusy, message) {
   if (interactiveMode) {
     $('task-input').disabled = isBusy || !interactiveReady;
   } else {
-    $('task-input').disabled = isBusy || !TASK_TYPES[selectedTaskType].requiresPayload || pathBrowserWaiting;
+    $('task-input').disabled = isBusy || agentRetired || !TASK_TYPES[selectedTaskType].requiresPayload || pathBrowserWaiting;
   }
 
   if (isBusy) setTaskStatus(message || 'Submitting task...', 'status-busy');
   else updateTaskContextStatus();
+  updateComposerReadiness();
+  updateTaskTargetUI();
+}
 
-  renderAgentList();
+function runComposerTask() {
+  if (!interactiveMode && taskTargetMode === 'selected') {
+    sendBulkTask();
+    return;
+  }
+  sendTask();
+}
+
+function setTaskTargetMode(mode) {
+  const next = mode === 'selected' ? 'selected' : 'current';
+  if (next === 'selected' && !BULK_TASK_TYPES.has(selectedTaskType)) return;
+  taskTargetMode = next;
+  if (next === 'selected' && !bulkSelectionMode) {
+    bulkSelectionMode = true;
+    renderAgentList();
+  } else if (next === 'current' && bulkSelectionMode) {
+    bulkSelectionMode = false;
+    renderAgentList();
+  }
+  updateBulkSelectionUI();
+  updateComposerReadiness();
+  if (next === 'selected' && selectedAgents().length === 0) {
+    setTaskStatus('Select one or more agents in the sidebar.', 'status-warn');
+  } else {
+    updateTaskContextStatus();
+  }
+}
+
+function updateTaskTargetUI() {
+  const current = $('target-current-btn');
+  const selected = $('target-selected-btn');
+  const selectedCount = selectedAgents().length;
+  const bulkAllowed = BULK_TASK_TYPES.has(selectedTaskType);
+  current.classList.toggle('active', taskTargetMode === 'current');
+  current.setAttribute('aria-pressed', taskTargetMode === 'current' ? 'true' : 'false');
+  selected.classList.toggle('active', taskTargetMode === 'selected');
+  selected.setAttribute('aria-pressed', taskTargetMode === 'selected' ? 'true' : 'false');
+  selected.textContent = 'Selected agents (' + selectedCount + ')';
+  current.disabled = taskRequestInFlight || interactiveMode;
+  selected.disabled = taskRequestInFlight || interactiveMode || !bulkAllowed;
+  selected.title = bulkAllowed
+    ? 'Run this action on the agents selected in the sidebar'
+    : 'This action can only run on one agent at a time';
+}
+
+function composerActionDescription(type, agentName) {
+  const target = agentName || 'the selected agent';
+  const descriptions = {
+    shell: 'Run a shell command on ' + target + '.',
+    ps: 'List running processes on ' + target + '.',
+    screenshot: 'Capture a screenshot from ' + target + '.',
+    snapshot: 'Collect host information from ' + target + '.',
+    persistence: 'Inspect persistence locations on ' + target + '.',
+    peas: 'Run the PEAS assessment on ' + target + '.',
+    download: 'Download a remote file from ' + target + '.',
+    upload: 'Upload a local file to ' + target + '.',
+    sleep: 'Update the beacon interval for ' + target + '.',
+    kill: 'Terminate ' + target + ' after confirmation.',
+    interactive: 'Start an interactive shell on ' + target + '.',
+  };
+  return descriptions[type] || 'Queue this action for ' + target + '.';
+}
+
+function updateComposerReadiness() {
+  const target = $('composer-target');
+  const shortcut = $('composer-shortcut');
+  if (!target || !shortcut) return;
+
+  const config = TASK_TYPES[selectedTaskType];
+  const hasAgent = Boolean(activeAgentID && activeAgent);
+  const state = hasAgent ? getAgentState(activeAgent) : '';
+  const pathWaiting = pathBrowserTaskSelected() && !activePathBrowseReady();
+  const uploadMissing = selectedTaskType === 'upload' && !pendingUploadFile;
+  const payloadMissing = Boolean(
+    config.requiresPayload &&
+    selectedTaskType !== 'upload' &&
+    !$('task-input').value.trim()
+  );
+
+  const selectedCount = selectedAgents().length;
+  const bulkTarget = taskTargetMode === 'selected';
+  target.textContent = bulkTarget
+    ? selectedCount
+      ? composerActionDescription(selectedTaskType, selectedCount + ' selected agent' + (selectedCount === 1 ? '' : 's'))
+      : 'Select agents in the sidebar to run this action.'
+    : hasAgent
+      ? composerActionDescription(selectedTaskType, agentDisplayName(activeAgent))
+      : 'Select an agent to run this action.';
+  shortcut.hidden = !hasAgent || interactiveMode || !config.requiresPayload;
+  if (!interactiveMode) {
+    $('send-btn').textContent = bulkTarget
+      ? selectedCount
+        ? 'Run on ' + selectedCount + ' agent' + (selectedCount === 1 ? '' : 's')
+        : 'Select agents to run'
+      : selectedTaskType === 'kill' && killConfirmationActive()
+        ? 'Confirm Kill'
+        : config.buttonLabel;
+    $('send-btn').disabled = taskRequestInFlight || !hasAgent || (!bulkTarget && state === 'retired') ||
+      (bulkTarget && selectedCount === 0) ||
+      pathWaiting || uploadMissing || payloadMissing;
+  }
+  updateTaskTargetUI();
 }
 
 function initTaskTypeMenu() {
@@ -153,6 +310,9 @@ function initTaskTypeMenu() {
 
       const title = document.createElement('span');
       title.className = 'task-type-option-title';
+      const icon = document.createElement('span');
+      icon.className = 'task-type-option-icon';
+      icon.appendChild(createTaskIcon(option.value));
       title.textContent = option.textContent;
       const detail = document.createElement('span');
       detail.className = 'task-type-option-detail';
@@ -160,6 +320,7 @@ function initTaskTypeMenu() {
       const meta = document.createElement('span');
       meta.className = 'task-type-option-meta';
       meta.textContent = TASK_TYPES[option.value].requiresPayload ? 'Input required' : 'One click';
+      item.appendChild(icon);
       item.appendChild(title);
       item.appendChild(detail);
       item.appendChild(meta);
@@ -279,6 +440,11 @@ function syncTaskTypeMenu() {
   if (!taskTypeSelect || !taskTypeButtonLabel || !taskTypeButton) return;
   const option = taskTypeSelect.options[taskTypeSelect.selectedIndex];
   taskTypeButtonLabel.textContent = option ? option.textContent : selectedTaskType;
+  const leading = taskTypeButton.querySelector('.task-type-leading-icon');
+  if (leading) {
+    leading.textContent = '';
+    leading.appendChild(createTaskIcon(selectedTaskType));
+  }
   taskTypeOptions().forEach(item => {
     const active = item.dataset.value === selectedTaskType;
     item.setAttribute('aria-selected', active ? 'true' : 'false');
@@ -287,8 +453,15 @@ function syncTaskTypeMenu() {
 
 function setTaskType(type) {
   if (!TASK_TYPES[type]) return;
+  const previousWasPathTask = pathBrowserTaskSelected();
   saveActiveTaskDraft();
   selectedTaskType = type;
+  if (taskTargetMode === 'selected' && !BULK_TASK_TYPES.has(type)) {
+    taskTargetMode = 'current';
+    bulkSelectionMode = false;
+    renderAgentList();
+    updateBulkSelectionUI();
+  }
   pendingPathCompletion = null;
   queuedCompletionPath = '';
   clearPathCompletionTimer();
@@ -296,6 +469,9 @@ function setTaskType(type) {
   taskHistoryIndex = -1;
   if (type !== 'kill') clearKillConfirmation();
   clearTaskInputError();
+  if (previousWasPathTask && !pathBrowserTaskSelected() && activeAgentID && $('file-browser-modal').hidden) {
+    resetPathBrowserState(activeAgentID, true);
+  }
   applyTaskTypeUI();
   restoreActiveTaskDraft();
   if (pathSuggestionTaskSelected()) schedulePathCompletion();
@@ -307,44 +483,53 @@ function applyTaskTypeUI() {
   const pathTaskSelected = pathSuggestionTaskSelected();
   const pathBrowserSelected = pathBrowserTaskSelected();
   const pathBrowserWaiting = pathBrowserSelected && !activePathBrowseReady();
-  const agentOnline = activeAgent && getAgentState(activeAgent) === 'online';
+  const agentOnline = activeAgent && getAgentState(activeAgent) === 'on_schedule';
+  const agentRetired = activeAgent && getAgentState(activeAgent) === 'retired';
 
   taskTypeButtons.forEach(button => {
     const active = button.dataset.taskType === selectedTaskType;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
-    button.disabled = taskRequestInFlight;
+    button.disabled = taskRequestInFlight || agentRetired;
   });
   if (taskTypeSelect) {
     taskTypeSelect.value = selectedTaskType;
-    taskTypeSelect.disabled = taskRequestInFlight;
+    taskTypeSelect.disabled = taskRequestInFlight || agentRetired;
   }
   if (taskTypeButton) {
-    taskTypeButton.disabled = taskRequestInFlight;
+    taskTypeButton.disabled = taskRequestInFlight || agentRetired;
     syncTaskTypeMenu();
   }
 
   if (interactiveMode) {
     if (taskTypeSelect) taskTypeSelect.hidden = true;
     if (taskTypeMenu) taskTypeMenu.hidden = true;
+    $('send-action-group').hidden = true;
+    $('task-target-toggle').hidden = true;
     closeTaskTypeMenu();
     document.querySelector('.command-line').hidden = false;
     hidePathSuggestions();
     updateBulkTaskButton();
+    updateComposerReadiness();
+    updateTaskTargetUI();
     return;
   }
 
+  $('send-action-group').hidden = false;
+  $('task-target-toggle').hidden = false;
   if (taskTypeSelect) taskTypeSelect.hidden = false;
   if (taskTypeMenu) taskTypeMenu.hidden = false;
   document.querySelector('.command-line').hidden = !config.requiresPayload;
   $('task-help').classList.remove('error-copy');
   $('composer-note').classList.remove('error-note');
   $('task-help').textContent = config.help;
-  $('composer-note').textContent = pathBrowserSelected
+  $('composer-note').textContent = agentRetired
+    ? 'Restore this retired agent before queueing additional work.'
+    : pathBrowserSelected
     ? pathBrowserComposerNote(agentOnline)
     : config.note;
   $('task-input').classList.remove('input-error');
-  $('task-input').disabled = taskRequestInFlight || !config.requiresPayload || pathBrowserWaiting;
+  $('task-input').disabled = taskRequestInFlight || agentRetired || !config.requiresPayload || pathBrowserWaiting;
   $('task-input').placeholder = pathTaskSelected
     ? pathBrowserPlaceholder(agentOnline)
     : config.placeholder;
@@ -360,16 +545,16 @@ function applyTaskTypeUI() {
     ? 'Confirm Kill'
     : config.buttonLabel;
   $('send-btn').hidden = false;
-  $('send-btn').disabled = taskRequestInFlight || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
-  $('send-btn').classList.toggle('warn-button', selectedTaskType === 'interactive');
+  $('send-btn').disabled = taskRequestInFlight || agentRetired || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
+  $('send-btn').classList.remove('warn-button');
   $('send-btn').classList.toggle('danger-button', selectedTaskType === 'kill');
   $('exit-interactive-btn').hidden = true;
   $('interactive-prompt').hidden = true;
 
   $('choose-file-btn').hidden = !uploadSelected;
-  $('choose-file-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting;
+  $('choose-file-btn').disabled = taskRequestInFlight || agentRetired || !activeAgentID || pathBrowserWaiting;
   $('browse-path-btn').hidden = !(uploadSelected || downloadSelected);
-  $('browse-path-btn').disabled = taskRequestInFlight || !activeAgentID || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
+  $('browse-path-btn').disabled = taskRequestInFlight || agentRetired || !activeAgentID || pathBrowserWaiting || (uploadSelected && !pendingUploadFile);
   $('browse-path-btn').title = uploadSelected && !pendingUploadFile
     ? 'Choose a local file before browsing for an upload destination'
     : downloadSelected
@@ -385,6 +570,8 @@ function applyTaskTypeUI() {
   if (pathBrowserSelected && agentOnline) ensurePathBrowserForAgent(activeAgent);
 
   updateTaskContextStatus();
+  updateComposerReadiness();
+  updateTaskTargetUI();
 }
 
 function updateUploadFilenameLabel() {
@@ -435,6 +622,7 @@ function restoreActiveTaskDraft() {
   $('task-input').value = taskDrafts.get(key) || '';
   clearTaskInputError();
   if (pathSuggestionTaskSelected()) schedulePathCompletion();
+  updateComposerReadiness();
 }
 
 function clearActiveTaskDraft(taskType) {
@@ -443,15 +631,15 @@ function clearActiveTaskDraft(taskType) {
 }
 
 function pathBrowserComposerNote(agentOnline) {
-  if (!agentOnline) return 'Path browser starts automatically once the selected session is online.';
+  if (!agentOnline) return 'Path browser starts automatically once the selected agent is active.';
   if (!activePathBrowseReady()) {
-    return 'Preparing the remote path browser. Input unlocks when the session confirms fast browsing.';
+    return 'Preparing the remote path browser. Input unlocks when the agent confirms fast browsing.';
   }
   return TASK_TYPES[selectedTaskType].note;
 }
 
 function pathBrowserPlaceholder(agentOnline) {
-  if (!agentOnline) return 'Waiting for online session...';
+  if (!agentOnline) return 'Waiting for the agent to check in...';
   if (!activePathBrowseReady()) return 'Preparing remote path browser...';
   return TASK_TYPES[selectedTaskType].placeholder;
 }
@@ -486,25 +674,6 @@ function clearPathCompletionTimer() {
   pathCompletionTimer = null;
 }
 
-function warmOnlinePathBrowsers(agents) {
-  const liveIDs = new Set();
-
-  for (const agent of agents) {
-    if (!agent || !agent.id) continue;
-    liveIDs.add(agent.id);
-
-    if (getAgentState(agent) === 'online') {
-      ensurePathBrowserForAgent(agent);
-    } else {
-      markPathBrowserOffline(agent.id);
-    }
-  }
-
-  for (const agentID of Array.from(pathBrowseStates.keys())) {
-    if (!liveIDs.has(agentID)) resetPathBrowserState(agentID, false);
-  }
-}
-
 function getPathBrowseState(agentID, create) {
   if (!agentID) return null;
   let state = pathBrowseStates.get(agentID);
@@ -521,7 +690,7 @@ function getPathBrowseState(agentID, create) {
 }
 
 function activePathBrowseReady() {
-  if (!activeAgentID || !activeAgent || getAgentState(activeAgent) !== 'online') return false;
+  if (!activeAgentID || !activeAgent || getAgentState(activeAgent) !== 'on_schedule') return false;
   const state = getPathBrowseState(activeAgentID, false);
   return pathBrowseStateReady(state);
 }
@@ -531,8 +700,8 @@ function pathBrowseStateReady(state) {
 }
 
 function ensurePathBrowserForAgent(agent) {
-  if (!token || !agent || !agent.id || interactiveMode) return;
-  if (getAgentState(agent) !== 'online') {
+  if (!token || !agent || !agent.id || interactiveMode || !pathBrowserLeaseActive(agent.id)) return;
+  if (getAgentState(agent) !== 'on_schedule') {
     markPathBrowserOffline(agent.id);
     return;
   }
@@ -549,7 +718,7 @@ async function queuePathBrowseStart(agentID, isRenewal) {
   if (!token || !agentID || state.startTaskID) return;
 
   const agent = allAgents.find(item => item.id === agentID) || (agentID === activeAgentID ? activeAgent : null);
-  if (!agent || getAgentState(agent) !== 'online') {
+  if (!agent || getAgentState(agent) !== 'on_schedule' || !pathBrowserLeaseActive(agentID)) {
     markPathBrowserOffline(agentID);
     return;
   }
@@ -634,10 +803,15 @@ function schedulePathBrowseRenewal(agentID) {
   state.renewTimer = window.setTimeout(() => {
     state.renewTimer = null;
     const agent = allAgents.find(item => item.id === agentID);
-    if (state.ready && agent && getAgentState(agent) === 'online') {
+    if (state.ready && agent && getAgentState(agent) === 'on_schedule' && pathBrowserLeaseActive(agentID)) {
       queuePathBrowseStart(agentID, true);
     }
   }, PATH_BROWSE_RENEW_MS);
+}
+
+function pathBrowserLeaseActive(agentID) {
+  if (!agentID || agentID !== activeAgentID) return false;
+  return pathBrowserTaskSelected() || !$('file-browser-modal').hidden;
 }
 
 function clearPathBrowseRenewal(agentID) {
@@ -762,7 +936,7 @@ function handlePathCompletionOutput(output) {
   }
 
   const items = Array.isArray(result.items) ? result.items : [];
-  renderPathSuggestions(pending.input, items, '');
+	renderPathSuggestions(pending.input, items, result.more ? 'Showing the first 200 matching paths. Refine the prefix for more.' : '');
 }
 
 function showPathSuggestionsLoading(path) {
@@ -936,6 +1110,10 @@ async function clearOutputHistory(agentID) {
 
 async function sendTask() {
   if (!activeAgentID || taskRequestInFlight) return;
+  if (activeAgent && getAgentState(activeAgent) === 'retired') {
+    setTaskStatus('Restore this retired agent before queueing work.', 'status-warn');
+    return;
+  }
 
   if (interactiveMode) {
     await sendInteractiveCommand();
@@ -976,13 +1154,19 @@ async function sendTask() {
   try {
     const data = await submitTask(targetAgentID, task);
     if (!data) return;
+    rememberTaskMetadata(data.task_id, { ...task, queued_at: new Date().toISOString() }, targetAgentID);
     recordTaskHistory(task.type, task.payload);
     if (task.type === 'download') {
       downloadTasks.set(data.task_id, {
+        taskID: data.task_id,
+        agentID: targetAgentID,
+        kind: 'file',
         path: task.payload,
+        paths: [task.payload],
         filename: basenameFromPath(task.payload),
         status: 'progress',
         artifactKey: '',
+        progress: null,
       });
     }
     $('task-input').value = '';
@@ -1002,7 +1186,7 @@ async function sendBulkTask() {
   const targets = selectedAgents();
   if (!targets.length || taskRequestInFlight || interactiveMode) return;
   if (!BULK_TASK_TYPES.has(selectedTaskType)) {
-    setTaskStatus('This action must be queued one session at a time.', 'status-warn');
+    setTaskStatus('This action must be queued one agent at a time.', 'status-warn');
     updateBulkTaskButton();
     return;
   }
@@ -1013,7 +1197,7 @@ async function sendBulkTask() {
   clearKillConfirmation();
   hidePathSuggestions();
   const restoreFocus = shouldPersistCommandFocus() && TASK_TYPES[selectedTaskType].requiresPayload;
-  setQueueBusy(true, 'Queueing ' + task.type + ' for ' + targets.length + ' sessions...');
+  setQueueBusy(true, 'Queueing ' + task.type + ' for ' + targets.length + ' agents...');
 
   let queued = 0;
   let failed = 0;
@@ -1022,6 +1206,7 @@ async function sendBulkTask() {
     for (const agent of targets) {
       const data = await submitTask(agent.id, task);
       if (data) {
+        rememberTaskMetadata(data.task_id, { ...task, queued_at: new Date().toISOString() }, agent.id);
         queued++;
         queuedIDs.push(agent.hostname || agent.id.slice(0, 8));
       } else {
@@ -1033,10 +1218,10 @@ async function sendBulkTask() {
       $('task-input').value = '';
       clearActiveTaskDraft(task.type);
       clearTaskInputError();
-      appendOutput('[>] bulk ' + task.type + ' queued for ' + queued + ' session' + (queued === 1 ? '' : 's') + ': ' + queuedIDs.join(', '), '', activeAgentID, 'operator');
+      appendOutput('[>] bulk ' + task.type + ' queued for ' + queued + ' agent' + (queued === 1 ? '' : 's') + ': ' + queuedIDs.join(', '), '', activeAgentID, 'operator');
     }
     if (failed > 0) {
-      appendOutput('[-] bulk ' + task.type + ' failed for ' + failed + ' session' + (failed === 1 ? '' : 's'), '', activeAgentID, 'error');
+      appendOutput('[-] bulk ' + task.type + ' failed for ' + failed + ' agent' + (failed === 1 ? '' : 's'), '', activeAgentID, 'error');
     }
     refreshActiveAgent();
   } catch (err) {
@@ -1080,12 +1265,14 @@ async function deleteQueuedTask(taskID) {
 }
 
 async function queueCancelTask(taskID) {
-  if (!activeAgentID || !taskID || taskRequestInFlight) return;
+  if (!activeAgentID || !taskID || taskRequestInFlight) return false;
   const targetAgentID = activeAgentID;
+  let queued = false;
   setQueueBusy(true, 'Queueing cancellation request...');
   try {
     const data = await submitTask(targetAgentID, { type: 'cancel', payload: taskID });
     if (data) {
+      queued = true;
       appendOutput('[>] cancel ' + taskID.slice(0, 8) + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
       await refreshActiveAgent();
     }
@@ -1095,6 +1282,7 @@ async function queueCancelTask(taskID) {
     setQueueBusy(false, '');
     updateCancellationControls();
   }
+  return queued;
 }
 
 async function queueInteractiveStart() {
@@ -1219,7 +1407,8 @@ function enterInteractiveMode(agentID) {
   $('output').classList.add('interactive-active');
   document.querySelector('.command-line').hidden = false;
   if (taskTypeSelect) taskTypeSelect.hidden = true;
-  $('send-btn').hidden = true;
+  $('send-action-group').hidden = true;
+  $('task-target-toggle').hidden = true;
   $('choose-file-btn').hidden = true;
   $('browse-path-btn').hidden = true;
   $('upload-filename-label').hidden = true;
@@ -1236,7 +1425,7 @@ function enterInteractiveMode(agentID) {
 
   $('task-input').value = '';
   $('task-input').disabled = true;
-  $('task-input').placeholder = 'Waiting for session...';
+  $('task-input').placeholder = 'Waiting for agent...';
 
   const banner = document.createElement('div');
   banner.className = 'interactive-banner';
@@ -1377,8 +1566,8 @@ async function queueUploadTask() {
     return;
   }
   if (activeAgent && activeAgent.transport === 'dns' && pendingUploadFile.size > 6 * 1024) {
-    setTaskInputError('This session last checked in over DNS. Large uploads require HTTPS transport.');
-    appendOutput('[-] upload requires HTTPS transport for files larger than a few KB; reconnect the session over HTTPS and try again.', '', activeAgentID);
+    setTaskInputError('This agent last checked in over DNS. Large uploads require HTTPS transport.');
+    appendOutput('[-] upload requires HTTPS transport for files larger than a few KB; reconnect the agent over HTTPS and try again.', '', activeAgentID);
     return;
   }
 
@@ -1401,6 +1590,7 @@ async function queueUploadTask() {
     try {
       const data = await submitTask(targetAgentID, { type: 'upload', payload });
       if (!data) return;
+      rememberTaskMetadata(data.task_id, { type: 'upload', payload: remotePath, queued_at: new Date().toISOString() }, targetAgentID);
       appendOutput('[>] upload ' + file.name + ' -> ' + remotePath + '  (id: ' + data.task_id.slice(0, 8) + ')', '', targetAgentID);
       pendingUploadFile = null;
       $('task-input').value = '';

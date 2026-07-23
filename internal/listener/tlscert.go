@@ -102,3 +102,15 @@ func NewTLSConfig(cert tls.Certificate) *tls.Config {
 		MinVersion:   tls.VersionTLS13,
 	}
 }
+
+// CertificateExpiry returns the leaf certificate's expiration time.
+func CertificateExpiry(cert tls.Certificate) (time.Time, error) {
+	if len(cert.Certificate) == 0 {
+		return time.Time{}, errors.New("empty certificate chain")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return time.Time{}, err
+	}
+	return leaf.NotAfter, nil
+}

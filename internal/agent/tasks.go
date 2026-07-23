@@ -19,11 +19,15 @@ import (
 )
 
 const (
-	shellTimeout          = 60 * time.Second
-	maxShellOutputBytes   = 512 * 1024       // 512 KB
-	maxDownloadBytes      = 50 * 1024 * 1024 // 50 MB
-	maxUploadBytes        = 50 * 1024 * 1024 // 50 MB
-	downloadProgressEvery = 30 * time.Second
+	shellTimeout           = 60 * time.Second
+	maxShellOutputBytes    = 512 * 1024       // 512 KB
+	maxDownloadBytes       = 50 * 1024 * 1024 // 50 MB
+	maxUploadBytes         = protocol.MaxUploadFileBytes
+	downloadProgressEvery  = time.Second
+	maxPathCompletionItems = 200
+	defaultDirectoryPage   = 250
+	maxDirectoryPage       = 500
+	maxDirectoryOffset     = 1_000_000
 )
 
 // ptyShell is the persistent shell session used during interactive mode.
@@ -44,6 +48,8 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		}
 	case "download":
 		return startDownloadTask(t.ID, t.Payload)
+	case "download_archive":
+		return startArchiveTask(t.ID, t.Payload)
 	case "ps":
 		output, taskErr = listProcesses()
 	case "screenshot":
@@ -90,7 +96,13 @@ func executeTask(t *protocol.Task) *protocol.TaskResult {
 		taskErr = fmt.Sprintf("unknown task type: %q", t.Type)
 	}
 
-	return &protocol.TaskResult{TaskID: t.ID, Type: t.Type, Output: output, Error: taskErr}
+	result := &protocol.TaskResult{TaskID: t.ID, Type: t.Type, Output: output}
+	if t.Type == "shell" {
+		result.Warning = taskErr
+	} else {
+		result.Error = taskErr
+	}
+	return result
 }
 
 type pathCompletionResult struct {
@@ -114,11 +126,16 @@ func runShell(cmd string) (string, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shellTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, shell, flag, cmd).CombinedOutput()
-	if len(out) > maxShellOutputBytes {
-		out = out[:maxShellOutputBytes]
+	command := exec.CommandContext(ctx, shell, flag, cmd)
+	var out cappedBuffer
+	out.limit = maxShellOutputBytes
+	command.Stdout = &out
+	command.Stderr = &out
+	err := command.Run()
+	output := out.buf.String()
+	if out.truncated {
+		output += fmt.Sprintf("\n[output truncated at %d bytes]", maxShellOutputBytes)
 	}
-	output := string(out)
 	if err != nil {
 		return output, shellCommandError(originalCmd, output, err.Error())
 	}
@@ -191,8 +208,8 @@ func startDownloadTask(taskID, path string) *protocol.TaskResult {
 	go func() {
 		defer backgroundTasks.Delete(taskID)
 		defer atomic.AddInt32(&backgroundTaskCount, -1)
-		output, taskErr := downloadFileWithProgress(ctx, path, func(message string) {
-			queueAsyncTypedProgress(taskID, "download_progress", "download", message)
+		output, taskErr := downloadFileWithProgress(ctx, path, func(progress transferProgress) {
+			queueAsyncTypedProgress(taskID, "download_progress", "download", encodeTransferProgress(progress))
 		})
 		queueAsyncResult(&protocol.TaskResult{TaskID: taskID, Type: "download", Output: output, Error: taskErr})
 	}()
@@ -200,7 +217,12 @@ func startDownloadTask(taskID, path string) *protocol.TaskResult {
 	return &protocol.TaskResult{
 		TaskID: taskID + "-download-started",
 		Type:   "download_progress",
-		Output: "[download] reading " + path,
+		Output: encodeTransferProgress(transferProgress{
+			Kind:    "file",
+			Phase:   "preparing",
+			Path:    path,
+			Message: "Preparing file download",
+		}),
 	}
 }
 
@@ -211,7 +233,7 @@ func downloadFile(path string) (string, string) {
 // downloadFileWithProgress reads a file from the agent filesystem and returns
 // its base64-encoded contents. Files larger than maxDownloadBytes are rejected
 // to prevent memory exhaustion.
-func downloadFileWithProgress(ctx context.Context, path string, progress func(string)) (string, string) {
+func downloadFileWithProgress(ctx context.Context, path string, progress func(transferProgress)) (string, string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err.Error()
@@ -241,10 +263,20 @@ func downloadFileWithProgress(ctx context.Context, path string, progress func(st
 		}
 		n, err := file.Read(tmp)
 		if n > 0 {
+			if read+int64(n) > maxDownloadBytes {
+				return "", fmt.Sprintf("file grew beyond maximum size of %d bytes", maxDownloadBytes)
+			}
 			read += int64(n)
 			buf.Write(tmp[:n]) //nolint:errcheck
 			if progress != nil && time.Since(lastProgress) >= downloadProgressEvery {
-				progress(fmt.Sprintf("[download] read %s of %s from %s", formatByteCount(read), formatByteCount(info.Size()), path))
+				progress(transferProgress{
+					Kind:       "file",
+					Phase:      "transferring",
+					Path:       path,
+					Bytes:      read,
+					TotalBytes: info.Size(),
+					Message:    fmt.Sprintf("Read %s of %s", formatByteCount(read), formatByteCount(info.Size())),
+				})
 				lastProgress = time.Now()
 			}
 		}
@@ -256,7 +288,14 @@ func downloadFileWithProgress(ctx context.Context, path string, progress func(st
 		}
 	}
 	if progress != nil {
-		progress(fmt.Sprintf("[download] read complete: %s from %s", formatByteCount(read), path))
+		progress(transferProgress{
+			Kind:       "file",
+			Phase:      "ready",
+			Path:       path,
+			Bytes:      read,
+			TotalBytes: info.Size(),
+			Message:    fmt.Sprintf("File ready: %s", formatByteCount(read)),
+		})
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), ""
 }
@@ -277,26 +316,45 @@ func formatByteCount(value int64) string {
 func completePath(input string) (string, string) {
 	input = strings.TrimSpace(input)
 	dir, prefix := splitCompletionInput(input)
-	entries, err := os.ReadDir(dir)
+	handle, err := os.Open(dir)
 	if err != nil {
 		return "", err.Error()
 	}
+	defer handle.Close() //nolint:errcheck
 
 	var items []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
+	more := false
+	for !more {
+		entries, readErr := handle.ReadDir(128)
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			item := joinCompletionPath(dir, name, entry.IsDir())
+			items = append(items, item)
+			if len(items) > maxPathCompletionItems {
+				more = true
+				break
+			}
 		}
-		item := joinCompletionPath(dir, name, entry.IsDir())
-		items = append(items, item)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", readErr.Error()
+		}
 	}
 	sort.Strings(items)
+	if len(items) > maxPathCompletionItems {
+		items = items[:maxPathCompletionItems]
+	}
 
 	result := pathCompletionResult{
 		Input:  input,
 		Common: longestCommonPrefix(items),
 		Items:  items,
+		More:   more,
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {

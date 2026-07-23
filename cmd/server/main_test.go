@@ -1,10 +1,17 @@
 package main
 
 import (
-	"net"
+	"bytes"
+	"context"
+	"encoding/hex"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/aelder202/sable/internal/listener"
+	"github.com/aelder202/sable/internal/tlspin"
 )
 
 func TestLoadOperatorPasswordFromEnv(t *testing.T) {
@@ -15,6 +22,63 @@ func TestLoadOperatorPasswordFromEnv(t *testing.T) {
 	}
 	if password != "env-secret" {
 		t.Fatalf("unexpected password %q", password)
+	}
+}
+
+func TestLoadStateKeySupportsRawAndHex(t *testing.T) {
+	dir := t.TempDir()
+	raw := bytes.Repeat([]byte{0x5a}, 32)
+	rawPath := filepath.Join(dir, "raw.key")
+	if err := os.WriteFile(rawPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadOrCreateStateKey(rawPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("raw state key: got=%x err=%v", got, err)
+	}
+	hexPath := filepath.Join(dir, "hex.key")
+	if err := os.WriteFile(hexPath, []byte(hex.EncodeToString(raw)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = loadOrCreateStateKey(hexPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("hex state key: got=%x err=%v", got, err)
+	}
+	badPath := filepath.Join(dir, "bad.key")
+	if err := os.WriteFile(badPath, []byte("too-short"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateStateKey(badPath); err == nil {
+		t.Fatal("invalid state key should be rejected")
+	}
+}
+
+func TestLoadOrCreateStateKeyCreatesRestrictedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".sable", "state.key")
+	key, err := loadOrCreateStateKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(key) != 32 {
+		t.Fatalf("state key length = %d", len(key))
+	}
+	reloaded, err := loadOrCreateStateKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(key, reloaded) {
+		t.Fatal("state key changed after reload")
+	}
+}
+
+func TestNormalizeStateKeyFile(t *testing.T) {
+	for _, value := range []string{"", "none", "off", "disabled", " OFF "} {
+		if got := normalizeStateKeyFile(value); got != "" {
+			t.Fatalf("normalizeStateKeyFile(%q) = %q", value, got)
+		}
+	}
+	if got := normalizeStateKeyFile(".sable/state.key"); got != ".sable/state.key" {
+		t.Fatalf("unexpected normalized key path %q", got)
 	}
 }
 
@@ -154,16 +218,55 @@ func TestNormalizeDNSDomain(t *testing.T) {
 }
 
 func TestStartDebugServerRejectsNonLoopback(t *testing.T) {
-	// Validation is covered through the helper logic in startDebugServer by using
-	// a malformed/non-loopback address in a subprocess would be excessive here;
-	// keep this as a guard for the loopback predicate behavior it relies on.
-	allowed := []string{"127.0.0.1", "::1", "localhost"}
-	for _, host := range allowed {
-		if host != "localhost" {
-			ip := net.ParseIP(host)
-			if ip == nil || !ip.IsLoopback() {
-				t.Fatalf("expected %s to be loopback", host)
-			}
-		}
+	if _, _, err := createDebugServer("0.0.0.0:0", nil, "secret"); err == nil {
+		t.Fatal("expected non-loopback debug address to be rejected")
+	}
+}
+
+func TestDebugServerRequiresAuthenticationOverPinnedTLS(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+	cert, _, err := listener.LoadOrCreateCert(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, ln, err := createDebugServer("127.0.0.1:0", listener.NewTLSConfig(cert), "debug-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(ln) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	})
+
+	client, err := tlspin.NewClientFromCert(certPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "https://" + ln.Addr().String() + "/debug/pprof/"
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer debug-secret")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }

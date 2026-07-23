@@ -28,6 +28,28 @@ func TestWriteFileCreatesRestrictedFile(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomicallyReplacesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret.txt")
+	if err := securefile.WriteFile(path, []byte("old-secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.WriteFile(path, []byte("new-secret")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new-secret" {
+		t.Fatalf("replacement data = %q", data)
+	}
+	if warning, err := securefile.PermissionWarning(path); err != nil {
+		t.Fatal(err)
+	} else if warning != "" {
+		t.Fatalf("replacement permissions are broad: %s", warning)
+	}
+}
+
 func TestPermissionWarningFlagsBroadUnixMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix mode bits do not model Windows ACLs")

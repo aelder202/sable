@@ -95,8 +95,8 @@ func (s *shellSession) initShell() error {
 	ch := make(chan res, 1)
 	go func() {
 		for {
-			line, err := s.reader.ReadString('\n')
-			if strings.TrimRight(line, "\r\n") == "__C2INIT__" {
+			line, truncated, err := readBoundedShellLine(s.reader, 4096)
+			if !truncated && strings.TrimRight(line, "\r\n") == "__C2INIT__" {
 				ch <- res{nil}
 				return
 			}
@@ -142,21 +142,35 @@ func (s *shellSession) run(command string) (string, bool) {
 
 	go func() {
 		var sb strings.Builder
+		truncatedOutput := false
 		for {
-			line, err := s.reader.ReadString('\n')
+			line, truncatedLine, err := readBoundedShellLine(s.reader, maxShellOutputBytes)
 			if line != "" {
 				trimmed := strings.TrimRight(line, "\r\n")
-				if trimmed == marker {
-					ch <- readResult{sb.String(), true}
+				if !truncatedLine && trimmed == marker {
+					output := sb.String()
+					if truncatedOutput {
+						output += fmt.Sprintf("\n[output truncated at %d bytes]", maxShellOutputBytes)
+					}
+					ch <- readResult{output, true}
 					return
 				}
 				// Skip stale sentinels left by a previously timed-out run().
 				if isC2Sentinel(trimmed) {
 					continue
 				}
-				if sb.Len() < maxShellOutputBytes {
-					sb.WriteString(line)
+				remaining := maxShellOutputBytes - sb.Len()
+				if remaining > 0 {
+					if len(line) > remaining {
+						sb.WriteString(line[:remaining])
+						truncatedOutput = true
+					} else {
+						sb.WriteString(line)
+					}
+				} else {
+					truncatedOutput = true
 				}
+				truncatedOutput = truncatedOutput || truncatedLine
 			}
 			if err != nil {
 				ch <- readResult{sb.String(), false}
@@ -173,6 +187,34 @@ func (s *shellSession) run(command string) (string, bool) {
 		// then exits cleanly. ch is buffered so the goroutine never leaks.
 		s.close()
 		return "", false
+	}
+}
+
+// readBoundedShellLine drains one logical line without allocating in
+// proportion to attacker-controlled command output. The returned string holds
+// at most limit bytes; truncated reports that the remainder was discarded.
+func readBoundedShellLine(reader *bufio.Reader, limit int) (string, bool, error) {
+	var out strings.Builder
+	truncated := false
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			remaining := limit - out.Len()
+			if remaining > 0 {
+				if len(fragment) > remaining {
+					out.Write(fragment[:remaining])
+					truncated = true
+				} else {
+					out.Write(fragment)
+				}
+			} else {
+				truncated = true
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return out.String(), truncated, err
 	}
 }
 

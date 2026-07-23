@@ -2,12 +2,13 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/aelder202/sable/internal/session"
 )
+
+const sseWriteTimeout = 5 * time.Second
 
 // terminalStreamHandler streams task outputs as Server-Sent Events for a given agent.
 // The client connects once and receives a push notification for each new output
@@ -20,8 +21,7 @@ func terminalStreamHandler(store *session.Store, agentID string) http.HandlerFun
 			return
 		}
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
+		if _, ok := w.(http.Flusher); !ok {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
@@ -47,33 +47,55 @@ func terminalStreamHandler(store *session.Store, agentID string) http.HandlerFun
 		sent := make(map[string]bool)
 
 		// Flush existing outputs immediately so the client sees history.
-		flushPending(w, flusher, store, agentID, sent)
+		if err := flushPending(w, rc, store, agentID, sent); err != nil {
+			return
+		}
 
 		for {
 			select {
 			case <-r.Context().Done():
 				return
 			case <-ticker.C:
-				fmt.Fprintf(w, ": keepalive\n\n")
-				flusher.Flush()
+				if err := writeSSE(w, rc, []byte(": keepalive\n\n")); err != nil {
+					return
+				}
 			case <-ch:
-				flushPending(w, flusher, store, agentID, sent)
+				if err := flushPending(w, rc, store, agentID, sent); err != nil {
+					return
+				}
 			}
 		}
 	}
 }
 
-func flushPending(w http.ResponseWriter, flusher http.Flusher, store *session.Store, agentID string, sent map[string]bool) {
+func flushPending(w http.ResponseWriter, rc *http.ResponseController, store *session.Store, agentID string, sent map[string]bool) error {
 	for _, o := range store.GetOutputs(agentID) {
 		if sent[o.TaskID] {
 			continue
 		}
-		sent[o.TaskID] = true
 		data, err := json.Marshal(o)
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		frame := make([]byte, 0, len(data)+8)
+		frame = append(frame, "data: "...)
+		frame = append(frame, data...)
+		frame = append(frame, '\n', '\n')
+		if err := writeSSE(w, rc, frame); err != nil {
+			return err
+		}
+		sent[o.TaskID] = true
 	}
-	flusher.Flush()
+	return nil
+}
+
+func writeSSE(w http.ResponseWriter, rc *http.ResponseController, frame []byte) error {
+	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil {
+		return err
+	}
+	defer rc.SetWriteDeadline(time.Time{}) //nolint:errcheck
+	if _, err := w.Write(frame); err != nil {
+		return err
+	}
+	return rc.Flush()
 }

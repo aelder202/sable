@@ -1,13 +1,20 @@
 package agent
 
 import (
+	"archive/zip"
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/aelder202/sable/internal/protocol"
 )
 
 func TestCompletePathReturnsDirectoryMatches(t *testing.T) {
@@ -41,6 +48,52 @@ func TestCompletePathReturnsDirectoryMatches(t *testing.T) {
 	}
 	if result.Common != filepath.Join(root, "sa") {
 		t.Fatalf("unexpected common prefix %q", result.Common)
+	}
+}
+
+func TestListDirectorySupportsBoundedPages(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 7; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("file-%02d.txt", i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request, _ := json.Marshal(directoryRequest{Path: root, Offset: 0, Limit: 3})
+	output, taskErr := listDirectory(string(request))
+	if taskErr != "" {
+		t.Fatal(taskErr)
+	}
+	var first fileBrowserResult
+	if err := json.Unmarshal([]byte(output), &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries) != 3 || !first.More || first.Offset != 0 || first.Limit != 3 {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	request, _ = json.Marshal(directoryRequest{Path: root, Offset: 3, Limit: 3})
+	output, taskErr = listDirectory(string(request))
+	if taskErr != "" {
+		t.Fatal(taskErr)
+	}
+	var second fileBrowserResult
+	if err := json.Unmarshal([]byte(output), &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Entries) != 3 || !second.More || second.Offset != 3 || second.Entries[0].Name == first.Entries[0].Name {
+		t.Fatalf("unexpected second page: %+v", second)
+	}
+}
+
+func TestReadBoundedShellLineDrainsOversizedLine(t *testing.T) {
+	input := strings.Repeat("x", 128*1024) + "\nnext\n"
+	reader := bufio.NewReaderSize(strings.NewReader(input), 1024)
+	line, truncated, err := readBoundedShellLine(reader, 64)
+	if err != nil || !truncated || len(line) != 64 {
+		t.Fatalf("unexpected bounded line: len=%d truncated=%v err=%v", len(line), truncated, err)
+	}
+	next, truncated, err := readBoundedShellLine(reader, 64)
+	if err != nil || truncated || next != "next\n" {
+		t.Fatalf("oversized line was not fully drained: %q truncated=%v err=%v", next, truncated, err)
 	}
 }
 
@@ -198,6 +251,17 @@ func TestRunShellUnknownCommandReturnsRecognizedError(t *testing.T) {
 	}
 }
 
+func TestExecuteShellTaskReturnsWarningForCommandOutcome(t *testing.T) {
+	command := "sable-command-definitely-not-recognized-warning-zzzz"
+	result := executeTask(&protocol.Task{ID: "warning-task", Type: "shell", Payload: command})
+	if result.Error != "" {
+		t.Fatalf("shell command outcome was reported as a failure: %+v", result)
+	}
+	if result.Warning != "command was not recognized by the OS: "+command {
+		t.Fatalf("unexpected shell warning: %+v", result)
+	}
+}
+
 func TestDownloadFileAllowsCurrentLimit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.bin")
 	data := []byte("download me")
@@ -234,6 +298,82 @@ func TestDownloadFileRejectsOversizedFile(t *testing.T) {
 
 	if output, taskErr := downloadFile(path); taskErr == "" {
 		t.Fatalf("expected oversized download error, got output length %d", len(output))
+	}
+}
+
+func TestArchiveDirectoryReturnsZipWithNestedFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "evidence")
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "two.txt"), []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	output, taskErr := archiveDirectory(root)
+	if taskErr != "" {
+		t.Fatalf("archiveDirectory error: %s", taskErr)
+	}
+	var result archiveArtifactResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.MIME != "application/zip" || result.Filename != "evidence.zip" || result.FileCount != 2 {
+		t.Fatalf("unexpected archive result: %#v", result)
+	}
+	data, err := base64.StdEncoding.DecodeString(result.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make(map[string]bool)
+	for _, file := range reader.File {
+		names[file.Name] = true
+	}
+	if !names["evidence/one.txt"] || !names["evidence/nested/two.txt"] {
+		t.Fatalf("archive entries = %#v", names)
+	}
+}
+
+func TestArchiveSelectionSupportsMultiplePaths(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "one.txt")
+	second := filepath.Join(root, "two.txt")
+	if err := os.WriteFile(first, []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("two"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(archiveSelectionRequest{Paths: []string{first, second}, Base: root})
+	output, taskErr := archiveDirectory(string(payload))
+	if taskErr != "" {
+		t.Fatalf("archiveDirectory selection error: %s", taskErr)
+	}
+	var result archiveArtifactResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.FileCount != 2 || !strings.HasSuffix(result.Filename, "-selection.zip") {
+		t.Fatalf("unexpected selection result: %#v", result)
+	}
+}
+
+func TestArchiveDirectoryHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if output, taskErr := archiveDirectoryWithProgress(ctx, root, nil); taskErr != "archive cancelled" || output != "" {
+		t.Fatalf("cancelled archive = %q, %q", output, taskErr)
 	}
 }
 

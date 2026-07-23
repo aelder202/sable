@@ -2,22 +2,29 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
+
+	"github.com/aelder202/sable/internal/protocol"
 )
 
 const (
 	maxSleepSeconds             = 24 * 60 * 60
-	maxRemotePath               = 4096
+	maxRemotePath               = protocol.MaxRemotePathBytes
 	maxStandardTaskPayloadBytes = 48 * 1024
-	maxUploadFileBytes          = 50 * 1024 * 1024
-	maxUploadTaskPayloadBytes   = maxRemotePath + 1 + ((maxUploadFileBytes+2)/3)*4
+	maxArchiveTaskPayloadBytes  = 512 * 1024
+	maxUploadFileBytes          = protocol.MaxUploadFileBytes
+	maxUploadTaskPayloadBytes   = protocol.MaxUploadTaskPayloadBytes
 )
 
 func maxTaskPayloadBytes(taskType string) int {
 	if taskType == "upload" {
 		return maxUploadTaskPayloadBytes
+	}
+	if taskType == "download_archive" {
+		return maxArchiveTaskPayloadBytes
 	}
 	return maxStandardTaskPayloadBytes
 }
@@ -38,6 +45,10 @@ func validateTaskRequest(taskType, payload string) error {
 		if hasDisallowedPathChars(payload) {
 			return errors.New("download path contains invalid characters")
 		}
+	case "download_archive":
+		if err := validateArchivePayload(payload); err != nil {
+			return err
+		}
 	case "complete":
 		if strings.TrimSpace(payload) == "" {
 			return errors.New("completion path required")
@@ -46,11 +57,8 @@ func validateTaskRequest(taskType, payload string) error {
 			return errors.New("completion path contains invalid characters")
 		}
 	case "ls":
-		if strings.TrimSpace(payload) == "" {
-			return errors.New("ls path required")
-		}
-		if hasDisallowedPathChars(payload) {
-			return errors.New("ls path contains invalid characters")
+		if err := validateDirectoryPayload(payload); err != nil {
+			return err
 		}
 	case "pathbrowse":
 		value := strings.TrimSpace(payload)
@@ -92,6 +100,66 @@ func validateTaskRequest(taskType, payload string) error {
 		return errors.New("invalid task type")
 	}
 
+	return nil
+}
+
+func validateArchivePayload(payload string) error {
+	value := strings.TrimSpace(payload)
+	if value == "" {
+		return errors.New("download_archive path required")
+	}
+	if !strings.HasPrefix(value, "{") {
+		if hasDisallowedPathChars(value) {
+			return errors.New("download_archive path contains invalid characters")
+		}
+		return nil
+	}
+	var request struct {
+		Paths []string `json:"paths"`
+		Base  string   `json:"base"`
+	}
+	if err := json.Unmarshal([]byte(value), &request); err != nil {
+		return errors.New("invalid download_archive selection request")
+	}
+	if len(request.Paths) == 0 || len(request.Paths) > 100 {
+		return errors.New("download_archive selection must contain between 1 and 100 paths")
+	}
+	for _, path := range request.Paths {
+		if hasDisallowedPathChars(strings.TrimSpace(path)) {
+			return errors.New("download_archive selection contains an invalid path")
+		}
+	}
+	if strings.TrimSpace(request.Base) != "" && hasDisallowedPathChars(strings.TrimSpace(request.Base)) {
+		return errors.New("download_archive base contains invalid characters")
+	}
+	return nil
+}
+
+func validateDirectoryPayload(payload string) error {
+	value := strings.TrimSpace(payload)
+	if value == "" {
+		return errors.New("ls path required")
+	}
+	if !strings.HasPrefix(value, "{") {
+		if hasDisallowedPathChars(value) {
+			return errors.New("ls path contains invalid characters")
+		}
+		return nil
+	}
+	var request struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(value), &request); err != nil {
+		return errors.New("invalid ls page request")
+	}
+	if hasDisallowedPathChars(strings.TrimSpace(request.Path)) {
+		return errors.New("ls path contains invalid characters")
+	}
+	if request.Offset < 0 || request.Offset > 1_000_000 || request.Limit < 0 || request.Limit > 500 {
+		return errors.New("invalid ls page bounds")
+	}
 	return nil
 }
 

